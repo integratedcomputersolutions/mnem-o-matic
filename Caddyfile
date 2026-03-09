@@ -1,0 +1,16 @@
+{
+    # Disable Caddy's automatic HTTPS — certificate is provided via mkcert
+    auto_https off
+}
+
+# Redirect plain HTTP to HTTPS
+:80 {
+    redir https://{host}{uri} permanent
+}
+
+# HTTPS reverse proxy
+:443 {
+    tls /etc/caddy/certs/cert.pem /etc/caddy/certs/key.pem
+
+    reverse_proxy mnemomatic:8000
+}

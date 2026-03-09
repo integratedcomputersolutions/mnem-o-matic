@@ -1,0 +1,32 @@
+services:
+  mnemomatic:
+    container_name: mnemomatic-MCP
+    build:
+      context: .
+      target: full          # use 'lite' for the smaller image (requires MNEMOMATIC_EMBED_URL)
+    # No ports exposed directly — all traffic goes through Caddy
+    # (or uncomment below for direct access: ports: ["${PORT:-8686}:8000"])
+    volumes:
+      - ./data:/data
+    environment:
+      - MNEMOMATIC_DB_PATH=/data/mnemomatic.db
+      # - MNEMOMATIC_API_KEY=  # set a strong key: openssl rand -base64 32
+      # - MNEMOMATIC_EMBED_URL=http://ollama:11434/api/embeddings   # required for lite image
+      # - MNEMOMATIC_EMBED_MODEL=nomic-embed-text                   # model name for external embedder
+      # - MNEMOMATIC_EMBED_DIM=768                                  # embedding dimension (default: 384)
+
+  caddy:
+    container_name: Caddy-MCP
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./certs:/etc/caddy/certs:ro
+      - caddy_data:/data
+    depends_on:
+      - mnemomatic
+
+volumes:
+  caddy_data:
