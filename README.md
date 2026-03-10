@@ -1,11 +1,5 @@
 <div align="center">
-
-# Mnem-O-matic
-
-*Perfect recall for imperfect machines.*
-
 <img src="assets/mnem-o-matic.png" alt="Mnem-O-matic logo" width="512" height="512">
-
 </div>
 
 Shared memory layer for LLMs. Store documents, knowledge and notes in a single portable database and access them from any MCP-compatible client — Claude Code, VS Code Copilot, ChatGPT, Mistral Vibe, custom agents, or anything that speaks MCP.
