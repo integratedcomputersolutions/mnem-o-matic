@@ -94,20 +94,7 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
             )
 
         # Extract token
-        try:
-            token = auth_header[7:].strip()  # Remove "Bearer " prefix
-        except (IndexError, AttributeError):
-            logger.warning(
-                "Unauthorized request: malformed Authorization header (%s %s from %s)",
-                method, path, client_ip,
-            )
-            return JSONResponse(
-                {
-                    "error": "Malformed Authorization header",
-                    "details": "Token is missing or empty",
-                },
-                status_code=401,
-            )
+        token = auth_header[7:].strip()  # Remove "Bearer " prefix
 
         if not token:
             logger.warning(

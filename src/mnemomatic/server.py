@@ -7,6 +7,7 @@ from importlib.metadata import version
 
 import uvicorn
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 from pydantic import ValidationError
 
 from mnemomatic.auth import BearerAuthMiddleware
@@ -21,6 +22,14 @@ PORT = int(os.environ.get("MNEMOMATIC_PORT", "8000"))
 API_KEY = os.environ.get("MNEMOMATIC_API_KEY", "")
 EMBED_URL = os.environ.get("MNEMOMATIC_EMBED_URL", "")
 EMBED_MODEL = os.environ.get("MNEMOMATIC_EMBED_MODEL", "")
+MAX_SEARCH_LIMIT = 100
+
+# Tool annotation presets
+_ANN_READ_ONLY = ToolAnnotations(readOnlyHint=True, openWorldHint=False)
+_ANN_STORE = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False)
+_ANN_UPDATE = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False)
+_ANN_DELETE = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False)
+_ANN_TAG = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False)
 
 mcp = FastMCP(
     "Mnem-O-matic",
@@ -32,9 +41,8 @@ mcp = FastMCP(
 db: Database | None = None
 _db_lock = threading.Lock()
 
-# Sentinel distinguishing "not yet initialised" from "no embedder available"
-_UNSET = object()
-_embedder_instance = _UNSET
+_embedder_instance = None   # None means "no embedder available"
+_embedder_initialized = False
 _embedder_lock = threading.Lock()
 
 
@@ -49,49 +57,49 @@ def _db() -> Database:
     return db
 
 
+def _resolve_embedder():
+    """Initialize and return the appropriate embedder, or None for FTS-only mode."""
+    if EMBED_URL:
+        try:
+            from mnemomatic.embeddings import HttpEmbedder
+            embedder = HttpEmbedder(EMBED_URL, EMBED_MODEL)
+            logger.info("Embedder: external HTTP endpoint %s (model=%r)", EMBED_URL, EMBED_MODEL)
+            _validate_embedding_dimension(embedder)
+            return embedder
+        except ValueError as e:
+            logger.error("Invalid embedder configuration: %s", e)
+        except Exception as e:
+            logger.error("Failed to initialize HTTP embedder: %s: %s", type(e).__name__, e)
+        return None
+
+    model_path = os.environ.get("MNEMOMATIC_MODEL_PATH", "/app/model/model.onnx")
+    if os.path.exists(model_path):
+        try:
+            from mnemomatic.embeddings import OnnxEmbedder
+            embedder = OnnxEmbedder()
+            logger.info("Embedder: built-in ONNX model (%s)", model_path)
+            _validate_embedding_dimension(embedder)
+            return embedder
+        except ImportError:
+            logger.warning("onnxruntime not installed — starting in FTS-only mode")
+        except (FileNotFoundError, RuntimeError) as e:
+            logger.error("Failed to load embedding model: %s", e)
+        except Exception as e:
+            logger.error("Unexpected error initializing embedder: %s: %s", type(e).__name__, e)
+    else:
+        logger.warning("No embedding model found at %s — starting in FTS-only mode", model_path)
+    return None
+
+
 def _embedder():
-    global _embedder_instance
-    if _embedder_instance is not _UNSET:
+    global _embedder_instance, _embedder_initialized
+    if _embedder_initialized:
         return _embedder_instance
-
     with _embedder_lock:
-        # Double-check pattern: verify again inside lock
-        if _embedder_instance is not _UNSET:
+        if _embedder_initialized:
             return _embedder_instance
-
-        if EMBED_URL:
-            try:
-                from mnemomatic.embeddings import HttpEmbedder
-                _embedder_instance = HttpEmbedder(EMBED_URL, EMBED_MODEL)
-                logger.info("Embedder: external HTTP endpoint %s (model=%r)", EMBED_URL, EMBED_MODEL)
-                _validate_embedding_dimension(_embedder_instance)
-            except ValueError as e:
-                logger.error("Invalid embedder configuration: %s", e)
-                _embedder_instance = None
-            except Exception as e:
-                logger.error("Failed to initialize HTTP embedder: %s: %s", type(e).__name__, e)
-                _embedder_instance = None
-        else:
-            model_path = os.environ.get("MNEMOMATIC_MODEL_PATH", "/app/model/model.onnx")
-            if os.path.exists(model_path):
-                try:
-                    from mnemomatic.embeddings import OnnxEmbedder
-                    _embedder_instance = OnnxEmbedder()
-                    logger.info("Embedder: built-in ONNX model (%s)", model_path)
-                    _validate_embedding_dimension(_embedder_instance)
-                except ImportError:
-                    logger.warning("onnxruntime not installed — starting in FTS-only mode")
-                    _embedder_instance = None
-                except (FileNotFoundError, RuntimeError) as e:
-                    logger.error("Failed to load embedding model: %s", e)
-                    _embedder_instance = None
-                except Exception as e:
-                    logger.error("Unexpected error initializing embedder: %s: %s", type(e).__name__, e)
-                    _embedder_instance = None
-            else:
-                logger.warning("No embedding model found at %s — starting in FTS-only mode", model_path)
-                _embedder_instance = None
-
+        _embedder_instance = _resolve_embedder()
+        _embedder_initialized = True
     return _embedder_instance
 
 
@@ -171,7 +179,7 @@ def _safe_embed(text: str) -> list[float] | None:
 # ── Tools ──
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ANN_STORE)
 def store_document(
     namespace: str,
     title: str,
@@ -221,7 +229,7 @@ def store_document(
     return {"id": stored.id, "namespace": stored.namespace, "title": stored.title, "created": created}
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ANN_STORE)
 def store_knowledge(
     namespace: str,
     subject: str,
@@ -274,7 +282,7 @@ def store_knowledge(
     return {"id": stored.id, "namespace": stored.namespace, "subject": stored.subject, "created": created}
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ANN_UPDATE)
 def update_document(
     id: str,
     title: str | None = None,
@@ -340,7 +348,7 @@ def update_document(
     return {"id": updated.id, "title": updated.title, "updated": True}
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ANN_UPDATE)
 def update_knowledge(
     id: str,
     subject: str | None = None,
@@ -410,7 +418,7 @@ def update_knowledge(
     return {"id": updated.id, "subject": updated.subject, "updated": True}
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ANN_DELETE)
 def delete_document(id: str) -> dict:
     """Permanently delete a document from Mnem-O-matic.
 
@@ -421,11 +429,10 @@ def delete_document(id: str) -> dict:
     Args:
         id: The document ID to delete.
     """
-    deleted = _db().delete_document(id)
-    return {"id": id, "deleted": deleted}
+    return {"id": id, "deleted": _db().delete_document(id)}
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ANN_DELETE)
 def delete_knowledge(id: str) -> dict:
     """Permanently delete a knowledge entry from Mnem-O-matic.
 
@@ -436,11 +443,10 @@ def delete_knowledge(id: str) -> dict:
     Args:
         id: The knowledge entry ID to delete.
     """
-    deleted = _db().delete_knowledge(id)
-    return {"id": id, "deleted": deleted}
+    return {"id": id, "deleted": _db().delete_knowledge(id)}
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ANN_STORE)
 def store_note(
     namespace: str,
     title: str,
@@ -488,7 +494,7 @@ def store_note(
     return {"id": stored.id, "namespace": stored.namespace, "title": stored.title, "created": created}
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ANN_UPDATE)
 def update_note(
     id: str,
     title: str | None = None,
@@ -552,7 +558,7 @@ def update_note(
     return {"id": updated.id, "title": updated.title, "updated": True}
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ANN_DELETE)
 def delete_note(id: str) -> dict:
     """Permanently delete a note from Mnem-O-matic.
 
@@ -563,11 +569,10 @@ def delete_note(id: str) -> dict:
     Args:
         id: The note ID to delete.
     """
-    deleted = _db().delete_note(id)
-    return {"id": id, "deleted": deleted}
+    return {"id": id, "deleted": _db().delete_note(id)}
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ANN_TAG)
 def tag(
     item_id: str,
     item_type: str,
@@ -593,7 +598,7 @@ def tag(
         return {"error": str(e)}
 
 
-@mcp.tool()
+@mcp.tool(annotations=_ANN_READ_ONLY)
 def search(
     query: str,
     content_type: str = "all",
@@ -636,8 +641,6 @@ def search(
     if not query or not query.strip():
         return [{"error": "Query cannot be empty", "details": "Provide a non-empty search query"}]
 
-    # Clamp limit to reasonable range for personal use
-    MAX_SEARCH_LIMIT = 100
     limit = max(1, min(int(limit), MAX_SEARCH_LIMIT))
 
     # FTS5 needs special characters escaped; semantic embedding uses the original query
@@ -692,9 +695,7 @@ def search(
 def health() -> str:
     """Health check endpoint. Returns server status and configuration."""
     embedder = _embedder()
-    embedding_mode = "built-in ONNX" if hasattr(embedder, 'session') else \
-                     "external HTTP" if embedder is not None else \
-                     "FTS-only (no embedder)"
+    embedding_mode = embedder.mode if embedder is not None else "FTS-only (no embedder)"
 
     return json.dumps({
         "status": "ok",

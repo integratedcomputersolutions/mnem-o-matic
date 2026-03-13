@@ -186,7 +186,7 @@ class TestEmbedderFallback(unittest.TestCase):
         from mnemomatic import server
 
         # Reset the cached embedder
-        server._embedder_instance = server._UNSET
+        server._embedder_initialized = False
 
         # Patch os.path.exists to simulate missing model file
         with patch("os.path.exists", return_value=False):
@@ -200,7 +200,7 @@ class TestEmbedderFallback(unittest.TestCase):
         from mnemomatic import server
 
         # Reset the cached embedder
-        server._embedder_instance = server._UNSET
+        server._embedder_initialized = False
 
         # Patch os.path.exists to simulate model file exists
         # But patch OnnxEmbedder (in embeddings module) to fail during init
@@ -216,7 +216,7 @@ class TestEmbedderFallback(unittest.TestCase):
         from mnemomatic import server
 
         # Reset the cached embedder
-        server._embedder_instance = server._UNSET
+        server._embedder_initialized = False
 
         # Patch os.path.exists to simulate model file exists
         # But patch the OnnxEmbedder import to fail
@@ -232,6 +232,7 @@ class TestEmbedderFallback(unittest.TestCase):
         from mnemomatic import server
 
         # Reset the cached embedder to None (simulating FTS-only mode)
+        server._embedder_initialized = True
         server._embedder_instance = None
 
         # Call _safe_embed - it should return None since embedder is None

@@ -20,6 +20,33 @@ _DOCUMENT_FIELDS = frozenset({"title", "content", "mime_type", "tags", "metadata
 _KNOWLEDGE_FIELDS = frozenset({"subject", "fact", "confidence", "source", "tags", "metadata"})
 _NOTE_FIELDS = frozenset({"title", "content", "source", "tags", "metadata"})
 
+# Maps singular item_type strings (used by update_tags) to table names
+_ITEM_TYPE_TO_TABLE = {"document": "documents", "knowledge": "knowledge", "note": "notes"}
+
+# Per-table field mappings for search result construction
+_TABLE_TO_TYPE = {"documents": "document", "knowledge": "knowledge", "notes": "note"}
+_TABLE_TITLE_FIELD = {"documents": "title", "knowledge": "subject", "notes": "title"}
+_TABLE_SNIPPET_FIELD = {"documents": "content", "knowledge": "fact", "notes": "content"}
+_TABLE_SNIPPET_LEN = {"documents": 200, "knowledge": None, "notes": 200}
+
+
+def _row_to_search_result(table: str, row, score: float) -> SearchResult:
+    title_field = _TABLE_TITLE_FIELD[table]
+    snippet_field = _TABLE_SNIPPET_FIELD[table]
+    snippet = row[snippet_field]
+    max_len = _TABLE_SNIPPET_LEN[table]
+    if max_len:
+        snippet = snippet[:max_len]
+    return SearchResult(
+        id=row["id"],
+        type=_TABLE_TO_TYPE[table],
+        namespace=row["namespace"],
+        title=row[title_field],
+        snippet=snippet,
+        score=score,
+        tags=_safe_json_loads(row["tags"], [], f"tags row {row['id']}"),
+    )
+
 
 def _serialize_embedding(embedding: list[float]) -> bytes:
     return struct.pack(f"{len(embedding)}f", *embedding)
@@ -204,6 +231,58 @@ class Database:
 
         conn.commit()
 
+    # ── Generic CRUD helpers ──
+
+    def _get_item(self, table: str, converter, item_id: str):
+        row = self._get_conn().execute(
+            f"SELECT * FROM {table} WHERE id = ?", (item_id,)
+        ).fetchone()
+        return converter(row) if row else None
+
+    def _delete_item(self, table: str, vec_table: str, item_id: str) -> bool:
+        conn = self._get_conn()
+        row = conn.execute(
+            f"DELETE FROM {table} WHERE id = ? RETURNING rowid", (item_id,)
+        ).fetchone()
+        if not row:
+            return False
+        conn.execute(f"DELETE FROM {vec_table} WHERE rowid = ?", (row["rowid"],))
+        conn.commit()
+        return True
+
+    def _list_items(self, table: str, converter, namespace: str) -> list:
+        rows = self._get_conn().execute(
+            f"SELECT * FROM {table} WHERE namespace = ? ORDER BY updated_at DESC", (namespace,)
+        ).fetchall()
+        return [converter(r) for r in rows]
+
+    def _update_item(self, table: str, vec_table: str, allowed_fields: frozenset, converter, item_id: str, embedding: list[float] | None, **fields):
+        invalid = set(fields) - allowed_fields
+        if invalid:
+            raise ValueError(f"Invalid {table} fields: {invalid}")
+        conn = self._get_conn()
+        fields["updated_at"] = datetime.now(timezone.utc).isoformat()
+        set_clauses = []
+        values = []
+        for key, value in fields.items():
+            if key in ("tags", "metadata"):
+                value = json.dumps(value)
+            set_clauses.append(f"{key} = ?")
+            values.append(value)
+        values.append(item_id)
+        row = conn.execute(
+            f"UPDATE {table} SET {', '.join(set_clauses)} WHERE id = ? RETURNING rowid, *", values
+        ).fetchone()
+        if not row:
+            return None
+        if embedding is not None:
+            conn.execute(
+                f"UPDATE {vec_table} SET embedding = ? WHERE rowid = ?",
+                (_serialize_embedding(embedding), row["rowid"]),
+            )
+        conn.commit()
+        return converter(row)
+
     # ── Documents CRUD ──
 
     def store_document(self, doc: Document, embedding: list[float] | None) -> tuple[Document, bool]:
@@ -237,17 +316,14 @@ class Database:
                 updated_at=datetime.fromisoformat(now),
             ), False
 
-        conn.execute(
+        rowid = conn.execute(
             """INSERT INTO documents (id, namespace, title, content, mime_type, tags, metadata, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING rowid""",
             (doc.id, doc.namespace, doc.title, doc.content, doc.mime_type,
              json.dumps(doc.tags), json.dumps(doc.metadata),
              doc.created_at.isoformat(), doc.updated_at.isoformat()),
-        )
+        ).fetchone()["rowid"]
         if embedding is not None:
-            rowid = conn.execute(
-                "SELECT rowid FROM documents WHERE id = ?", (doc.id,)
-            ).fetchone()["rowid"]
             conn.execute(
                 "INSERT INTO vec_documents (rowid, embedding) VALUES (?, ?)",
                 (rowid, _serialize_embedding(embedding)),
@@ -256,56 +332,16 @@ class Database:
         return doc, True
 
     def get_document(self, doc_id: str) -> Document | None:
-        row = self._get_conn().execute(
-            "SELECT * FROM documents WHERE id = ?", (doc_id,)
-        ).fetchone()
-        if not row:
-            return None
-        return self._row_to_document(row)
+        return self._get_item("documents", self._row_to_document, doc_id)
 
     def update_document(self, doc_id: str, embedding: list[float] | None = None, **fields) -> Document | None:
-        invalid = set(fields) - _DOCUMENT_FIELDS
-        if invalid:
-            raise ValueError(f"Invalid document fields: {invalid}")
-        conn = self._get_conn()
-        fields["updated_at"] = datetime.now(timezone.utc).isoformat()
-        set_clauses = []
-        values = []
-        for key, value in fields.items():
-            if key in ("tags", "metadata"):
-                value = json.dumps(value)
-            set_clauses.append(f"{key} = ?")
-            values.append(value)
-        values.append(doc_id)
-        row = conn.execute(
-            f"UPDATE documents SET {', '.join(set_clauses)} WHERE id = ? RETURNING rowid, *", values
-        ).fetchone()
-        if not row:
-            return None
-        if embedding is not None:
-            conn.execute(
-                "UPDATE vec_documents SET embedding = ? WHERE rowid = ?",
-                (_serialize_embedding(embedding), row["rowid"]),
-            )
-        conn.commit()
-        return self._row_to_document(row)
+        return self._update_item("documents", "vec_documents", _DOCUMENT_FIELDS, self._row_to_document, doc_id, embedding, **fields)
 
     def delete_document(self, doc_id: str) -> bool:
-        conn = self._get_conn()
-        row = conn.execute(
-            "DELETE FROM documents WHERE id = ? RETURNING rowid", (doc_id,)
-        ).fetchone()
-        if not row:
-            return False
-        conn.execute("DELETE FROM vec_documents WHERE rowid = ?", (row["rowid"],))
-        conn.commit()
-        return True
+        return self._delete_item("documents", "vec_documents", doc_id)
 
     def list_documents(self, namespace: str) -> list[Document]:
-        rows = self._get_conn().execute(
-            "SELECT * FROM documents WHERE namespace = ? ORDER BY updated_at DESC", (namespace,)
-        ).fetchall()
-        return [self._row_to_document(r) for r in rows]
+        return self._list_items("documents", self._row_to_document, namespace)
 
     # ── Knowledge CRUD ──
 
@@ -341,17 +377,14 @@ class Database:
                 updated_at=datetime.fromisoformat(now),
             ), False
 
-        conn.execute(
+        rowid = conn.execute(
             """INSERT INTO knowledge (id, namespace, subject, fact, confidence, source, tags, metadata, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING rowid""",
             (k.id, k.namespace, k.subject, k.fact, k.confidence, k.source,
              json.dumps(k.tags), json.dumps(k.metadata),
              k.created_at.isoformat(), k.updated_at.isoformat()),
-        )
+        ).fetchone()["rowid"]
         if embedding is not None:
-            rowid = conn.execute(
-                "SELECT rowid FROM knowledge WHERE id = ?", (k.id,)
-            ).fetchone()["rowid"]
             conn.execute(
                 "INSERT INTO vec_knowledge (rowid, embedding) VALUES (?, ?)",
                 (rowid, _serialize_embedding(embedding)),
@@ -360,56 +393,16 @@ class Database:
         return k, True
 
     def get_knowledge(self, k_id: str) -> Knowledge | None:
-        row = self._get_conn().execute(
-            "SELECT * FROM knowledge WHERE id = ?", (k_id,)
-        ).fetchone()
-        if not row:
-            return None
-        return self._row_to_knowledge(row)
+        return self._get_item("knowledge", self._row_to_knowledge, k_id)
 
     def update_knowledge(self, k_id: str, embedding: list[float] | None = None, **fields) -> Knowledge | None:
-        invalid = set(fields) - _KNOWLEDGE_FIELDS
-        if invalid:
-            raise ValueError(f"Invalid knowledge fields: {invalid}")
-        conn = self._get_conn()
-        fields["updated_at"] = datetime.now(timezone.utc).isoformat()
-        set_clauses = []
-        values = []
-        for key, value in fields.items():
-            if key in ("tags", "metadata"):
-                value = json.dumps(value)
-            set_clauses.append(f"{key} = ?")
-            values.append(value)
-        values.append(k_id)
-        row = conn.execute(
-            f"UPDATE knowledge SET {', '.join(set_clauses)} WHERE id = ? RETURNING rowid, *", values
-        ).fetchone()
-        if not row:
-            return None
-        if embedding is not None:
-            conn.execute(
-                "UPDATE vec_knowledge SET embedding = ? WHERE rowid = ?",
-                (_serialize_embedding(embedding), row["rowid"]),
-            )
-        conn.commit()
-        return self._row_to_knowledge(row)
+        return self._update_item("knowledge", "vec_knowledge", _KNOWLEDGE_FIELDS, self._row_to_knowledge, k_id, embedding, **fields)
 
     def delete_knowledge(self, k_id: str) -> bool:
-        conn = self._get_conn()
-        row = conn.execute(
-            "DELETE FROM knowledge WHERE id = ? RETURNING rowid", (k_id,)
-        ).fetchone()
-        if not row:
-            return False
-        conn.execute("DELETE FROM vec_knowledge WHERE rowid = ?", (row["rowid"],))
-        conn.commit()
-        return True
+        return self._delete_item("knowledge", "vec_knowledge", k_id)
 
     def list_knowledge(self, namespace: str) -> list[Knowledge]:
-        rows = self._get_conn().execute(
-            "SELECT * FROM knowledge WHERE namespace = ? ORDER BY updated_at DESC", (namespace,)
-        ).fetchall()
-        return [self._row_to_knowledge(r) for r in rows]
+        return self._list_items("knowledge", self._row_to_knowledge, namespace)
 
     # ── Notes CRUD ──
 
@@ -444,17 +437,14 @@ class Database:
                 updated_at=datetime.fromisoformat(now),
             ), False
 
-        conn.execute(
+        rowid = conn.execute(
             """INSERT INTO notes (id, namespace, title, content, source, tags, metadata, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING rowid""",
             (note.id, note.namespace, note.title, note.content, note.source,
              json.dumps(note.tags), json.dumps(note.metadata),
              note.created_at.isoformat(), note.updated_at.isoformat()),
-        )
+        ).fetchone()["rowid"]
         if embedding is not None:
-            rowid = conn.execute(
-                "SELECT rowid FROM notes WHERE id = ?", (note.id,)
-            ).fetchone()["rowid"]
             conn.execute(
                 "INSERT INTO vec_notes (rowid, embedding) VALUES (?, ?)",
                 (rowid, _serialize_embedding(embedding)),
@@ -463,62 +453,22 @@ class Database:
         return note, True
 
     def get_note(self, note_id: str) -> Note | None:
-        row = self._get_conn().execute(
-            "SELECT * FROM notes WHERE id = ?", (note_id,)
-        ).fetchone()
-        if not row:
-            return None
-        return self._row_to_note(row)
+        return self._get_item("notes", self._row_to_note, note_id)
 
     def update_note(self, note_id: str, embedding: list[float] | None = None, **fields) -> Note | None:
-        invalid = set(fields) - _NOTE_FIELDS
-        if invalid:
-            raise ValueError(f"Invalid note fields: {invalid}")
-        conn = self._get_conn()
-        fields["updated_at"] = datetime.now(timezone.utc).isoformat()
-        set_clauses = []
-        values = []
-        for key, value in fields.items():
-            if key in ("tags", "metadata"):
-                value = json.dumps(value)
-            set_clauses.append(f"{key} = ?")
-            values.append(value)
-        values.append(note_id)
-        row = conn.execute(
-            f"UPDATE notes SET {', '.join(set_clauses)} WHERE id = ? RETURNING rowid, *", values
-        ).fetchone()
-        if not row:
-            return None
-        if embedding is not None:
-            conn.execute(
-                "UPDATE vec_notes SET embedding = ? WHERE rowid = ?",
-                (_serialize_embedding(embedding), row["rowid"]),
-            )
-        conn.commit()
-        return self._row_to_note(row)
+        return self._update_item("notes", "vec_notes", _NOTE_FIELDS, self._row_to_note, note_id, embedding, **fields)
 
     def delete_note(self, note_id: str) -> bool:
-        conn = self._get_conn()
-        row = conn.execute(
-            "DELETE FROM notes WHERE id = ? RETURNING rowid", (note_id,)
-        ).fetchone()
-        if not row:
-            return False
-        conn.execute("DELETE FROM vec_notes WHERE rowid = ?", (row["rowid"],))
-        conn.commit()
-        return True
+        return self._delete_item("notes", "vec_notes", note_id)
 
     def list_notes(self, namespace: str) -> list[Note]:
-        rows = self._get_conn().execute(
-            "SELECT * FROM notes WHERE namespace = ? ORDER BY updated_at DESC", (namespace,)
-        ).fetchall()
-        return [self._row_to_note(r) for r in rows]
+        return self._list_items("notes", self._row_to_note, namespace)
 
     # ── Tags ──
 
     def update_tags(self, item_id: str, item_type: str, add_tags: list[str] | None = None, remove_tags: list[str] | None = None) -> list[str]:
         conn = self._get_conn()
-        table = {"document": "documents", "knowledge": "knowledge", "note": "notes"}.get(item_type)
+        table = _ITEM_TYPE_TO_TABLE.get(item_type)
         if table is None:
             raise ValueError(f"Invalid type {item_type!r}: must be 'document', 'knowledge', or 'note'")
         row = conn.execute(f"SELECT tags FROM {table} WHERE id = ?", (item_id,)).fetchone()
@@ -623,24 +573,7 @@ class Database:
             # FTS5 rank is negative BM25 (more negative = better match)
             # Negate so higher = better, then normalize with 1/(1+x) to get 0-1 range
             score = 1.0 / (1.0 + abs(row["rank"]))
-            if table == "documents":
-                results.append(SearchResult(
-                    id=row["id"], type="document", namespace=row["namespace"],
-                    title=row["title"], snippet=row["content"][:200],
-                    score=score, tags=_safe_json_loads(row["tags"], [], f"tags row {row['id']}"),
-                ))
-            elif table == "knowledge":
-                results.append(SearchResult(
-                    id=row["id"], type="knowledge", namespace=row["namespace"],
-                    title=row["subject"], snippet=row["fact"],
-                    score=score, tags=_safe_json_loads(row["tags"], [], f"tags row {row['id']}"),
-                ))
-            else:
-                results.append(SearchResult(
-                    id=row["id"], type="note", namespace=row["namespace"],
-                    title=row["title"], snippet=row["content"][:200],
-                    score=score, tags=_safe_json_loads(row["tags"], [], f"tags row {row['id']}"),
-                ))
+            results.append(_row_to_search_result(table, row, score))
         return results
 
     def _vec_search_table(self, table: str, embedding: list[float], namespace: str | None, limit: int) -> list[SearchResult]:
@@ -678,24 +611,7 @@ class Database:
             # L2 distance to cosine similarity for normalized embeddings:
             # cosine_sim = 1 - (L2^2 / 2), range: -1 to 1, clamp to 0-1
             score = max(0.0, 1.0 - (distance * distance / 2.0))
-            if table == "documents":
-                results.append(SearchResult(
-                    id=row["id"], type="document", namespace=row["namespace"],
-                    title=row["title"], snippet=row["content"][:200],
-                    score=score, tags=_safe_json_loads(row["tags"], [], f"tags row {row['id']}"),
-                ))
-            elif table == "knowledge":
-                results.append(SearchResult(
-                    id=row["id"], type="knowledge", namespace=row["namespace"],
-                    title=row["subject"], snippet=row["fact"],
-                    score=score, tags=_safe_json_loads(row["tags"], [], f"tags row {row['id']}"),
-                ))
-            else:
-                results.append(SearchResult(
-                    id=row["id"], type="note", namespace=row["namespace"],
-                    title=row["title"], snippet=row["content"][:200],
-                    score=score, tags=_safe_json_loads(row["tags"], [], f"tags row {row['id']}"),
-                ))
+            results.append(_row_to_search_result(table, row, score))
         return results
 
     def _row_to_document(self, row: dict) -> Document:
