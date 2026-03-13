@@ -1,9 +1,4 @@
 <div align="center">
-
-# Mnem-O-matic
-
-*Perfect recall for imperfect machines.*
-
 <img src="assets/mnem-o-matic.png" alt="Mnem-O-matic logo" width="512" height="512">
 
 [![CI](https://github.com/integratedcomputersolutions/mnem-o-matic/actions/workflows/ci.yml/badge.svg)](https://github.com/integratedcomputersolutions/mnem-o-matic/actions/workflows/ci.yml)

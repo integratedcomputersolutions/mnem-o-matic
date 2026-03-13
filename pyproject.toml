@@ -2,7 +2,6 @@
 name = "mnemomatic"
 version = "1.0.0"
 description = "Perfect recall for imperfect machines. A shared memory layer for LLMs via MCP."
-readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "mcp>=1.0,<2.0",
