@@ -33,7 +33,7 @@ jobs:
       - name: Start server
         run: |
           docker run -d --name mnemomatic-test -p 8686:8000 mnemomatic-test-lite
-          timeout 30 bash -c 'until curl -sf http://localhost:8686/health; do sleep 1; done'
+          timeout 30 bash -c 'until curl -s -o /dev/null http://localhost:8686/mcp; do sleep 1; done'
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
