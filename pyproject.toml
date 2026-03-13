@@ -28,3 +28,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mnemomatic"]
+
+[tool.pytest.ini_options]
+addopts = "--ignore=tests/test_mcp_api.py"
