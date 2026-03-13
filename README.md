@@ -6,6 +6,11 @@
 
 <img src="assets/mnem-o-matic.png" alt="Mnem-O-matic logo" width="512" height="512">
 
+[![CI](https://github.com/integratedcomputersolutions/mnem-o-matic/actions/workflows/ci.yml/badge.svg)](https://github.com/integratedcomputersolutions/mnem-o-matic/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
+[![Docker](https://img.shields.io/badge/docker-ghcr.io-blue.svg)](https://github.com/integratedcomputersolutions/mnem-o-matic/pkgs/container/mnem-o-matic)
+
 </div>
 
 Shared memory layer for LLMs. Store documents, knowledge and notes in a single portable database and access them from any MCP-compatible client — Claude Code, VS Code Copilot, ChatGPT, Mistral Vibe, custom agents, or anything that speaks MCP.
