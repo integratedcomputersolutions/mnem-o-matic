@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # ── Builder base ──────────────────────────────────────────────────────────────
 # Shared setup: system tools and source code only
 
