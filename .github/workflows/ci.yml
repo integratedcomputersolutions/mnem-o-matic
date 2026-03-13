@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Run unit tests
+        run: uv run --with pytest python -m pytest
+
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build lite image
+        run: docker build --target lite -t mnemomatic-test-lite .
+
+      - name: Start server
+        run: |
+          docker run -d --name mnemomatic-test -p 8686:8000 mnemomatic-test-lite
+          timeout 30 bash -c 'until curl -s -o /dev/null http://localhost:8686/mcp; do sleep 1; done'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Run integration tests
+        run: uv run --with pytest python -m pytest tests/test_mcp_api.py
+
+      - name: Stop server
+        if: always()
+        run: docker rm -f mnemomatic-test

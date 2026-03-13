@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # ── Builder base ──────────────────────────────────────────────────────────────
 # Shared setup: system tools and source code only
 
@@ -9,7 +10,7 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends gcc binutils && \
     rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml .
+COPY pyproject.toml README.md ./
 COPY src/ src/
 
 # ── Model download + quantization ─────────────────────────────────────────────
