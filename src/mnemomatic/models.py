@@ -23,6 +23,40 @@ def _new_id() -> str:
     return str(uuid.uuid4())
 
 
+def _validate_whitespace(v):
+    if isinstance(v, str) and v.strip() == "":
+        raise ValueError("must not be empty or contain only whitespace")
+    return v
+
+
+def _validate_tags(v):
+    if not isinstance(v, list):
+        raise ValueError("tags must be a list")
+    for tag in v:
+        if not isinstance(tag, str):
+            raise ValueError(f"all tags must be strings, got {type(tag).__name__}")
+        if not tag or tag.strip() == "":
+            raise ValueError("tags must not be empty or whitespace-only")
+        if len(tag) > MAX_TAG_LENGTH:
+            raise ValueError(f"tag exceeds max length {MAX_TAG_LENGTH}: {tag[:20]}...")
+    return v
+
+
+def _validate_metadata(v):
+    if not isinstance(v, dict):
+        raise ValueError("metadata must be a dict")
+    if len(v) > MAX_METADATA_KEYS:
+        raise ValueError(f"metadata exceeds max keys {MAX_METADATA_KEYS}")
+    for key, value in v.items():
+        if not isinstance(key, str):
+            raise ValueError(f"metadata keys must be strings, got {type(key).__name__}")
+        if not key:
+            raise ValueError("metadata keys must not be empty")
+        if isinstance(value, str) and len(value) > MAX_METADATA_VALUE_LENGTH:
+            raise ValueError(f"metadata value exceeds max length {MAX_METADATA_VALUE_LENGTH}")
+    return v
+
+
 class Document(BaseModel):
     id: str = Field(default_factory=_new_id)
     namespace: str = Field(min_length=1, max_length=MAX_NAMESPACE_LENGTH)
@@ -37,42 +71,17 @@ class Document(BaseModel):
     @field_validator("namespace", "title", "content", mode="before")
     @classmethod
     def validate_no_only_whitespace(cls, v):
-        """Reject strings that are only whitespace."""
-        if isinstance(v, str) and v.strip() == "":
-            raise ValueError("must not be empty or contain only whitespace")
-        return v
+        return _validate_whitespace(v)
 
     @field_validator("tags")
     @classmethod
     def validate_tags(cls, v):
-        """Validate tag list: non-empty strings, reasonable length."""
-        if not isinstance(v, list):
-            raise ValueError("tags must be a list")
-        for tag in v:
-            if not isinstance(tag, str):
-                raise ValueError(f"all tags must be strings, got {type(tag).__name__}")
-            if not tag or tag.strip() == "":
-                raise ValueError("tags must not be empty or whitespace-only")
-            if len(tag) > MAX_TAG_LENGTH:
-                raise ValueError(f"tag exceeds max length {MAX_TAG_LENGTH}: {tag[:20]}...")
-        return v
+        return _validate_tags(v)
 
     @field_validator("metadata")
     @classmethod
     def validate_metadata(cls, v):
-        """Validate metadata: dict with string keys, reasonable depth."""
-        if not isinstance(v, dict):
-            raise ValueError("metadata must be a dict")
-        if len(v) > MAX_METADATA_KEYS:
-            raise ValueError(f"metadata exceeds max keys {MAX_METADATA_KEYS}")
-        for key, value in v.items():
-            if not isinstance(key, str):
-                raise ValueError(f"metadata keys must be strings, got {type(key).__name__}")
-            if not key:
-                raise ValueError("metadata keys must not be empty")
-            if isinstance(value, str) and len(value) > MAX_METADATA_VALUE_LENGTH:
-                raise ValueError(f"metadata value exceeds max length {MAX_METADATA_VALUE_LENGTH}")
-        return v
+        return _validate_metadata(v)
 
     @field_validator("mime_type")
     @classmethod
@@ -100,10 +109,7 @@ class Knowledge(BaseModel):
     @field_validator("namespace", "subject", "fact", "source", mode="before")
     @classmethod
     def validate_no_only_whitespace(cls, v):
-        """Reject strings that are only whitespace."""
-        if isinstance(v, str) and v.strip() == "":
-            raise ValueError("must not be empty or contain only whitespace")
-        return v
+        return _validate_whitespace(v)
 
     @field_validator("confidence")
     @classmethod
@@ -118,34 +124,12 @@ class Knowledge(BaseModel):
     @field_validator("tags")
     @classmethod
     def validate_tags(cls, v):
-        """Validate tag list: non-empty strings, reasonable length."""
-        if not isinstance(v, list):
-            raise ValueError("tags must be a list")
-        for tag in v:
-            if not isinstance(tag, str):
-                raise ValueError(f"all tags must be strings, got {type(tag).__name__}")
-            if not tag or tag.strip() == "":
-                raise ValueError("tags must not be empty or whitespace-only")
-            if len(tag) > MAX_TAG_LENGTH:
-                raise ValueError(f"tag exceeds max length {MAX_TAG_LENGTH}: {tag[:20]}...")
-        return v
+        return _validate_tags(v)
 
     @field_validator("metadata")
     @classmethod
     def validate_metadata(cls, v):
-        """Validate metadata: dict with string keys, reasonable depth."""
-        if not isinstance(v, dict):
-            raise ValueError("metadata must be a dict")
-        if len(v) > MAX_METADATA_KEYS:
-            raise ValueError(f"metadata exceeds max keys {MAX_METADATA_KEYS}")
-        for key, value in v.items():
-            if not isinstance(key, str):
-                raise ValueError(f"metadata keys must be strings, got {type(key).__name__}")
-            if not key:
-                raise ValueError("metadata keys must not be empty")
-            if isinstance(value, str) and len(value) > MAX_METADATA_VALUE_LENGTH:
-                raise ValueError(f"metadata value exceeds max length {MAX_METADATA_VALUE_LENGTH}")
-        return v
+        return _validate_metadata(v)
 
 
 class Note(BaseModel):
@@ -162,42 +146,17 @@ class Note(BaseModel):
     @field_validator("namespace", "title", "content", "source", mode="before")
     @classmethod
     def validate_no_only_whitespace(cls, v):
-        """Reject strings that are only whitespace."""
-        if isinstance(v, str) and v.strip() == "":
-            raise ValueError("must not be empty or contain only whitespace")
-        return v
+        return _validate_whitespace(v)
 
     @field_validator("tags")
     @classmethod
     def validate_tags(cls, v):
-        """Validate tag list: non-empty strings, reasonable length."""
-        if not isinstance(v, list):
-            raise ValueError("tags must be a list")
-        for tag in v:
-            if not isinstance(tag, str):
-                raise ValueError(f"all tags must be strings, got {type(tag).__name__}")
-            if not tag or tag.strip() == "":
-                raise ValueError("tags must not be empty or whitespace-only")
-            if len(tag) > MAX_TAG_LENGTH:
-                raise ValueError(f"tag exceeds max length {MAX_TAG_LENGTH}: {tag[:20]}...")
-        return v
+        return _validate_tags(v)
 
     @field_validator("metadata")
     @classmethod
     def validate_metadata(cls, v):
-        """Validate metadata: dict with string keys, reasonable depth."""
-        if not isinstance(v, dict):
-            raise ValueError("metadata must be a dict")
-        if len(v) > MAX_METADATA_KEYS:
-            raise ValueError(f"metadata exceeds max keys {MAX_METADATA_KEYS}")
-        for key, value in v.items():
-            if not isinstance(key, str):
-                raise ValueError(f"metadata keys must be strings, got {type(key).__name__}")
-            if not key:
-                raise ValueError("metadata keys must not be empty")
-            if isinstance(value, str) and len(value) > MAX_METADATA_VALUE_LENGTH:
-                raise ValueError(f"metadata value exceeds max length {MAX_METADATA_VALUE_LENGTH}")
-        return v
+        return _validate_metadata(v)
 
 
 class SearchResult(BaseModel):

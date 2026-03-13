@@ -54,6 +54,10 @@ class OnnxEmbedder:
         self._input_names = {inp.name for inp in self.session.get_inputs()}
         self.embed = functools.lru_cache(maxsize=256)(self._embed)
 
+    @property
+    def mode(self) -> str:
+        return "built-in ONNX"
+
     def _embed(self, text: str) -> list[float]:
         np = self._np
         encoded = self.tokenizer.encode(text)
@@ -86,6 +90,10 @@ class HttpEmbedder:
         self.url = url
         self.model = model
         self.embed = functools.lru_cache(maxsize=256)(self._embed)
+
+    @property
+    def mode(self) -> str:
+        return "external HTTP"
 
     def _embed(self, text: str) -> list[float]:
         """Fetch embedding from remote HTTP endpoint.
