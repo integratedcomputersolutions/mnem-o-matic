@@ -28,6 +28,11 @@ _TABLE_TO_TYPE = {"documents": "document", "knowledge": "knowledge", "notes": "n
 _TABLE_TITLE_FIELD = {"documents": "title", "knowledge": "subject", "notes": "title"}
 _TABLE_SNIPPET_FIELD = {"documents": "content", "knowledge": "fact", "notes": "content"}
 _TABLE_SNIPPET_LEN = {"documents": 200, "knowledge": None, "notes": 200}
+_TABLE_RESOURCE_URI = {
+    "documents": "mnemomatic://document/{id}",
+    "knowledge": "mnemomatic://knowledge-entry/{id}",
+    "notes": "mnemomatic://note/{id}",
+}
 
 
 def _row_to_search_result(table: str, row, score: float) -> SearchResult:
@@ -43,6 +48,7 @@ def _row_to_search_result(table: str, row, score: float) -> SearchResult:
         namespace=row["namespace"],
         title=row[title_field],
         snippet=snippet,
+        resource_uri=_TABLE_RESOURCE_URI[table].format(id=row["id"]),
         score=score,
         tags=_safe_json_loads(row["tags"], [], f"tags row {row['id']}"),
     )

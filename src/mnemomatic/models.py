@@ -165,5 +165,6 @@ class SearchResult(BaseModel):
     namespace: str
     title: str  # title for documents/notes, subject for knowledge
     snippet: str  # content preview or fact
+    resource_uri: str  # mnemomatic:// URI for full content retrieval
     score: float
     tags: list[str] = Field(default_factory=list)
