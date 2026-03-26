@@ -6,67 +6,12 @@ Start with: docker compose up --build -d
 Run with: python -m unittest tests/test_mcp_api.py -v
 """
 
-import json
 import unittest
-import urllib.request
+
+from mnemomatic._mcp_client import MCPClient
 
 BASE_URL = "http://localhost:8686/mcp"
-HEADERS = {
-    "Content-Type": "application/json",
-    "Accept": "application/json, text/event-stream",
-}
 NS = "test-integration"
-
-
-class MCPClient:
-    """Minimal MCP client over Streamable HTTP."""
-
-    def __init__(self, base_url: str = BASE_URL):
-        self.base_url = base_url
-        self.session_id = None
-        self._next_id = 1
-        self._initialize()
-
-    def _send(self, payload: dict) -> dict | None:
-        headers = dict(HEADERS)
-        if self.session_id:
-            headers["mcp-session-id"] = self.session_id
-        req = urllib.request.Request(
-            self.base_url,
-            data=json.dumps(payload).encode(),
-            headers=headers,
-        )
-        resp = urllib.request.urlopen(req, timeout=30)
-        if not self.session_id:
-            self.session_id = resp.headers.get("mcp-session-id")
-        raw = resp.read().decode()
-        return json.loads(raw) if raw else None
-
-    def _initialize(self):
-        self._send({
-            "jsonrpc": "2.0",
-            "id": 0,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2025-03-26",
-                "capabilities": {},
-                "clientInfo": {"name": "test", "version": "0.1"},
-            },
-        })
-        self._send({"jsonrpc": "2.0", "method": "notifications/initialized"})
-
-    def call_tool(self, name: str, arguments: dict) -> dict | list:
-        self._next_id += 1
-        body = self._send({
-            "jsonrpc": "2.0",
-            "id": self._next_id,
-            "method": "tools/call",
-            "params": {"name": name, "arguments": arguments},
-        })
-        content = body["result"]["content"]
-        if len(content) == 1:
-            return json.loads(content[0]["text"])
-        return [json.loads(c["text"]) for c in content]
 
 
 def _search_ids(client: MCPClient, query: str) -> list[str]:
@@ -84,7 +29,7 @@ def _search_ids(client: MCPClient, query: str) -> list[str]:
 class TestDocuments(unittest.TestCase):
 
     def setUp(self):
-        self.client = MCPClient()
+        self.client = MCPClient(BASE_URL)
         self._cleanup_ids = []
 
     def tearDown(self):
@@ -148,7 +93,7 @@ class TestDocuments(unittest.TestCase):
 class TestKnowledge(unittest.TestCase):
 
     def setUp(self):
-        self.client = MCPClient()
+        self.client = MCPClient(BASE_URL)
         self._cleanup_ids = []
 
     def tearDown(self):
@@ -209,7 +154,7 @@ class TestKnowledge(unittest.TestCase):
 class TestNotes(unittest.TestCase):
 
     def setUp(self):
-        self.client = MCPClient()
+        self.client = MCPClient(BASE_URL)
         self._cleanup_ids = []
 
     def tearDown(self):
