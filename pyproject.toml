@@ -20,6 +20,7 @@ onnx = [
 
 [project.scripts]
 mnemomatic = "mnemomatic.server:main"
+mnemomatic-cli = "mnemomatic.cli:main"
 
 [build-system]
 requires = ["hatchling"]
