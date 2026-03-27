@@ -13,8 +13,8 @@ from mnemomatic_cli._mcp_client import MCPClient
 _DEFAULT_URL = "http://localhost:8000"
 _DEFAULT_MODE = "hybrid"
 _CONFIG_PATH = Path.home() / ".config" / "mnemomatic" / "config.toml"
-_ITEM_TYPES = ("document", "knowledge", "note")
-_RESOURCE_TYPES = ("documents", "knowledge", "notes")
+_ITEM_TYPES = ("document", "knowledge", "note")       # singular — used in tool calls
+_RESOURCE_TYPES = ("documents", "knowledge", "notes")  # plural  — used in resource URIs
 
 
 # ---------------------------------------------------------------------------
