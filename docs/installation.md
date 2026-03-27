@@ -68,7 +68,77 @@ mkcert -CAROOT
 
 Alternatively, install mkcert on each client machine and run `mkcert -install` — they will share the same CA if you copy the `rootCA.pem` and `rootCA-key.pem` files from the server's CAROOT directory to the client's CAROOT directory first.
 
+## Quick Start (Pre-built Images)
+
+Pre-built images for `linux/amd64` and `linux/arm64` are published to the GitHub Container Registry on every release. No build step required.
+
+### Full image (recommended)
+
+```bash
+# Generate TLS certificates (see TLS Setup above)
+mkdir -p certs
+mkcert -cert-file certs/cert.pem -key-file certs/key.pem your-server-hostname your-server-ip
+
+# Create a data directory
+mkdir -p data
+
+# Pull and run
+docker run -d \
+  --name mnemomatic \
+  -p 8000:8000 \
+  -v "$(pwd)/data:/data" \
+  -e MNEMOMATIC_API_KEY=your-secret-key \
+  ghcr.io/integratedcomputersolutions/mnem-o-matic:latest-full
+```
+
+Or with `docker-compose.yml` — replace the `build:` block with the pre-built image:
+
+```yaml
+services:
+  mnemomatic:
+    image: ghcr.io/integratedcomputersolutions/mnem-o-matic:latest-full
+    volumes:
+      - ./data:/data
+    environment:
+      - MNEMOMATIC_API_KEY=your-secret-key
+```
+
+Then:
+
+```bash
+docker compose up -d
+```
+
+### Lite image with Ollama (pre-built)
+
+```yaml
+services:
+  mnemomatic:
+    image: ghcr.io/integratedcomputersolutions/mnem-o-matic:latest-lite
+    volumes:
+      - ./data:/data
+    environment:
+      - MNEMOMATIC_API_KEY=your-secret-key
+      - MNEMOMATIC_EMBED_URL=http://host.docker.internal:11434/api/embeddings
+      - MNEMOMATIC_EMBED_MODEL=nomic-embed-text
+      - MNEMOMATIC_EMBED_DIM=768
+```
+
+### Available image tags
+
+| Tag | Description |
+|-----|-------------|
+| `latest-full` | Latest release, built-in ONNX embeddings |
+| `latest-lite` | Latest release, no ML stack |
+| `1.2.3-full` / `1.2.3-lite` | Exact version |
+| `1.2-full` / `1.2-lite` | Minor floating tag |
+| `1-full` / `1-lite` | Major floating tag |
+
+---
+
 ## Build and Run
+
+If you prefer to build from source (required for local development or unreleased changes):
 
 ### Full image (default)
 
