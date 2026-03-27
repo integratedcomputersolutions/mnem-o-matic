@@ -112,21 +112,21 @@ All error responses include a `details` field explaining the exact issue.
 ```bash
 git clone https://github.com/integratedcomputersolutions/mnem-o-matic.git
 cd mnem-o-matic
-uv tool install .
+uv tool install ./cli
 ```
 
-This installs `mnemomatic-cli` into an isolated environment. Verify with:
+This installs `mnemomatic-cli` into an isolated environment with no extra dependencies. Verify with:
 
 ```bash
 mnemomatic-cli --help
 ```
 
-To uninstall: `uv tool uninstall mnemomatic`
+To uninstall: `uv tool uninstall mnemomatic-cli`
 
 For development (runs from source without installing):
 
 ```bash
-uv run mnemomatic-cli --help
+uv run --project cli mnemomatic-cli --help
 ```
 
 ### Configuration
