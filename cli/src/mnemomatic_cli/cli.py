@@ -262,7 +262,6 @@ def _build_parser() -> argparse.ArgumentParser:
     p_read = sub.add_parser("read", help="Read full content of an item by ID")
     read_sub = p_read.add_subparsers(dest="read_type", metavar="TYPE")
     read_sub.required = True
-
     for rtype in _ITEM_TYPES:
         p_r = read_sub.add_parser(rtype, help=f"Read a {rtype} by ID")
         p_r.add_argument("id")
