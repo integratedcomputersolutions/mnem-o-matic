@@ -96,7 +96,7 @@ jobs:
   merge:
     name: Merge ${{ matrix.target }} manifest
     runs-on: ubuntu-latest
-    if: env.PUBLISH == 'true'
+    if: github.event_name != 'pull_request' && startsWith(github.ref, 'refs/tags/v')
     needs: build
     permissions:
       contents: read
