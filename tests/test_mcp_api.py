@@ -8,7 +8,7 @@ Run with: python -m unittest tests/test_mcp_api.py -v
 
 import unittest
 
-from mnemomatic._mcp_client import MCPClient
+from mnemomatic_cli._mcp_client import MCPClient
 
 BASE_URL = "http://localhost:8686/mcp"
 NS = "test-integration"

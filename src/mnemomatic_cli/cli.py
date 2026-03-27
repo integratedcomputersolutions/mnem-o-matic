@@ -8,7 +8,7 @@ import sys
 import tomllib
 from pathlib import Path
 
-from mnemomatic._mcp_client import MCPClient
+from mnemomatic_cli._mcp_client import MCPClient
 
 _DEFAULT_URL = "http://localhost:8000"
 _DEFAULT_MODE = "hybrid"

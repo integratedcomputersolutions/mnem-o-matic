@@ -1,7 +1,7 @@
 [project]
-name = "mnemomatic"
+name = "mnemomatic-server"
 version = "1.0.0"
-description = "Perfect recall for imperfect machines. A shared memory layer for LLMs via MCP."
+description = "Perfect recall for imperfect machines. A shared memory MCP server for LLMs."
 requires-python = ">=3.11"
 dependencies = [
     "mcp>=1.0,<2.0",
@@ -20,7 +20,6 @@ onnx = [
 
 [project.scripts]
 mnemomatic = "mnemomatic.server:main"
-mnemomatic-cli = "mnemomatic.cli:main"
 
 [build-system]
 requires = ["hatchling"]
