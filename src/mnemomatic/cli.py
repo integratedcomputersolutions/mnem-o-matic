@@ -258,8 +258,17 @@ def _build_parser() -> argparse.ArgumentParser:
         p_del = delete_sub.add_parser(dtype, help=f"Delete a {dtype}")
         p_del.add_argument("id")
 
+    # -- read -----------------------------------------------------------------
+    p_read = sub.add_parser("read", help="Read full content of an item by ID")
+    read_sub = p_read.add_subparsers(dest="read_type", metavar="TYPE")
+    read_sub.required = True
+
+    for rtype in _ITEM_TYPES:
+        p_r = read_sub.add_parser(rtype, help=f"Read a {rtype} by ID")
+        p_r.add_argument("id")
+
     # -- get ------------------------------------------------------------------
-    p_get = sub.add_parser("get", help="Get a single item by ID")
+    p_get = sub.add_parser("get", help="Get a single item by ID (via resource URI)")
     get_sub = p_get.add_subparsers(dest="get_type", metavar="TYPE")
     get_sub.required = True
 
@@ -345,6 +354,9 @@ def main():
         case "delete":
             tool = f"delete_{args.delete_type}"
             _run(lambda: client.call_tool(tool, {"id": args.id}), pretty)
+        case "read":
+            _run(lambda: client.call_tool("read", {
+                "item_type": args.read_type, "id": args.id}), pretty)
         case "get":
             uri = _GET_URI[args.get_type].format(id=args.id)
             _run(lambda: client.read_resource(uri), pretty)

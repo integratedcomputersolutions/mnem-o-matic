@@ -688,6 +688,33 @@ def search(
     return response
 
 
+_READ_GETTERS = {
+    "document": lambda db, id: db.get_document(id),
+    "knowledge": lambda db, id: db.get_knowledge(id),
+    "note": lambda db, id: db.get_note(id),
+}
+
+
+@mcp.tool(annotations=_ANN_READ_ONLY)
+def read(item_type: str, id: str) -> dict:
+    """Read the full content of a document, knowledge entry, or note by ID.
+
+    Use this after searching to retrieve complete content — search results only
+    contain a snippet. The item's resource_uri field tells you the type and ID.
+
+    Args:
+        item_type: The item type — "document", "knowledge", or "note".
+        id: The unique item ID (UUID returned by store/search).
+    """
+    getter = _READ_GETTERS.get(item_type)
+    if getter is None:
+        return {"error": "Invalid item_type", "details": f"Must be one of: {', '.join(sorted(_READ_GETTERS))}"}
+    item = getter(_db(), id)
+    if item is None:
+        return {"error": f"{item_type} not found", "id": id}
+    return json.loads(item.model_dump_json())
+
+
 # ── Resources ──
 
 
