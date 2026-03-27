@@ -103,6 +103,94 @@ All error responses include a `details` field explaining the exact issue.
   docker compose up -e MNEMOMATIC_API_KEY=your-key
   ```
 
+## CLI Interface
+
+`mnemomatic-cli` provides shell access to a running Mnem-O-matic server for agents and users without MCP support.
+
+### Installation
+
+```bash
+git clone https://github.com/integratedcomputersolutions/mnem-o-matic.git
+cd mnem-o-matic
+uv tool install .
+```
+
+This installs `mnemomatic-cli` into an isolated environment. Verify with:
+
+```bash
+mnemomatic-cli --help
+```
+
+To uninstall: `uv tool uninstall mnemomatic`
+
+For development (runs from source without installing):
+
+```bash
+uv run mnemomatic-cli --help
+```
+
+### Configuration
+
+Settings resolve with this priority: **CLI flags > environment variables > config file > defaults**.
+
+| Setting | CLI flag | Environment variable | Config key | Default |
+|---------|----------|---------------------|------------|---------|
+| Server URL | `--server-url` | `MNEMOMATIC_SERVER_URL` | `server.url` | `http://localhost:8000` |
+| API key | `--api-key` | `MNEMOMATIC_API_KEY` | `server.api_key` | *(none)* |
+| Search mode | `-m` / `--mode` | `MNEMOMATIC_SEARCH_MODE` | `search.mode` | `hybrid` |
+
+The config file lives at `~/.config/mnemomatic/config.toml`:
+
+```toml
+[server]
+url = "https://your-server-hostname"
+api_key = "your-secret-key-here"
+
+[search]
+mode = "fulltext"
+```
+
+> **Security:** Prefer the environment variable or config file for the API key — CLI flags are visible in the process list. The CLI warns if the config file is readable by other users.
+
+### Commands
+
+```bash
+# Search
+mnemomatic-cli search "authentication"
+mnemomatic-cli search "JWT tokens" -n webapp -m semantic -l 5
+
+# Store
+mnemomatic-cli store document myproject "API spec" "Full API specification text"
+mnemomatic-cli store knowledge myproject "auth method" "Uses JWT with RS256"
+mnemomatic-cli store note myproject "Quick thought" "Consider adding rate limiting"
+
+# Read from stdin (use '-' as content)
+cat spec.md | mnemomatic-cli store document myproject "API spec" -
+
+# Update
+mnemomatic-cli update document <id> --content "Updated content"
+mnemomatic-cli update knowledge <id> --fact "Migrated to session cookies"
+
+# Delete
+mnemomatic-cli delete document <id>
+
+# Get full content by ID
+mnemomatic-cli get document <id>
+
+# Tags
+mnemomatic-cli tag <id> document --add prod --add critical --remove draft
+
+# Browse
+mnemomatic-cli namespaces
+mnemomatic-cli list documents myproject
+```
+
+All output is JSON. Use `--pretty` for indented output:
+
+```bash
+mnemomatic-cli --pretty search "auth"
+```
+
 ## Available Tools
 
 Once connected, your LLM has access to these tools:
