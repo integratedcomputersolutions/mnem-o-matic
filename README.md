@@ -28,6 +28,22 @@ Mnem-O-matic fixes this by providing a shared, persistent memory that any LLM ca
 
 All types support namespaces (per-project or global), tags, and metadata. Everything is searchable via full-text and semantic search.
 
+## Agent Skill
+
+A sample agent skill file is included at `skills/mnemomatic/SKILL.md`. It teaches an agent how to use Mnem-O-matic effectively — when to search, which search mode to pick, what content type to store, and how to retrieve full content after a search.
+
+The skill is written for Claude Code but can be adapted to any agent framework that supports custom instructions or skill files. Tailor the wording, triggers, and examples to match your agent's terminology and workflow.
+
+To install for Claude Code:
+
+```bash
+# Personal (available in all your projects)
+cp -r skills/mnemomatic ~/.claude/skills/
+
+# Project-only (available in the current project)
+cp -r skills/mnemomatic .claude/skills/
+```
+
 ## Documentation
 
 - [Installation Guide](docs/installation.md) — prerequisites, Docker profiles, TLS setup, configuration, development
