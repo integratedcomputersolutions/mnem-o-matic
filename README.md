@@ -38,10 +38,10 @@ To install for Claude Code:
 
 ```bash
 # Personal (available in all your projects)
-cp -r skills/mnemomatic ~/.claude/skills/
+mkdir -p ~/.claude/skills && cp -r skills/mnemomatic ~/.claude/skills/mnemomatic
 
 # Project-only (available in the current project)
-cp -r skills/mnemomatic .claude/skills/
+mkdir -p .claude/skills && cp -r skills/mnemomatic .claude/skills/mnemomatic
 ```
 
 ## Documentation
