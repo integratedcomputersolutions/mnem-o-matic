@@ -1,6 +1,9 @@
 services:
   mnemomatic:
     container_name: mnemomatic-MCP
+    # To use a pre-built image instead of building locally, replace the build
+    # block with the image line below (use -lite for the smaller variant):
+    # image: ghcr.io/integratedcomputersolutions/mnem-o-matic:latest-full
     build:
       context: .
       target: full          # use 'lite' for the smaller image (requires MNEMOMATIC_EMBED_URL)

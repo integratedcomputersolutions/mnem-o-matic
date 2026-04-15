@@ -408,7 +408,7 @@ wheels = [
 ]
 
 [[package]]
-name = "mnemomatic"
+name = "mnemomatic-server"
 version = "1.0.0"
 source = { editable = "." }
 dependencies = [
