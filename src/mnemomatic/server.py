@@ -732,6 +732,26 @@ def health() -> str:
     })
 
 
+@mcp.tool(annotations=_ANN_UPDATE)
+def rename_namespace(old_namespace: str, new_namespace: str) -> dict:
+    """Rename a namespace across all documents, knowledge entries, and notes.
+
+    Moves every item in old_namespace to new_namespace atomically. Items in
+    new_namespace that already exist are unaffected — this is a rename, not a merge.
+
+    Args:
+        old_namespace: The namespace to rename.
+        new_namespace: The new name for the namespace.
+    """
+    counts = _db().rename_namespace(old_namespace, new_namespace)
+    return {
+        "old_namespace": old_namespace,
+        "new_namespace": new_namespace,
+        "renamed": counts,
+        "total": sum(counts.values()),
+    }
+
+
 @mcp.resource("mnemomatic://namespaces")
 def list_namespaces() -> str:
     """List all namespaces in Mnem-O-matic."""

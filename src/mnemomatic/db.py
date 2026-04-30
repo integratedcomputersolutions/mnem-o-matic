@@ -543,6 +543,17 @@ class Database:
 
     # ── Namespaces ──
 
+    def rename_namespace(self, old: str, new: str) -> dict[str, int]:
+        conn = self._get_conn()
+        counts = {}
+        for table in ("documents", "knowledge", "notes"):
+            cur = conn.execute(
+                f"UPDATE {table} SET namespace = ? WHERE namespace = ?", (new, old)
+            )
+            counts[table] = cur.rowcount
+        conn.commit()
+        return counts
+
     def list_namespaces(self) -> list[str]:
         rows = self._get_conn().execute("""
             SELECT DISTINCT namespace FROM documents

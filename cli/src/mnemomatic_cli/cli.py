@@ -282,8 +282,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p_tag.add_argument("--add", action="append", metavar="TAG")
     p_tag.add_argument("--remove", action="append", metavar="TAG")
 
-    # -- namespaces -----------------------------------------------------------
-    sub.add_parser("namespaces", help="List all namespaces")
+    # -- namespace ------------------------------------------------------------
+    p_ns = sub.add_parser("namespace", help="Manage namespaces")
+    ns_sub = p_ns.add_subparsers(dest="ns_action", metavar="ACTION")
+    ns_sub.required = True
+    ns_sub.add_parser("list", help="List all namespaces")
+    p_ns_rename = ns_sub.add_parser("rename", help="Rename a namespace")
+    p_ns_rename.add_argument("old_namespace")
+    p_ns_rename.add_argument("new_namespace")
 
     # -- list -----------------------------------------------------------------
     p_list = sub.add_parser("list", help="List content in a namespace")
@@ -366,8 +372,14 @@ def main():
             if args.remove:
                 params["remove_tags"] = args.remove
             _run(lambda: client.call_tool("tag", params), pretty)
-        case "namespaces":
-            _run(lambda: client.read_resource("mnemomatic://namespaces"), pretty)
+        case "namespace":
+            match args.ns_action:
+                case "list":
+                    _run(lambda: client.read_resource("mnemomatic://namespaces"), pretty)
+                case "rename":
+                    _run(lambda: client.call_tool("rename_namespace", {
+                        "old_namespace": args.old_namespace,
+                        "new_namespace": args.new_namespace}), pretty)
         case "list":
             _run(lambda: client.read_resource(
                 f"mnemomatic://{args.list_type}/{args.namespace}"), pretty)
