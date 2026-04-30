@@ -51,7 +51,7 @@ PYTHON_EOF
 
 # Quantize the model from FP32 to INT8: ~4x smaller, ~2-3x faster inference on CPU
 # onnx package is only needed here at build time, never copied to the runtime image
-RUN pip install --no-cache-dir --no-compile --target=/tmp/quant onnx && \
+RUN pip install --no-cache-dir --no-compile --target=/tmp/quant onnx sympy && \
     PYTHONPATH=/tmp/dl:/tmp/quant \
     python3 -c "from onnxruntime.quantization import quantize_dynamic, QuantType; import os; orig=os.path.getsize('/app/model/model.onnx'); quantize_dynamic('/app/model/model.onnx','/app/model/model_int8.onnx',weight_type=QuantType.QUInt8); quant=os.path.getsize('/app/model/model_int8.onnx'); os.replace('/app/model/model_int8.onnx','/app/model/model.onnx'); print(f'Quantized: {orig/1024/1024:.1f}MB -> {quant/1024/1024:.1f}MB')"
 
