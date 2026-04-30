@@ -78,6 +78,14 @@ This also works as a merge — if `new_namespace` already exists, items from `ol
 are moved into it. The operation fails if there are title/subject conflicts between the two
 namespaces; resolve those first by deleting or renaming the conflicting items.
 
+Use `delete_namespace` to permanently remove all items in a namespace at once:
+
+```
+delete_namespace(namespace="old-project")
+```
+
+This is irreversible. Prefer `rename_namespace` if you only want to reorganize content.
+
 ## Storing Good Knowledge Entries
 
 ```

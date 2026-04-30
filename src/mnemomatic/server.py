@@ -732,6 +732,25 @@ def health() -> str:
     })
 
 
+@mcp.tool(annotations=_ANN_DELETE)
+def delete_namespace(namespace: str) -> dict:
+    """Permanently delete all items in a namespace.
+
+    Removes every document, knowledge entry, and note in the given namespace in
+    a single atomic operation. This is irreversible — deleted items cannot be
+    recovered. If you only want to reorganize content, use rename_namespace instead.
+
+    Args:
+        namespace: The namespace to delete.
+    """
+    counts = _db().delete_namespace(namespace)
+    return {
+        "namespace": namespace,
+        "deleted": counts,
+        "total": sum(counts.values()),
+    }
+
+
 @mcp.tool(annotations=_ANN_UPDATE)
 def rename_namespace(old_namespace: str, new_namespace: str) -> dict:
     """Rename a namespace across all documents, knowledge entries, and notes.

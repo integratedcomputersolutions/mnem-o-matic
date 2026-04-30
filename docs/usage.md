@@ -171,18 +171,32 @@ cat spec.md | mnemomatic-cli store document myproject "API spec" -
 mnemomatic-cli update document <id> --content "Updated content"
 mnemomatic-cli update knowledge <id> --fact "Migrated to session cookies"
 
-# Delete
+# Delete individual items
 mnemomatic-cli delete document <id>
+mnemomatic-cli delete knowledge <id>
+mnemomatic-cli delete note <id>
 
-# Get full content by ID
+# Read full content by ID (after a search)
+mnemomatic-cli read document <id>
+mnemomatic-cli read knowledge <id>
+mnemomatic-cli read note <id>
+
+# Get full content by ID (via resource URI)
 mnemomatic-cli get document <id>
 
 # Tags
 mnemomatic-cli tag <id> document --add prod --add critical --remove draft
 
-# Browse
-mnemomatic-cli namespaces
+# Browse content in a namespace
 mnemomatic-cli list documents myproject
+mnemomatic-cli list knowledge myproject
+mnemomatic-cli list notes myproject
+
+# Namespace management
+mnemomatic-cli namespace list
+mnemomatic-cli namespace rename old-project new-project
+mnemomatic-cli namespace delete old-project           # prompts for confirmation
+mnemomatic-cli namespace delete old-project --yes     # skip prompt (scripts/agents)
 ```
 
 All output is JSON. Use `--pretty` for indented output:
@@ -195,19 +209,22 @@ mnemomatic-cli --pretty search "auth"
 
 Once connected, your LLM has access to these tools:
 
-| Tool               | Description                               |
-| ------------------ | ----------------------------------------- |
-| `store_document`   | Save a document (code, spec, config)      |
-| `store_knowledge`  | Save a fact, decision, or observation     |
-| `store_note`       | Save a quick thought, idea, or transcript |
-| `update_document`  | Modify an existing document               |
-| `update_knowledge` | Modify an existing knowledge entry        |
-| `update_note`      | Modify an existing note                   |
-| `delete_document`  | Remove a document                         |
-| `delete_knowledge` | Remove a knowledge entry                  |
-| `delete_note`      | Remove a note                             |
-| `tag`              | Add or remove tags on any entry           |
-| `search`           | Search across all stored data             |
+| Tool                 | Description                                          |
+| -------------------- | ---------------------------------------------------- |
+| `store_document`     | Save a document (code, spec, config)                 |
+| `store_knowledge`    | Save a fact, decision, or observation                |
+| `store_note`         | Save a quick thought, idea, or transcript            |
+| `update_document`    | Modify an existing document                          |
+| `update_knowledge`   | Modify an existing knowledge entry                   |
+| `update_note`        | Modify an existing note                              |
+| `delete_document`    | Remove a document                                    |
+| `delete_knowledge`   | Remove a knowledge entry                             |
+| `delete_note`        | Remove a note                                        |
+| `tag`                | Add or remove tags on any entry                      |
+| `search`             | Search across all stored data                        |
+| `read`               | Fetch full content of an item by ID                  |
+| `rename_namespace`   | Rename a namespace atomically across all item types  |
+| `delete_namespace`   | Permanently delete all items in a namespace          |
 
 ### Input Validation & Limits
 
