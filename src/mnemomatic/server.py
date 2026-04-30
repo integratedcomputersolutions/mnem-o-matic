@@ -736,14 +736,18 @@ def health() -> str:
 def rename_namespace(old_namespace: str, new_namespace: str) -> dict:
     """Rename a namespace across all documents, knowledge entries, and notes.
 
-    Moves every item in old_namespace to new_namespace atomically. Items in
-    new_namespace that already exist are unaffected — this is a rename, not a merge.
+    Moves every item in old_namespace to new_namespace atomically. Fails if
+    new_namespace already exists and has items with conflicting titles or subjects
+    — resolve conflicts first by deleting or renaming the colliding items.
 
     Args:
         old_namespace: The namespace to rename.
         new_namespace: The new name for the namespace.
     """
-    counts = _db().rename_namespace(old_namespace, new_namespace)
+    try:
+        counts = _db().rename_namespace(old_namespace, new_namespace)
+    except ValueError as e:
+        return {"error": str(e)}
     return {
         "old_namespace": old_namespace,
         "new_namespace": new_namespace,

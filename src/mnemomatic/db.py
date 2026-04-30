@@ -546,12 +546,18 @@ class Database:
     def rename_namespace(self, old: str, new: str) -> dict[str, int]:
         conn = self._get_conn()
         counts = {}
-        for table in ("documents", "knowledge", "notes"):
-            cur = conn.execute(
-                f"UPDATE {table} SET namespace = ? WHERE namespace = ?", (new, old)
+        try:
+            for table in ("documents", "knowledge", "notes"):
+                cur = conn.execute(
+                    f"UPDATE {table} SET namespace = ? WHERE namespace = ?", (new, old)
+                )
+                counts[table] = cur.rowcount
+            conn.commit()
+        except sqlite3.IntegrityError:
+            conn.rollback()
+            raise ValueError(
+                f"Cannot rename '{old}' to '{new}': title/subject conflict with existing items in '{new}'"
             )
-            counts[table] = cur.rowcount
-        conn.commit()
         return counts
 
     def list_namespaces(self) -> list[str]:
