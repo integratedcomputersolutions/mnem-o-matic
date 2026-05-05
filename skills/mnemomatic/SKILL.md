@@ -68,6 +68,24 @@ Namespaces scope content to a project or context. Use consistent names:
 
 When searching, omit `namespace` to search globally across all namespaces.
 
+Use `rename_namespace` to rename a namespace atomically across all content types:
+
+```
+rename_namespace(old_namespace="old-name", new_namespace="new-name")
+```
+
+This also works as a merge — if `new_namespace` already exists, items from `old_namespace`
+are moved into it. The operation fails if there are title/subject conflicts between the two
+namespaces; resolve those first by deleting or renaming the conflicting items.
+
+Use `delete_namespace` to permanently remove all items in a namespace at once:
+
+```
+delete_namespace(namespace="old-project")
+```
+
+This is irreversible. Prefer `rename_namespace` if you only want to reorganize content.
+
 ## Storing Good Knowledge Entries
 
 ```

@@ -335,6 +335,155 @@ class TestNamespaces(unittest.TestCase):
         self.assertEqual(namespaces.count("shared"), 1)
 
 
+# ── Rename Namespace ───────────────────────────────────────────────────────────
+
+class TestRenameNamespace(unittest.TestCase):
+
+    def setUp(self):
+        self.db = Database(":memory:")
+
+    def tearDown(self):
+        self.db.close()
+
+    def _store_all(self):
+        doc = Document(namespace="old", title="T", content="C")
+        self.doc_id = self.db.store_document(doc, _fake_embedding("T\nC"))[0].id
+        k = Knowledge(namespace="old", subject="s", fact="f")
+        self.k_id = self.db.store_knowledge(k, _fake_embedding("s: f"))[0].id
+        note = Note(namespace="old", title="N", content="C")
+        self.note_id = self.db.store_note(note, _fake_embedding("N\nC"))[0].id
+
+    def test_rename_moves_all_content_types(self):
+        self._store_all()
+        counts = self.db.rename_namespace("old", "new")
+        self.assertEqual(counts, {"documents": 1, "knowledge": 1, "notes": 1})
+        self.assertNotIn("old", self.db.list_namespaces())
+        self.assertIn("new", self.db.list_namespaces())
+
+    def test_renamed_items_are_retrievable(self):
+        self._store_all()
+        self.db.rename_namespace("old", "new")
+        self.assertEqual(self.db.get_document(self.doc_id).namespace, "new")
+        self.assertEqual(self.db.get_knowledge(self.k_id).namespace, "new")
+        self.assertEqual(self.db.get_note(self.note_id).namespace, "new")
+
+    def test_rename_into_existing_namespace_merges(self):
+        doc_old = Document(namespace="old", title="T-old", content="C")
+        self.db.store_document(doc_old, _fake_embedding("T-old\nC"))
+        doc_new = Document(namespace="new", title="T-new", content="C")
+        self.db.store_document(doc_new, _fake_embedding("T-new\nC"))
+
+        counts = self.db.rename_namespace("old", "new")
+        self.assertEqual(counts["documents"], 1)
+        docs = self.db.list_documents("new")
+        titles = {d.title for d in docs}
+        self.assertIn("T-old", titles)
+        self.assertIn("T-new", titles)
+
+    def test_rename_conflict_raises_value_error(self):
+        doc_a = Document(namespace="old", title="Same", content="C")
+        self.db.store_document(doc_a, _fake_embedding("Same\nC"))
+        doc_b = Document(namespace="new", title="Same", content="C")
+        self.db.store_document(doc_b, _fake_embedding("Same\nC"))
+
+        with self.assertRaises(ValueError):
+            self.db.rename_namespace("old", "new")
+
+    def test_rename_nonexistent_namespace_returns_zero_counts(self):
+        counts = self.db.rename_namespace("ghost", "new")
+        self.assertEqual(sum(counts.values()), 0)
+
+    def test_renamed_items_searchable_in_new_namespace(self):
+        doc = Document(namespace="old", title="auth guide", content="JWT tokens")
+        emb = _fake_embedding("auth guide\nJWT tokens")
+        self.db.store_document(doc, emb)
+        self.db.rename_namespace("old", "new")
+
+        results = self.db.search_fts("JWT", namespace="new")
+        self.assertTrue(len(results) > 0)
+        results_old = self.db.search_fts("JWT", namespace="old")
+        self.assertEqual(results_old, [])
+
+
+# ── Delete Namespace ────────────────────────────────────────────────────────────
+
+class TestDeleteNamespace(unittest.TestCase):
+
+    def setUp(self):
+        self.db = Database(":memory:")
+
+    def tearDown(self):
+        self.db.close()
+
+    def _store_all(self, namespace="target"):
+        doc = Document(namespace=namespace, title="T", content="C")
+        self.doc_id = self.db.store_document(doc, _fake_embedding("T\nC"))[0].id
+        k = Knowledge(namespace=namespace, subject="s", fact="f")
+        self.k_id = self.db.store_knowledge(k, _fake_embedding("s: f"))[0].id
+        note = Note(namespace=namespace, title="N", content="C")
+        self.note_id = self.db.store_note(note, _fake_embedding("N\nC"))[0].id
+
+    def test_delete_removes_all_content_types(self):
+        self._store_all()
+        counts = self.db.delete_namespace("target")
+        self.assertEqual(counts, {"documents": 1, "knowledge": 1, "notes": 1})
+
+    def test_deleted_namespace_gone_from_list(self):
+        self._store_all()
+        self.db.delete_namespace("target")
+        self.assertNotIn("target", self.db.list_namespaces())
+
+    def test_deleted_items_not_retrievable(self):
+        self._store_all()
+        self.db.delete_namespace("target")
+        self.assertIsNone(self.db.get_document(self.doc_id))
+        self.assertIsNone(self.db.get_knowledge(self.k_id))
+        self.assertIsNone(self.db.get_note(self.note_id))
+
+    def test_delete_only_affects_target_namespace(self):
+        self._store_all("target")
+        doc2 = Document(namespace="other", title="T", content="C")
+        other_id = self.db.store_document(doc2, _fake_embedding("T\nC"))[0].id
+        self.db.delete_namespace("target")
+        self.assertIsNotNone(self.db.get_document(other_id))
+        self.assertIn("other", self.db.list_namespaces())
+
+    def test_delete_nonexistent_namespace_returns_zero_counts(self):
+        counts = self.db.delete_namespace("ghost")
+        self.assertEqual(sum(counts.values()), 0)
+
+    def test_delete_multiple_items_per_type(self):
+        for i in range(3):
+            doc = Document(namespace="target", title=f"T{i}", content="C")
+            self.db.store_document(doc, _fake_embedding(f"T{i}\nC"))
+        for i in range(2):
+            k = Knowledge(namespace="target", subject=f"s{i}", fact="f")
+            self.db.store_knowledge(k, _fake_embedding(f"s{i}: f"))
+
+        counts = self.db.delete_namespace("target")
+        self.assertEqual(counts["documents"], 3)
+        self.assertEqual(counts["knowledge"], 2)
+        self.assertEqual(counts["notes"], 0)
+
+    def test_deleted_items_not_returned_by_search(self):
+        doc = Document(namespace="target", title="auth guide", content="JWT tokens")
+        emb = _fake_embedding("auth guide\nJWT tokens")
+        self.db.store_document(doc, emb)
+        self.db.delete_namespace("target")
+
+        results = self.db.search_fts("JWT", namespace="target")
+        self.assertEqual(results, [])
+
+    def test_deleted_items_not_returned_by_vec_search(self):
+        doc = Document(namespace="target", title="auth guide", content="JWT tokens")
+        emb = _fake_embedding("auth guide\nJWT tokens")
+        self.db.store_document(doc, emb)
+        self.db.delete_namespace("target")
+
+        results = self.db.search_vec(emb, namespace="target")
+        self.assertEqual(results, [])
+
+
 # ── Search ─────────────────────────────────────────────────────────────────────
 
 class TestSearch(unittest.TestCase):

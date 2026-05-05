@@ -732,6 +732,49 @@ def health() -> str:
     })
 
 
+@mcp.tool(annotations=_ANN_DELETE)
+def delete_namespace(namespace: str) -> dict:
+    """Permanently delete all items in a namespace.
+
+    Removes every document, knowledge entry, and note in the given namespace in
+    a single atomic operation. This is irreversible — deleted items cannot be
+    recovered. If you only want to reorganize content, use rename_namespace instead.
+
+    Args:
+        namespace: The namespace to delete.
+    """
+    counts = _db().delete_namespace(namespace)
+    return {
+        "namespace": namespace,
+        "deleted": counts,
+        "total": sum(counts.values()),
+    }
+
+
+@mcp.tool(annotations=_ANN_UPDATE)
+def rename_namespace(old_namespace: str, new_namespace: str) -> dict:
+    """Rename a namespace across all documents, knowledge entries, and notes.
+
+    Moves every item in old_namespace to new_namespace atomically. Fails if
+    new_namespace already exists and has items with conflicting titles or subjects
+    — resolve conflicts first by deleting or renaming the colliding items.
+
+    Args:
+        old_namespace: The namespace to rename.
+        new_namespace: The new name for the namespace.
+    """
+    try:
+        counts = _db().rename_namespace(old_namespace, new_namespace)
+    except ValueError as e:
+        return {"error": str(e)}
+    return {
+        "old_namespace": old_namespace,
+        "new_namespace": new_namespace,
+        "renamed": counts,
+        "total": sum(counts.values()),
+    }
+
+
 @mcp.resource("mnemomatic://namespaces")
 def list_namespaces() -> str:
     """List all namespaces in Mnem-O-matic."""

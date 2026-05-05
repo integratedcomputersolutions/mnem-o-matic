@@ -543,6 +543,44 @@ class Database:
 
     # ── Namespaces ──
 
+    def rename_namespace(self, old: str, new: str) -> dict[str, int]:
+        conn = self._get_conn()
+        counts = {}
+        try:
+            for table in ("documents", "knowledge", "notes"):
+                cur = conn.execute(
+                    f"UPDATE {table} SET namespace = ? WHERE namespace = ?", (new, old)
+                )
+                counts[table] = cur.rowcount
+            conn.commit()
+        except sqlite3.IntegrityError:
+            conn.rollback()
+            raise ValueError(
+                f"Cannot rename '{old}' to '{new}': title/subject conflict with existing items in '{new}'"
+            )
+        return counts
+
+    def delete_namespace(self, namespace: str) -> dict[str, int]:
+        conn = self._get_conn()
+        counts = {}
+        for table, vec_table in (
+            ("documents", "vec_documents"),
+            ("knowledge", "vec_knowledge"),
+            ("notes", "vec_notes"),
+        ):
+            rows = conn.execute(
+                f"DELETE FROM {table} WHERE namespace = ? RETURNING rowid", (namespace,)
+            ).fetchall()
+            counts[table] = len(rows)
+            if rows:
+                rowids = [r["rowid"] for r in rows]
+                conn.execute(
+                    f"DELETE FROM {vec_table} WHERE rowid IN ({','.join('?' * len(rowids))})",
+                    rowids,
+                )
+        conn.commit()
+        return counts
+
     def list_namespaces(self) -> list[str]:
         rows = self._get_conn().execute("""
             SELECT DISTINCT namespace FROM documents
