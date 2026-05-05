@@ -1,6 +1,6 @@
 [project]
 name = "mnemomatic-server"
-version = "1.0.0"
+version = "1.1.0"
 description = "Perfect recall for imperfect machines. A shared memory MCP server for LLMs."
 requires-python = ">=3.11"
 dependencies = [
