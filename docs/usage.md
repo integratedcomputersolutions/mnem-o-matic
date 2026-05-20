@@ -15,6 +15,17 @@ Replace `your-server-hostname` with the hostname or IP you used when generating 
 
 Point any MCP-compatible client to `https://your-server-hostname/mcp` using the Streamable HTTP transport. Include the `Authorization: Bearer <key>` header with every request.
 
+### Small-Context Models (SLMs)
+
+Verbose tool descriptions can consume a significant portion of a small model's context window. Appending `?compact=true` to the endpoint URL switches `tools/list` responses to concise one-line descriptions and strips verbose parameter descriptions, keeping only short hints for parameters with constrained valid values (`mode`, `content_type`, `item_type`, `confidence`).
+
+| Client | URL |
+|--------|-----|
+| Full-context (Claude, GPT-4, etc.) | `https://your-server-hostname/mcp` |
+| Small-context (7B–13B local models) | `https://your-server-hostname/mcp?compact=true` |
+
+Both endpoints share the same server instance, database, and authentication. The compact descriptions are tuned in `src/mnemomatic/compact.py` (`_COMPACT_DESCRIPTIONS` and `_COMPACT_PARAMS`).
+
 ## Authentication
 
 Authentication is **optional** and uses the Bearer token scheme. Requests that fail authentication are rejected before any MCP processing.
