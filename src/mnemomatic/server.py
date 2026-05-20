@@ -20,6 +20,7 @@ DB_PATH = os.environ.get("MNEMOMATIC_DB_PATH", "/data/mnemomatic.db")
 HOST = os.environ.get("MNEMOMATIC_HOST", "0.0.0.0")
 PORT = int(os.environ.get("MNEMOMATIC_PORT", "8000"))
 API_KEY = os.environ.get("MNEMOMATIC_API_KEY", "")
+CORS_ORIGINS = os.environ.get("MNEMOMATIC_CORS_ORIGINS", "")
 EMBED_URL = os.environ.get("MNEMOMATIC_EMBED_URL", "")
 EMBED_MODEL = os.environ.get("MNEMOMATIC_EMBED_MODEL", "")
 MAX_SEARCH_LIMIT = 100
@@ -862,6 +863,23 @@ def main():
     # Middleware handles both authenticated and non-authenticated modes
     # If API_KEY is empty, auth is disabled but logging still tracks requests
     app = BearerAuthMiddleware(app, api_key=API_KEY)
+
+    if CORS_ORIGINS:
+        from starlette.middleware.cors import CORSMiddleware
+        origins = [o.strip() for o in CORS_ORIGINS.split(",") if o.strip()]
+        if "*" in origins and not API_KEY:
+            logger.warning(
+                "SECURITY: CORS is open to all origins (*) and authentication is disabled — "
+                "any website can read from and write to this server."
+            )
+        app = CORSMiddleware(
+            app,
+            allow_origins=origins,
+            allow_methods=["GET", "POST", "OPTIONS"],
+            allow_headers=["*"],
+            expose_headers=["Mcp-Session-Id"],
+        )
+        logger.info("CORS enabled for origins: %s", origins)
 
     logger.info("Starting server on %s:%d", HOST, PORT)
     uvicorn.run(
