@@ -32,7 +32,7 @@ _COMPACT_DESCRIPTIONS: dict[str, str] = {
 
 # Param descriptions only for constrained/non-obvious values; all others are stripped.
 _COMPACT_PARAMS: dict[str, dict[str, str]] = {
-    "search":          {"mode": "hybrid|fulltext|semantic", "content_type": "all|documents|knowledge|notes"},
+    "search":          {"mode": "hybrid|fulltext|semantic", "content_type": "all|documents|knowledge|notes", "namespace": "filter by namespace; omit for global search"},
     "read":            {"item_type": "document|knowledge|note"},
     "tag":             {"item_type": "document|knowledge|note"},
     "store_knowledge": {"confidence": "0.0-1.0"},
