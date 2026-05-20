@@ -871,7 +871,7 @@ def main():
             app,
             allow_origins=origins,
             allow_methods=["GET", "POST", "OPTIONS"],
-            allow_headers=["Authorization", "Content-Type"],
+            allow_headers=["*"],
         )
         logger.info("CORS enabled for origins: %s", origins)
 
