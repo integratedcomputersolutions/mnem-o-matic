@@ -867,12 +867,17 @@ def main():
     if CORS_ORIGINS:
         from starlette.middleware.cors import CORSMiddleware
         origins = [o.strip() for o in CORS_ORIGINS.split(",") if o.strip()]
+        if "*" in origins and not API_KEY:
+            logger.warning(
+                "SECURITY: CORS is open to all origins (*) and authentication is disabled — "
+                "any website can read from and write to this server."
+            )
         app = CORSMiddleware(
             app,
             allow_origins=origins,
             allow_methods=["GET", "POST", "OPTIONS"],
             allow_headers=["*"],
-            expose_headers=["*"],
+            expose_headers=["Mcp-Session-Id"],
         )
         logger.info("CORS enabled for origins: %s", origins)
 
