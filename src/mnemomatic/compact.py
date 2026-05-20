@@ -38,6 +38,27 @@ _COMPACT_PARAMS: dict[str, dict[str, str]] = {
     "store_knowledge": {"confidence": "0.0-1.0"},
 }
 
+# Optional tool subset: remove tool names to hide them in compact mode.
+# None exposes all tools.
+_COMPACT_TOOL_SUBSET: set[str] | None = None
+
+
+def _simplify_prop(prop: dict) -> dict:
+    """Strip schema noise from a single parameter property."""
+    # Unwrap anyOf: [{type: X}, {type: null}] → {type: X}
+    if "anyOf" in prop:
+        non_null = [s for s in prop["anyOf"] if s.get("type") != "null"]
+        prop = non_null[0] if len(non_null) == 1 else {"anyOf": non_null}
+
+    result: dict = {}
+    if "type" in prop:
+        result["type"] = prop["type"]
+    if prop.get("type") == "array":
+        result["type"] = "array"  # drop items detail
+    if "anyOf" in prop:
+        result["anyOf"] = prop["anyOf"]
+    return result
+
 
 def _compact_tools_body(body: bytes) -> bytes:
     """Replace verbose tool descriptions in a tools/list JSON-RPC response."""
@@ -50,18 +71,30 @@ def _compact_tools_body(body: bytes) -> bytes:
     if not isinstance(tools, list):
         return body
 
+    if _COMPACT_TOOL_SUBSET is not None:
+        tools = [t for t in tools if t.get("name") in _COMPACT_TOOL_SUBSET]
+        data["result"]["tools"] = tools
+
     for tool in tools:
         name = tool.get("name", "")
         if name in _COMPACT_DESCRIPTIONS:
             tool["description"] = _COMPACT_DESCRIPTIONS[name]
-        param_hints = _COMPACT_PARAMS.get(name, {})
-        for param, prop in tool.get("inputSchema", {}).get("properties", {}).items():
-            if param in param_hints:
-                prop["description"] = param_hints[param]
-            else:
-                prop.pop("description", None)
 
-    return json.dumps(data).encode()
+        schema = tool.get("inputSchema", {})
+        param_hints = _COMPACT_PARAMS.get(name, {})
+        simplified: dict = {}
+        for param, prop in schema.get("properties", {}).items():
+            simplified[param] = _simplify_prop(prop)
+            if param in param_hints:
+                simplified[param]["description"] = param_hints[param]
+
+        tool["inputSchema"] = {
+            "type": "object",
+            "properties": simplified,
+            **({"required": schema["required"]} if "required" in schema else {}),
+        }
+
+    return json.dumps(data, separators=(",", ":")).encode()
 
 
 class CompactToolsMiddleware:
