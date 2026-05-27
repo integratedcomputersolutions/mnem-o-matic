@@ -11,6 +11,7 @@ from mcp.types import ToolAnnotations
 from pydantic import ValidationError
 
 from mnemomatic.auth import BearerAuthMiddleware
+from mnemomatic.compact import CompactToolsMiddleware
 from mnemomatic.db import Database
 from mnemomatic.models import Document, Knowledge, Note
 
@@ -859,6 +860,7 @@ def main():
     # Authentication is optional based on API_KEY environment variable
     logger.info("Building ASGI application...")
     app = mcp.streamable_http_app()
+    app = CompactToolsMiddleware(app)
 
     # Middleware handles both authenticated and non-authenticated modes
     # If API_KEY is empty, auth is disabled but logging still tracks requests
