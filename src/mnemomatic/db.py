@@ -15,6 +15,9 @@ logger = logging.getLogger("mnemomatic")
 
 EMBEDDING_DIM = int(os.environ.get("MNEMOMATIC_EMBED_DIM", "384"))
 BUSY_TIMEOUT_MS = 5000
+CHUNK_THRESHOLD = int(os.environ.get("MNEMOMATIC_CHUNK_THRESHOLD", "2000"))
+CHUNK_SIZE = int(os.environ.get("MNEMOMATIC_CHUNK_SIZE", "1000"))
+CHUNK_OVERLAP = int(os.environ.get("MNEMOMATIC_CHUNK_OVERLAP", "200"))
 
 _DOCUMENT_FIELDS = frozenset({"title", "content", "mime_type", "tags", "metadata"})
 _KNOWLEDGE_FIELDS = frozenset({"subject", "fact", "confidence", "source", "tags", "metadata"})
@@ -33,6 +36,31 @@ _TABLE_RESOURCE_URI = {
     "knowledge": "mnemomatic://knowledge-entry/{id}",
     "notes": "mnemomatic://note/{id}",
 }
+
+
+def _chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[str]:
+    """Split text into overlapping chunks, breaking at paragraph/sentence boundaries when possible."""
+    if len(text) <= chunk_size:
+        return [text]
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = min(start + chunk_size, len(text))
+        if end < len(text):
+            para_break = text.rfind("\n\n", start, end)
+            if para_break > start:
+                end = para_break + 2
+            else:
+                for sep in (". ", "! ", "? ", "\n"):
+                    sent_break = text.rfind(sep, start + overlap, end)
+                    if sent_break > start:
+                        end = sent_break + len(sep)
+                        break
+        chunks.append(text[start:end])
+        if end >= len(text):
+            break
+        start = end - overlap
+    return chunks
 
 
 def _row_to_search_result(table: str, row, score: float) -> SearchResult:
@@ -235,6 +263,26 @@ class Database:
             USING vec0(embedding float[{EMBEDDING_DIM}])
         """)
 
+        # Chunks table for large documents
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS document_chunks (
+                id INTEGER PRIMARY KEY,
+                document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                chunk_index INTEGER NOT NULL,
+                content TEXT NOT NULL
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_document_id ON document_chunks(document_id)")
+        conn.execute(f"""
+            CREATE VIRTUAL TABLE IF NOT EXISTS vec_document_chunks
+            USING vec0(embedding float[{EMBEDDING_DIM}])
+        """)
+        conn.executescript("""
+            CREATE TRIGGER IF NOT EXISTS document_chunks_ad AFTER DELETE ON document_chunks BEGIN
+                DELETE FROM vec_document_chunks WHERE rowid = old.id;
+            END;
+        """)
+
         conn.commit()
 
     # ── Generic CRUD helpers ──
@@ -282,16 +330,21 @@ class Database:
         if not row:
             return None
         if embedding is not None:
-            conn.execute(
+            updated = conn.execute(
                 f"UPDATE {vec_table} SET embedding = ? WHERE rowid = ?",
                 (_serialize_embedding(embedding), row["rowid"]),
-            )
+            ).rowcount
+            if updated == 0:
+                conn.execute(
+                    f"INSERT INTO {vec_table} (rowid, embedding) VALUES (?, ?)",
+                    (row["rowid"], _serialize_embedding(embedding)),
+                )
         conn.commit()
         return converter(row)
 
     # ── Documents CRUD ──
 
-    def store_document(self, doc: Document, embedding: list[float] | None) -> tuple[Document, bool]:
+    def store_document(self, doc: Document, embedding: list[float] | None, chunks: list[tuple[str, list[float]]] | None = None) -> tuple[Document, bool]:
         conn = self._get_conn()
         existing = conn.execute(
             "SELECT id, rowid, created_at FROM documents WHERE namespace = ? AND title = ?",
@@ -305,10 +358,16 @@ class Database:
                 (doc.content, doc.mime_type, json.dumps(doc.tags), json.dumps(doc.metadata), now, existing["id"]),
             )
             if embedding is not None:
-                conn.execute(
+                updated = conn.execute(
                     "UPDATE vec_documents SET embedding = ? WHERE rowid = ?",
                     (_serialize_embedding(embedding), existing["rowid"]),
-                )
+                ).rowcount
+                if updated == 0:
+                    conn.execute(
+                        "INSERT INTO vec_documents (rowid, embedding) VALUES (?, ?)",
+                        (existing["rowid"], _serialize_embedding(embedding)),
+                    )
+            self._replace_document_chunks(conn, existing["id"], chunks)
             conn.commit()
             return Document(
                 id=existing["id"],
@@ -334,6 +393,7 @@ class Database:
                 "INSERT INTO vec_documents (rowid, embedding) VALUES (?, ?)",
                 (rowid, _serialize_embedding(embedding)),
             )
+        self._replace_document_chunks(conn, doc.id, chunks)
         conn.commit()
         return doc, True
 
@@ -348,6 +408,12 @@ class Database:
 
     def list_documents(self, namespace: str) -> list[Document]:
         return self._list_items("documents", self._row_to_document, namespace)
+
+    def replace_document_chunks(self, doc_id: str, chunks: list[tuple[str, list[float]]] | None) -> None:
+        """Replace all chunks for a document. Deletes existing chunks, then inserts new ones if provided."""
+        conn = self._get_conn()
+        self._replace_document_chunks(conn, doc_id, chunks)
+        conn.commit()
 
     # ── Knowledge CRUD ──
 
@@ -508,11 +574,17 @@ class Database:
 
     def search_vec(self, embedding: list[float], table: str = "all", namespace: str | None = None, limit: int = 20) -> list[SearchResult]:
         results = []
-        if table in ("all","documents"):
-            results.extend(self._vec_search_table("documents", embedding, namespace, limit))
-        if table in ("all","knowledge"):
+        if table in ("all", "documents"):
+            chunk_results = self._vec_search_document_chunks(embedding, namespace, limit)
+            chunked_ids = {r.id for r in chunk_results}
+            results.extend(chunk_results)
+            # Also search whole-doc vectors (small docs and pre-chunk legacy data)
+            for r in self._vec_search_table("documents", embedding, namespace, limit):
+                if r.id not in chunked_ids:
+                    results.append(r)
+        if table in ("all", "knowledge"):
             results.extend(self._vec_search_table("knowledge", embedding, namespace, limit))
-        if table in ("all","notes"):
+        if table in ("all", "notes"):
             results.extend(self._vec_search_table("notes", embedding, namespace, limit))
         results.sort(key=lambda r: r.score, reverse=True)
         return results[:limit]
@@ -530,6 +602,8 @@ class Database:
         for rank, r in enumerate(vec_results):
             if r.id in rrf_scores:
                 rrf_scores[r.id]["score"] += 1.0 / (k + rank + 1)
+                # Prefer the semantic result: it may carry a precise chunk snippet
+                rrf_scores[r.id]["result"] = r
             else:
                 rrf_scores[r.id] = {"result": r, "score": 1.0 / (k + rank + 1)}
 
@@ -677,6 +751,73 @@ class Database:
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
         )
+
+    def _replace_document_chunks(self, conn: sqlite3.Connection, doc_id: str, chunks: list[tuple[str, list[float]]] | None) -> None:
+        """Delete existing chunks for a document and optionally insert new ones. Does not commit."""
+        conn.execute("DELETE FROM document_chunks WHERE document_id = ?", (doc_id,))
+        if not chunks:
+            return
+        for i, (content, chunk_embedding) in enumerate(chunks):
+            cursor = conn.execute(
+                "INSERT INTO document_chunks (document_id, chunk_index, content) VALUES (?, ?, ?)",
+                (doc_id, i, content),
+            )
+            conn.execute(
+                "INSERT INTO vec_document_chunks (rowid, embedding) VALUES (?, ?)",
+                (cursor.lastrowid, _serialize_embedding(chunk_embedding)),
+            )
+
+    def _vec_search_document_chunks(self, embedding: list[float], namespace: str | None, limit: int) -> list[SearchResult]:
+        """Search chunk-level embeddings; returns the best matching chunk per document."""
+        conn = self._get_conn()
+        fetch_limit = limit * 3  # over-fetch to account for per-document dedup
+
+        vec_rows = conn.execute(
+            "SELECT rowid, distance FROM vec_document_chunks WHERE embedding MATCH ? AND k = ?",
+            (_serialize_embedding(embedding), fetch_limit),
+        ).fetchall()
+        if not vec_rows:
+            return []
+
+        rowid_distance = {row["rowid"]: row["distance"] for row in vec_rows}
+        placeholders = ",".join("?" * len(vec_rows))
+        params: list = [row["rowid"] for row in vec_rows]
+
+        sql = f"""
+            SELECT dc.id AS chunk_rowid, dc.document_id, dc.content AS chunk_content,
+                   d.namespace, d.title, d.tags
+            FROM document_chunks dc
+            JOIN documents d ON d.id = dc.document_id
+            WHERE dc.id IN ({placeholders})
+        """
+        if namespace:
+            sql += " AND d.namespace = ?"
+            params.append(namespace)
+
+        rows = conn.execute(sql, params).fetchall()
+
+        # Keep only the best-scoring chunk per document
+        best: dict[str, tuple] = {}
+        for row in rows:
+            dist = rowid_distance[row["chunk_rowid"]]
+            if row["document_id"] not in best or dist < best[row["document_id"]][1]:
+                best[row["document_id"]] = (row, dist)
+
+        results = []
+        for row, distance in sorted(best.values(), key=lambda x: x[1])[:limit]:
+            score = max(0.0, 1.0 - (distance * distance / 2.0))
+            results.append(SearchResult(
+                id=row["document_id"],
+                type="document",
+                namespace=row["namespace"],
+                title=row["title"],
+                snippet=row["chunk_content"],
+                resource_uri=f"mnemomatic://document/{row['document_id']}",
+                score=score,
+                tags=_safe_json_loads(row["tags"], [], f"tags doc {row['document_id']}"),
+                partial=True,
+            ))
+        return results
 
     def _row_to_knowledge(self, row: dict) -> Knowledge:
         return Knowledge(

@@ -273,6 +273,32 @@ store_knowledge(namespace="webapp", subject="auth method", fact="Migrated to ses
 → {"id": "abc-123", "created": false}
 ```
 
+### Chunked Retrieval for Large Documents
+
+Documents longer than `MNEMOMATIC_CHUNK_THRESHOLD` (default: 2000 chars) are automatically split into overlapping chunks at store time. Each chunk gets its own vector embedding, so semantic search returns the most relevant passage rather than a whole-document match.
+
+When a search result comes from a chunk, the response includes `"partial": true`. This signals that only part of the document was returned — call `read` with the same `id` to retrieve the full content.
+
+```
+# Search returns a relevant passage from a large document
+search("authentication flow")
+→ {"id": "abc-123", "title": "API spec", "snippet": "...JWT tokens are validated by...", "partial": true}
+
+# Fetch the full document when needed
+read(item_type="document", id="abc-123")
+→ {"content": "...full document..."}
+```
+
+Chunking is transparent: documents are split and indexed automatically, and search results use the same `id` as the parent document. Small documents, knowledge entries, and notes are unaffected.
+
+Existing documents stored before upgrading continue to work via their whole-document embeddings. They transition to chunk-based retrieval automatically the next time they are stored or updated.
+
+| Env var | Default | Description |
+|---------|---------|-------------|
+| `MNEMOMATIC_CHUNK_THRESHOLD` | `2000` | Document length in chars above which chunking is applied |
+| `MNEMOMATIC_CHUNK_SIZE` | `1000` | Target chunk size in chars |
+| `MNEMOMATIC_CHUNK_OVERLAP` | `200` | Overlap between consecutive chunks in chars |
+
 ### Search Modes
 
 The `search` tool supports three modes:
