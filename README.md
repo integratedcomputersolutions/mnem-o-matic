@@ -26,7 +26,7 @@ Mnem-O-matic fixes this by providing a shared, persistent memory that any LLM ca
 
 **Notes** — quick thoughts, ideas, observations, and voice transcripts. Informal content that LLMs should be aware of but that isn't structured enough to be a document or atomic enough to be a knowledge entry.
 
-All types support namespaces (per-project or global), tags, and metadata. Everything is searchable via full-text and semantic search.
+All types support namespaces (per-project or global), tags, and metadata. Everything is searchable via full-text and semantic search. Large documents are automatically split into chunks at store time, so search returns the most relevant passage rather than the entire file — giving agents focused context without burning their context window.
 
 ## Agent Skill
 
