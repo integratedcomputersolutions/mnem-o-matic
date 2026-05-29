@@ -23,6 +23,9 @@ _DOCUMENT_FIELDS = frozenset({"title", "content", "mime_type", "tags", "metadata
 _KNOWLEDGE_FIELDS = frozenset({"subject", "fact", "confidence", "source", "tags", "metadata"})
 _NOTE_FIELDS = frozenset({"title", "content", "source", "tags", "metadata"})
 
+# The three content tables, in display order. Each has a parallel vec_<table>.
+_TABLES = ("documents", "knowledge", "notes")
+
 # Maps singular item_type strings (used by update_tags) to table names
 _ITEM_TYPE_TO_TABLE = {"document": "documents", "knowledge": "knowledge", "note": "notes"}
 
@@ -84,6 +87,14 @@ def _row_to_search_result(table: str, row, score: float) -> SearchResult:
 
 def _serialize_embedding(embedding: list[float]) -> bytes:
     return struct.pack(f"{len(embedding)}f", *embedding)
+
+
+def _l2_to_cosine(distance: float) -> float:
+    """Convert an L2 distance to cosine similarity for normalized embeddings.
+
+    cosine_sim = 1 - (L2^2 / 2), which ranges -1..1; clamp to 0..1.
+    """
+    return max(0.0, 1.0 - (distance * distance / 2.0))
 
 
 def _safe_json_loads(s: str, default, context: str = ""):
@@ -304,6 +315,22 @@ class Database:
         conn.commit()
         return True
 
+    def _upsert_vec(self, conn: sqlite3.Connection, vec_table: str, rowid: int, embedding: list[float]) -> None:
+        """Write an embedding for rowid, inserting the vec row if it doesn't exist yet.
+
+        The insert fallback matters when a row was first stored without an embedding
+        (e.g. FTS-only mode) and later re-stored once an embedder is available.
+        """
+        updated = conn.execute(
+            f"UPDATE {vec_table} SET embedding = ? WHERE rowid = ?",
+            (_serialize_embedding(embedding), rowid),
+        ).rowcount
+        if updated == 0:
+            conn.execute(
+                f"INSERT INTO {vec_table} (rowid, embedding) VALUES (?, ?)",
+                (rowid, _serialize_embedding(embedding)),
+            )
+
     def _list_items(self, table: str, converter, namespace: str) -> list:
         rows = self._get_conn().execute(
             f"SELECT * FROM {table} WHERE namespace = ? ORDER BY updated_at DESC", (namespace,)
@@ -330,15 +357,7 @@ class Database:
         if not row:
             return None
         if embedding is not None:
-            updated = conn.execute(
-                f"UPDATE {vec_table} SET embedding = ? WHERE rowid = ?",
-                (_serialize_embedding(embedding), row["rowid"]),
-            ).rowcount
-            if updated == 0:
-                conn.execute(
-                    f"INSERT INTO {vec_table} (rowid, embedding) VALUES (?, ?)",
-                    (row["rowid"], _serialize_embedding(embedding)),
-                )
+            self._upsert_vec(conn, vec_table, row["rowid"], embedding)
         conn.commit()
         return converter(row)
 
@@ -358,15 +377,7 @@ class Database:
                 (doc.content, doc.mime_type, json.dumps(doc.tags), json.dumps(doc.metadata), now, existing["id"]),
             )
             if embedding is not None:
-                updated = conn.execute(
-                    "UPDATE vec_documents SET embedding = ? WHERE rowid = ?",
-                    (_serialize_embedding(embedding), existing["rowid"]),
-                ).rowcount
-                if updated == 0:
-                    conn.execute(
-                        "INSERT INTO vec_documents (rowid, embedding) VALUES (?, ?)",
-                        (existing["rowid"], _serialize_embedding(embedding)),
-                    )
+                self._upsert_vec(conn, "vec_documents", existing["rowid"], embedding)
             self._replace_document_chunks(conn, existing["id"], chunks)
             conn.commit()
             return Document(
@@ -431,10 +442,7 @@ class Database:
                 (k.fact, k.confidence, k.source, json.dumps(k.tags), json.dumps(k.metadata), now, existing["id"]),
             )
             if embedding is not None:
-                conn.execute(
-                    "UPDATE vec_knowledge SET embedding = ? WHERE rowid = ?",
-                    (_serialize_embedding(embedding), existing["rowid"]),
-                )
+                self._upsert_vec(conn, "vec_knowledge", existing["rowid"], embedding)
             conn.commit()
             return Knowledge(
                 id=existing["id"],
@@ -492,10 +500,7 @@ class Database:
                 (note.content, note.source, json.dumps(note.tags), json.dumps(note.metadata), now, existing["id"]),
             )
             if embedding is not None:
-                conn.execute(
-                    "UPDATE vec_notes SET embedding = ? WHERE rowid = ?",
-                    (_serialize_embedding(embedding), existing["rowid"]),
-                )
+                self._upsert_vec(conn, "vec_notes", existing["rowid"], embedding)
             conn.commit()
             return Note(
                 id=existing["id"],
@@ -563,12 +568,9 @@ class Database:
 
     def search_fts(self, query: str, table: str = "all", namespace: str | None = None, limit: int = 20) -> list[SearchResult]:
         results = []
-        if table in ("all","documents"):
-            results.extend(self._fts_search_table("documents", query, namespace, limit))
-        if table in ("all","knowledge"):
-            results.extend(self._fts_search_table("knowledge", query, namespace, limit))
-        if table in ("all","notes"):
-            results.extend(self._fts_search_table("notes", query, namespace, limit))
+        for t in _TABLES:
+            if table in ("all", t):
+                results.extend(self._fts_search_table(t, query, namespace, limit))
         results.sort(key=lambda r: r.score, reverse=True)
         return results[:limit]
 
@@ -582,10 +584,9 @@ class Database:
             for r in self._vec_search_table("documents", embedding, namespace, limit):
                 if r.id not in chunked_ids:
                     results.append(r)
-        if table in ("all", "knowledge"):
-            results.extend(self._vec_search_table("knowledge", embedding, namespace, limit))
-        if table in ("all", "notes"):
-            results.extend(self._vec_search_table("notes", embedding, namespace, limit))
+        for t in ("knowledge", "notes"):
+            if table in ("all", t):
+                results.extend(self._vec_search_table(t, embedding, namespace, limit))
         results.sort(key=lambda r: r.score, reverse=True)
         return results[:limit]
 
@@ -621,7 +622,7 @@ class Database:
         conn = self._get_conn()
         counts = {}
         try:
-            for table in ("documents", "knowledge", "notes"):
+            for table in _TABLES:
                 cur = conn.execute(
                     f"UPDATE {table} SET namespace = ? WHERE namespace = ?", (new, old)
                 )
@@ -637,11 +638,7 @@ class Database:
     def delete_namespace(self, namespace: str) -> dict[str, int]:
         conn = self._get_conn()
         counts = {}
-        for table, vec_table in (
-            ("documents", "vec_documents"),
-            ("knowledge", "vec_knowledge"),
-            ("notes", "vec_notes"),
-        ):
+        for table in _TABLES:
             rows = conn.execute(
                 f"DELETE FROM {table} WHERE namespace = ? RETURNING rowid", (namespace,)
             ).fetchall()
@@ -649,7 +646,7 @@ class Database:
             if rows:
                 rowids = [r["rowid"] for r in rows]
                 conn.execute(
-                    f"DELETE FROM {vec_table} WHERE rowid IN ({','.join('?' * len(rowids))})",
+                    f"DELETE FROM vec_{table} WHERE rowid IN ({','.join('?' * len(rowids))})",
                     rowids,
                 )
         conn.commit()
@@ -726,9 +723,7 @@ class Database:
         results = []
         for row in sorted(detail_rows, key=lambda r: rowid_distance[r["rowid"]])[:limit]:
             distance = rowid_distance[row["rowid"]]
-            # L2 distance to cosine similarity for normalized embeddings:
-            # cosine_sim = 1 - (L2^2 / 2), range: -1 to 1, clamp to 0-1
-            score = max(0.0, 1.0 - (distance * distance / 2.0))
+            score = _l2_to_cosine(distance)
             results.append(_row_to_search_result(table, row, score))
         return results
 
@@ -805,7 +800,7 @@ class Database:
 
         results = []
         for row, distance in sorted(best.values(), key=lambda x: x[1])[:limit]:
-            score = max(0.0, 1.0 - (distance * distance / 2.0))
+            score = _l2_to_cosine(distance)
             results.append(SearchResult(
                 id=row["document_id"],
                 type="document",

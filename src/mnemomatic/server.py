@@ -178,6 +178,33 @@ def _safe_embed(text: str) -> list[float] | None:
         return None
 
 
+def _knowledge_embed_text(subject: str, fact: str) -> str:
+    """Text embedded for a knowledge entry. Shared by store and update so they never drift."""
+    return f"{subject}: {fact}"
+
+
+def _note_embed_text(title: str, content: str) -> str:
+    """Text embedded for a note. Shared by store and update so they never drift."""
+    return f"{title}\n{content}"
+
+
+def _embed_document_body(title: str, content: str) -> tuple[list[float] | None, list[tuple[str, list[float]]] | None]:
+    """Compute the search representation for a document body.
+
+    Documents at or above CHUNK_THRESHOLD are split into overlapping chunks, each
+    embedded independently, so search can surface the most relevant passage. Smaller
+    documents get a single whole-document embedding of "{title}\n{content}".
+
+    Returns (embedding, chunks): exactly one is non-None. Chunks with failed
+    embeddings are dropped; if none survive, chunks is None.
+    """
+    if len(content) >= CHUNK_THRESHOLD:
+        pairs = [(c, _safe_embed(c)) for c in _chunk_text(content, CHUNK_SIZE, CHUNK_OVERLAP)]
+        chunks = [(c, e) for c, e in pairs if e is not None]
+        return None, (chunks or None)
+    return _safe_embed(f"{title}\n{content}"), None
+
+
 # ── Tools ──
 
 
@@ -226,15 +253,7 @@ def store_document(
     except ValidationError as e:
         return {"error": "Invalid document", "details": _format_validation_error(e)}
 
-    embedding = None
-    chunks = None
-    if len(content) >= CHUNK_THRESHOLD:
-        raw_chunks = _chunk_text(content, CHUNK_SIZE, CHUNK_OVERLAP)
-        pairs = [(c, _safe_embed(c)) for c in raw_chunks]
-        valid = [(c, e) for c, e in pairs if e is not None]
-        chunks = valid or None
-    else:
-        embedding = _safe_embed(f"{title}\n{content}")
+    embedding, chunks = _embed_document_body(title, content)
 
     stored, created = _db().store_document(doc, embedding, chunks)
     return {"id": stored.id, "namespace": stored.namespace, "title": stored.title, "created": created}
@@ -288,9 +307,90 @@ def store_knowledge(
     except ValidationError as e:
         return {"error": "Invalid knowledge entry", "details": _format_validation_error(e)}
 
-    embedding = _safe_embed(f"{subject}: {fact}")
+    embedding = _safe_embed(_knowledge_embed_text(subject, fact))
     stored, created = _db().store_knowledge(k, embedding)
     return {"id": stored.id, "namespace": stored.namespace, "subject": stored.subject, "created": created}
+
+
+# ── Shared update machinery ──
+
+
+def _collect_fields(**kwargs) -> dict:
+    """Drop None-valued kwargs, leaving only the fields the caller actually set."""
+    return {k: v for k, v in kwargs.items() if v is not None}
+
+
+def _document_update_embedding(id: str, existing: Document, fields: dict) -> list[float] | None:
+    """Recompute a document's embedding when its body changed, rewriting chunks as a side effect."""
+    if "content" in fields:
+        new_title = fields.get("title", existing.title)
+        embedding, chunks = _embed_document_body(new_title, fields["content"])
+        _db().replace_document_chunks(id, chunks)
+        return embedding
+    if "title" in fields and len(existing.content) < CHUNK_THRESHOLD:
+        embedding, _ = _embed_document_body(fields["title"], existing.content)
+        return embedding
+    return None
+
+
+def _knowledge_update_embedding(id: str, existing: Knowledge, fields: dict) -> list[float] | None:
+    if "subject" in fields or "fact" in fields:
+        return _safe_embed(_knowledge_embed_text(
+            fields.get("subject", existing.subject), fields.get("fact", existing.fact)))
+    return None
+
+
+def _note_update_embedding(id: str, existing: Note, fields: dict) -> list[float] | None:
+    if "title" in fields or "content" in fields:
+        return _safe_embed(_note_embed_text(
+            fields.get("title", existing.title), fields.get("content", existing.content)))
+    return None
+
+
+_UPDATE_CONFIG = {
+    "document": {
+        "model": Document,
+        "getter": lambda db, id: db.get_document(id),
+        "updater": lambda db, id, emb, fields: db.update_document(id, embedding=emb, **fields),
+        "embed": _document_update_embedding,
+        "key": "title",
+    },
+    "knowledge": {
+        "model": Knowledge,
+        "getter": lambda db, id: db.get_knowledge(id),
+        "updater": lambda db, id, emb, fields: db.update_knowledge(id, embedding=emb, **fields),
+        "embed": _knowledge_update_embedding,
+        "key": "subject",
+    },
+    "note": {
+        "model": Note,
+        "getter": lambda db, id: db.get_note(id),
+        "updater": lambda db, id, emb, fields: db.update_note(id, embedding=emb, **fields),
+        "embed": _note_update_embedding,
+        "key": "title",
+    },
+}
+
+
+def _handle_update(item_type: str, id: str, fields: dict) -> dict:
+    """Shared body for the update_* tools: validate the merged item, recompute its embedding,
+    persist, and return {id, <key>, updated}."""
+    cfg = _UPDATE_CONFIG[item_type]
+    db = _db()
+    existing = cfg["getter"](db, id)
+    if existing is None:
+        return {"error": f"{item_type.capitalize()} {id} not found"}
+
+    try:
+        cfg["model"](**{**existing.model_dump(), **fields})
+    except ValidationError as e:
+        return {"error": "Invalid update", "details": _format_validation_error(e)}
+
+    embedding = cfg["embed"](id, existing, fields)
+    updated = cfg["updater"](db, id, embedding, fields)
+    if updated is None:
+        return {"error": f"{item_type.capitalize()} {id} not found"}
+    return {"id": updated.id, cfg["key"]: getattr(updated, cfg["key"]), "updated": True}
 
 
 @mcp.tool(annotations=_ANN_UPDATE)
@@ -319,53 +419,8 @@ def update_document(
               to add/remove individual tags without replacing the full list.
         metadata: Replacement metadata dict (optional). Replaces all existing metadata.
     """
-    fields = {}
-    if title is not None:
-        fields["title"] = title
-    if content is not None:
-        fields["content"] = content
-    if mime_type is not None:
-        fields["mime_type"] = mime_type
-    if tags is not None:
-        fields["tags"] = tags
-    if metadata is not None:
-        fields["metadata"] = metadata
-
-    doc = _db().get_document(id)
-    if not doc:
-        return {"error": f"Document {id} not found"}
-
-    try:
-        Document(
-            namespace=doc.namespace,
-            title=fields.get("title", doc.title),
-            content=fields.get("content", doc.content),
-            mime_type=fields.get("mime_type", doc.mime_type),
-            tags=fields.get("tags", doc.tags),
-            metadata=fields.get("metadata", doc.metadata),
-        )
-    except ValidationError as e:
-        return {"error": "Invalid update", "details": _format_validation_error(e)}
-
-    embedding = None
-    if "content" in fields:
-        new_content = fields["content"]
-        new_title = fields.get("title", doc.title)
-        if len(new_content) >= CHUNK_THRESHOLD:
-            raw_chunks = _chunk_text(new_content, CHUNK_SIZE, CHUNK_OVERLAP)
-            pairs = [(c, _safe_embed(c)) for c in raw_chunks]
-            valid = [(c, e) for c, e in pairs if e is not None]
-            _db().replace_document_chunks(id, valid or None)
-        else:
-            _db().replace_document_chunks(id, None)
-            embedding = _safe_embed(f"{new_title}\n{new_content}")
-    elif "title" in fields and len(doc.content) < CHUNK_THRESHOLD:
-        embedding = _safe_embed(f"{fields['title']}\n{doc.content}")
-
-    updated = _db().update_document(id, embedding=embedding, **fields)
-    if not updated:
-        return {"error": f"Document {id} not found"}
-    return {"id": updated.id, "title": updated.title, "updated": True}
+    fields = _collect_fields(title=title, content=content, mime_type=mime_type, tags=tags, metadata=metadata)
+    return _handle_update("document", id, fields)
 
 
 @mcp.tool(annotations=_ANN_UPDATE)
@@ -395,47 +450,8 @@ def update_knowledge(
         tags: Replacement tag list (optional). Replaces all existing tags.
         metadata: Replacement metadata dict (optional). Replaces all existing metadata.
     """
-    fields = {}
-    if subject is not None:
-        fields["subject"] = subject
-    if fact is not None:
-        fields["fact"] = fact
-    if confidence is not None:
-        fields["confidence"] = confidence
-    if source is not None:
-        fields["source"] = source
-    if tags is not None:
-        fields["tags"] = tags
-    if metadata is not None:
-        fields["metadata"] = metadata
-
-    k = _db().get_knowledge(id)
-    if not k:
-        return {"error": f"Knowledge {id} not found"}
-
-    try:
-        Knowledge(
-            namespace=k.namespace,
-            subject=fields.get("subject", k.subject),
-            fact=fields.get("fact", k.fact),
-            confidence=fields.get("confidence", k.confidence),
-            source=fields.get("source", k.source),
-            tags=fields.get("tags", k.tags),
-            metadata=fields.get("metadata", k.metadata),
-        )
-    except ValidationError as e:
-        return {"error": "Invalid update", "details": _format_validation_error(e)}
-
-    embedding = None
-    if "subject" in fields or "fact" in fields:
-        new_subject = fields.get("subject", k.subject)
-        new_fact = fields.get("fact", k.fact)
-        embedding = _safe_embed(f"{new_subject}: {new_fact}")
-
-    updated = _db().update_knowledge(id, embedding=embedding, **fields)
-    if not updated:
-        return {"error": f"Knowledge {id} not found"}
-    return {"id": updated.id, "subject": updated.subject, "updated": True}
+    fields = _collect_fields(subject=subject, fact=fact, confidence=confidence, source=source, tags=tags, metadata=metadata)
+    return _handle_update("knowledge", id, fields)
 
 
 @mcp.tool(annotations=_ANN_DELETE)
@@ -509,7 +525,7 @@ def store_note(
     except ValidationError as e:
         return {"error": "Invalid note", "details": _format_validation_error(e)}
 
-    embedding = _safe_embed(f"{title}\n{content}")
+    embedding = _safe_embed(_note_embed_text(title, content))
     stored, created = _db().store_note(note, embedding)
     return {"id": stored.id, "namespace": stored.namespace, "title": stored.title, "created": created}
 
@@ -538,44 +554,8 @@ def update_note(
         tags: Replacement tag list (optional). Replaces all existing tags.
         metadata: Replacement metadata dict (optional). Replaces all existing metadata.
     """
-    fields = {}
-    if title is not None:
-        fields["title"] = title
-    if content is not None:
-        fields["content"] = content
-    if source is not None:
-        fields["source"] = source
-    if tags is not None:
-        fields["tags"] = tags
-    if metadata is not None:
-        fields["metadata"] = metadata
-
-    note = _db().get_note(id)
-    if not note:
-        return {"error": f"Note {id} not found"}
-
-    try:
-        Note(
-            namespace=note.namespace,
-            title=fields.get("title", note.title),
-            content=fields.get("content", note.content),
-            source=fields.get("source", note.source),
-            tags=fields.get("tags", note.tags),
-            metadata=fields.get("metadata", note.metadata),
-        )
-    except ValidationError as e:
-        return {"error": "Invalid update", "details": _format_validation_error(e)}
-
-    embedding = None
-    if "title" in fields or "content" in fields:
-        new_title = fields.get("title", note.title)
-        new_content = fields.get("content", note.content)
-        embedding = _safe_embed(f"{new_title}\n{new_content}")
-
-    updated = _db().update_note(id, embedding=embedding, **fields)
-    if not updated:
-        return {"error": f"Note {id} not found"}
-    return {"id": updated.id, "title": updated.title, "updated": True}
+    fields = _collect_fields(title=title, content=content, source=source, tags=tags, metadata=metadata)
+    return _handle_update("note", id, fields)
 
 
 @mcp.tool(annotations=_ANN_DELETE)
@@ -715,6 +695,14 @@ _READ_GETTERS = {
 }
 
 
+def _get_resource(item_type: str, id: str) -> str:
+    """Shared body for the get_* MCP resources: fetch by id, return JSON or a not-found error."""
+    obj = _READ_GETTERS[item_type](_db(), id)
+    if obj is None:
+        return json.dumps({"error": f"{item_type.capitalize()} {id} not found"})
+    return obj.model_dump_json()
+
+
 @mcp.tool(annotations=_ANN_READ_ONLY)
 def read(item_type: str, id: str) -> dict:
     """Read the full content of a document, knowledge entry, or note by ID.
@@ -838,28 +826,19 @@ def list_notes(namespace: str) -> str:
 @mcp.resource("mnemomatic://note/{id}")
 def get_note(id: str) -> str:
     """Get a specific note by ID."""
-    note = _db().get_note(id)
-    if not note:
-        return json.dumps({"error": f"Note {id} not found"})
-    return note.model_dump_json()
+    return _get_resource("note", id)
 
 
 @mcp.resource("mnemomatic://document/{id}")
 def get_document(id: str) -> str:
     """Get a specific document by ID."""
-    doc = _db().get_document(id)
-    if not doc:
-        return json.dumps({"error": f"Document {id} not found"})
-    return doc.model_dump_json()
+    return _get_resource("document", id)
 
 
 @mcp.resource("mnemomatic://knowledge-entry/{id}")
 def get_knowledge_entry(id: str) -> str:
     """Get a specific knowledge entry by ID."""
-    k = _db().get_knowledge(id)
-    if not k:
-        return json.dumps({"error": f"Knowledge {id} not found"})
-    return k.model_dump_json()
+    return _get_resource("knowledge", id)
 
 
 def main():
