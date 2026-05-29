@@ -3,7 +3,7 @@ import logging
 import os
 import re
 import threading
-from importlib.metadata import version
+from importlib.metadata import PackageNotFoundError, version
 
 import uvicorn
 from mcp.server.fastmcp import FastMCP
@@ -732,9 +732,16 @@ def health() -> str:
     embedder = _embedder()
     embedding_mode = embedder.mode if embedder is not None else "FTS-only (no embedder)"
 
+    # Distribution name is "mnemomatic-server"; fall back gracefully when running
+    # from a source tree with no installed metadata so health never errors out.
+    try:
+        server_version = version("mnemomatic-server")
+    except PackageNotFoundError:
+        server_version = "unknown"
+
     return json.dumps({
         "status": "ok",
-        "version": version("mnemomatic"),
+        "version": server_version,
         "embedding_mode": embedding_mode,
         "auth_enabled": bool(API_KEY),
     })

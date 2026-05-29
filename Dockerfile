@@ -74,23 +74,51 @@ RUN rm -rf /install/lib/python3.11/site-packages/pip* \
 
 # Strip packages not needed at runtime:
 #   sympy/mpmath  — onnxruntime optional deps for shape inference (build-time only)
-#   huggingface_hub/hf_xet/fsspec/pyyaml — pulled in by fastembed for model download only
-#   pygments — syntax highlighting pulled in by rich, not useful in a server
+#   flatbuffers/packaging/protobuf(google) — onnxruntime declares these but only its
+#     training/quantization/conversion tooling (already removed above) imports them; a
+#     real InferenceSession loads and runs the model entirely in native C++.
+#   huggingface_hub/hf_xet/fsspec/pyyaml/tqdm/filelock — pulled in by fastembed for model
+#     download only (tqdm = progress bars, filelock = cache locking); unused at runtime.
+#   rich/pygments/markdown_it/mdurl/typer/shellingham — pulled in transitively via the MCP
+#     SDK's CLI deps and unused by the server (which logs via the stdlib). rich is removed,
+#     not just pygments: rich imports pygments lazily when rendering tracebacks, so stripping
+#     pygments alone leaves rich to crash at runtime with "No module named 'pygments'".
+#     With rich gone, the SDK's optional-import falls back cleanly to a plain log handler.
 RUN rm -rf \
     /install/lib/python3.11/site-packages/sympy \
     /install/lib/python3.11/site-packages/sympy-*.dist-info \
     /install/lib/python3.11/site-packages/mpmath \
     /install/lib/python3.11/site-packages/mpmath-*.dist-info \
+    /install/lib/python3.11/site-packages/flatbuffers \
+    /install/lib/python3.11/site-packages/flatbuffers-*.dist-info \
+    /install/lib/python3.11/site-packages/packaging \
+    /install/lib/python3.11/site-packages/packaging-*.dist-info \
+    /install/lib/python3.11/site-packages/google \
+    /install/lib/python3.11/site-packages/protobuf-*.dist-info \
     /install/lib/python3.11/site-packages/huggingface_hub \
     /install/lib/python3.11/site-packages/huggingface_hub-*.dist-info \
     /install/lib/python3.11/site-packages/hf_xet \
     /install/lib/python3.11/site-packages/hf_xet-*.dist-info \
     /install/lib/python3.11/site-packages/fsspec \
     /install/lib/python3.11/site-packages/fsspec-*.dist-info \
+    /install/lib/python3.11/site-packages/tqdm \
+    /install/lib/python3.11/site-packages/tqdm-*.dist-info \
+    /install/lib/python3.11/site-packages/filelock \
+    /install/lib/python3.11/site-packages/filelock-*.dist-info \
     /install/lib/python3.11/site-packages/yaml \
     /install/lib/python3.11/site-packages/PyYAML-*.dist-info \
     /install/lib/python3.11/site-packages/pygments \
-    /install/lib/python3.11/site-packages/Pygments-*.dist-info
+    /install/lib/python3.11/site-packages/Pygments-*.dist-info \
+    /install/lib/python3.11/site-packages/rich \
+    /install/lib/python3.11/site-packages/rich-*.dist-info \
+    /install/lib/python3.11/site-packages/markdown_it \
+    /install/lib/python3.11/site-packages/markdown_it_py-*.dist-info \
+    /install/lib/python3.11/site-packages/mdurl \
+    /install/lib/python3.11/site-packages/mdurl-*.dist-info \
+    /install/lib/python3.11/site-packages/typer \
+    /install/lib/python3.11/site-packages/typer-*.dist-info \
+    /install/lib/python3.11/site-packages/shellingham \
+    /install/lib/python3.11/site-packages/shellingham-*.dist-info
 
 # Strip debug symbols from all shared libraries
 RUN find /install -name '*.so*' -type f -exec strip --strip-debug {} + 2>/dev/null || true
@@ -111,10 +139,23 @@ RUN rm -rf /install/lib/python3.11/site-packages/pip* \
            /install/lib/python3.11/site-packages/setuptools* \
            /install/lib/python3.11/site-packages/*.dist-info/RECORD
 
-# Strip packages not needed at runtime
+# Strip packages not needed at runtime:
+#   rich/pygments/markdown_it/mdurl/typer/shellingham — MCP SDK CLI deps, unused by the
+#     server. rich is removed too (not just pygments): rich imports pygments lazily when
+#     rendering tracebacks, so stripping pygments alone leaves rich to crash at runtime.
 RUN rm -rf \
     /install/lib/python3.11/site-packages/pygments \
-    /install/lib/python3.11/site-packages/Pygments-*.dist-info
+    /install/lib/python3.11/site-packages/Pygments-*.dist-info \
+    /install/lib/python3.11/site-packages/rich \
+    /install/lib/python3.11/site-packages/rich-*.dist-info \
+    /install/lib/python3.11/site-packages/markdown_it \
+    /install/lib/python3.11/site-packages/markdown_it_py-*.dist-info \
+    /install/lib/python3.11/site-packages/mdurl \
+    /install/lib/python3.11/site-packages/mdurl-*.dist-info \
+    /install/lib/python3.11/site-packages/typer \
+    /install/lib/python3.11/site-packages/typer-*.dist-info \
+    /install/lib/python3.11/site-packages/shellingham \
+    /install/lib/python3.11/site-packages/shellingham-*.dist-info
 
 # Strip debug symbols from all shared libraries
 RUN find /install -name '*.so*' -type f -exec strip --strip-debug {} + 2>/dev/null || true
