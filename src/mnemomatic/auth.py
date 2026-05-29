@@ -38,6 +38,14 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         else:
             logger.warning("Authentication disabled — server is running without API key validation")
 
+    def _reject(self, reason: str, error: str, details: str, status: int,
+                method: str, path: str, client_ip: str) -> JSONResponse:
+        """Log an unauthorized request and build its JSON error response."""
+        logger.warning(
+            "Unauthorized request: %s (%s %s from %s)", reason, method, path, client_ip,
+        )
+        return JSONResponse({"error": error, "details": details}, status_code=status)
+
     async def dispatch(self, request: Request, call_next):
         """Process request and enforce authentication if enabled.
 
@@ -67,60 +75,40 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
 
         # Auth is enabled — validate token
         if not auth_header:
-            logger.warning(
-                "Unauthorized request: missing Authorization header (%s %s from %s)",
-                method, path, client_ip,
-            )
-            return JSONResponse(
-                {
-                    "error": "Missing Authorization header",
-                    "details": "Required format: 'Authorization: Bearer <token>'",
-                },
-                status_code=401,
+            return self._reject(
+                "missing Authorization header",
+                "Missing Authorization header",
+                "Required format: 'Authorization: Bearer <token>'",
+                401, method, path, client_ip,
             )
 
         # Validate header format
         if not auth_header.lower().startswith("bearer "):
-            logger.warning(
-                "Unauthorized request: invalid Authorization header format (%s %s from %s)",
-                method, path, client_ip,
-            )
-            return JSONResponse(
-                {
-                    "error": "Invalid Authorization header format",
-                    "details": "Required format: 'Authorization: Bearer <token>'",
-                },
-                status_code=401,
+            return self._reject(
+                "invalid Authorization header format",
+                "Invalid Authorization header format",
+                "Required format: 'Authorization: Bearer <token>'",
+                401, method, path, client_ip,
             )
 
         # Extract token
         token = auth_header[7:].strip()  # Remove "Bearer " prefix
 
         if not token:
-            logger.warning(
-                "Unauthorized request: empty token (%s %s from %s)",
-                method, path, client_ip,
-            )
-            return JSONResponse(
-                {
-                    "error": "Invalid Authorization header",
-                    "details": "Token is empty",
-                },
-                status_code=401,
+            return self._reject(
+                "empty token",
+                "Invalid Authorization header",
+                "Token is empty",
+                401, method, path, client_ip,
             )
 
         # Validate token using constant-time comparison (prevents timing attacks)
         if not hmac.compare_digest(token, self.api_key):
-            logger.warning(
-                "Unauthorized request: invalid API key (%s %s from %s)",
-                method, path, client_ip,
-            )
-            return JSONResponse(
-                {
-                    "error": "Invalid API key",
-                    "details": "The provided token does not match the server's API key",
-                },
-                status_code=403,
+            return self._reject(
+                "invalid API key",
+                "Invalid API key",
+                "The provided token does not match the server's API key",
+                403, method, path, client_ip,
             )
 
         # Authentication successful

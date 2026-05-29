@@ -148,6 +148,20 @@ class TestKnowledgeCRUD(unittest.TestCase):
         updated = self.db.update_knowledge(stored.id, fact="new")
         self.assertEqual(updated.fact, "new")
 
+    def test_restore_with_embedding_after_none_is_searchable(self):
+        """Re-storing with an embedding must insert the vec row, not silently no-op.
+
+        Regression: the upsert previously did a bare UPDATE on vec_knowledge, so an
+        entry first stored without an embedding (FTS-only mode) never became
+        semantically searchable once an embedder was added.
+        """
+        emb = _fake_embedding("auth: Uses JWT")
+        self.db.store_knowledge(Knowledge(namespace="ns", subject="auth", fact="Uses JWT"), None)
+        self.assertEqual(self.db.search_vec(emb, table="knowledge"), [])
+        self.db.store_knowledge(Knowledge(namespace="ns", subject="auth", fact="Uses JWT"), emb)
+        results = self.db.search_vec(emb, table="knowledge")
+        self.assertTrue(any(r.title == "auth" for r in results))
+
     def test_update_nonexistent_returns_none(self):
         self.assertIsNone(self.db.update_knowledge("no-such-id", fact="x"))
 
@@ -215,6 +229,19 @@ class TestNoteCRUD(unittest.TestCase):
         stored, _ = self.db.store_note(note, _fake_embedding("T\nold"))
         updated = self.db.update_note(stored.id, content="new")
         self.assertEqual(updated.content, "new")
+
+    def test_restore_with_embedding_after_none_is_searchable(self):
+        """Re-storing with an embedding must insert the vec row, not silently no-op.
+
+        Regression: see the matching knowledge test — store_note had the same bare-UPDATE
+        bug, so notes first stored FTS-only never became semantically searchable.
+        """
+        emb = _fake_embedding("Idea\nQuick thought")
+        self.db.store_note(Note(namespace="ns", title="Idea", content="Quick thought"), None)
+        self.assertEqual(self.db.search_vec(emb, table="notes"), [])
+        self.db.store_note(Note(namespace="ns", title="Idea", content="Quick thought"), emb)
+        results = self.db.search_vec(emb, table="notes")
+        self.assertTrue(any(r.title == "Idea" for r in results))
 
     def test_update_nonexistent_returns_none(self):
         self.assertIsNone(self.db.update_note("no-such-id", content="x"))

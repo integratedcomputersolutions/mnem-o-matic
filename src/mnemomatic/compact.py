@@ -38,11 +38,6 @@ _COMPACT_PARAMS: dict[str, dict[str, str]] = {
     "store_knowledge": {"confidence": "0.0-1.0"},
 }
 
-# Optional tool subset: remove tool names to hide them in compact mode.
-# None exposes all tools.
-_COMPACT_TOOL_SUBSET: set[str] | None = None
-
-
 def _simplify_prop(prop: dict) -> dict:
     """Strip schema noise from a single parameter property."""
     # Unwrap anyOf: [{type: X}, {type: null}] → {type: X}
@@ -52,9 +47,7 @@ def _simplify_prop(prop: dict) -> dict:
 
     result: dict = {}
     if "type" in prop:
-        result["type"] = prop["type"]
-    if prop.get("type") == "array":
-        result["type"] = "array"  # drop items detail
+        result["type"] = prop["type"]  # array/object detail (items, properties) is dropped
     if "anyOf" in prop:
         result["anyOf"] = prop["anyOf"]
     return result
@@ -70,10 +63,6 @@ def _compact_tools_body(body: bytes) -> bytes:
     tools = data.get("result", {}).get("tools")
     if not isinstance(tools, list):
         return body
-
-    if _COMPACT_TOOL_SUBSET is not None:
-        tools = [t for t in tools if t.get("name") in _COMPACT_TOOL_SUBSET]
-        data["result"]["tools"] = tools
 
     for tool in tools:
         name = tool.get("name", "")
