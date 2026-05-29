@@ -24,6 +24,7 @@ API_KEY = os.environ.get("MNEMOMATIC_API_KEY", "")
 CORS_ORIGINS = os.environ.get("MNEMOMATIC_CORS_ORIGINS", "")
 EMBED_URL = os.environ.get("MNEMOMATIC_EMBED_URL", "")
 EMBED_MODEL = os.environ.get("MNEMOMATIC_EMBED_MODEL", "")
+UI_TOKEN = os.environ.get("MNEMOMATIC_UI_TOKEN", "").strip()
 MAX_SEARCH_LIMIT = 100
 
 # Tool annotation presets
@@ -864,6 +865,16 @@ def main():
     # Authentication is optional based on API_KEY environment variable
     logger.info("Building ASGI application...")
     app = mcp.streamable_http_app()
+
+    # Optional read-only web viewer at /ui, gated by a single shared secret.
+    # Disabled unless MNEMOMATIC_UI_TOKEN is set, so it never exposes data by default.
+    if UI_TOKEN:
+        from mnemomatic.webui import register_webui
+        register_webui(app, _db, UI_TOKEN)
+        logger.info("Web viewer enabled at /ui")
+    else:
+        logger.info("Web viewer disabled (set MNEMOMATIC_UI_TOKEN to enable)")
+
     app = CompactToolsMiddleware(app)
 
     # Middleware handles both authenticated and non-authenticated modes
