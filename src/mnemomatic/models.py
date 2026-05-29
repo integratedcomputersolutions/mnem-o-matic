@@ -168,3 +168,4 @@ class SearchResult(BaseModel):
     resource_uri: str  # mnemomatic:// URI for full content retrieval
     score: float
     tags: list[str] = Field(default_factory=list)
+    partial: bool = False  # True when snippet is a chunk; call read(id) for full content

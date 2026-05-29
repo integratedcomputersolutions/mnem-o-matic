@@ -12,7 +12,7 @@ from pydantic import ValidationError
 
 from mnemomatic.auth import BearerAuthMiddleware
 from mnemomatic.compact import CompactToolsMiddleware
-from mnemomatic.db import Database
+from mnemomatic.db import CHUNK_OVERLAP, CHUNK_SIZE, CHUNK_THRESHOLD, Database, _chunk_text
 from mnemomatic.models import Document, Knowledge, Note
 
 logger = logging.getLogger("mnemomatic")
@@ -226,8 +226,17 @@ def store_document(
     except ValidationError as e:
         return {"error": "Invalid document", "details": _format_validation_error(e)}
 
-    embedding = _safe_embed(f"{title}\n{content}")
-    stored, created = _db().store_document(doc, embedding)
+    embedding = None
+    chunks = None
+    if len(content) >= CHUNK_THRESHOLD:
+        raw_chunks = _chunk_text(content, CHUNK_SIZE, CHUNK_OVERLAP)
+        pairs = [(c, _safe_embed(c)) for c in raw_chunks]
+        valid = [(c, e) for c, e in pairs if e is not None]
+        chunks = valid or None
+    else:
+        embedding = _safe_embed(f"{title}\n{content}")
+
+    stored, created = _db().store_document(doc, embedding, chunks)
     return {"id": stored.id, "namespace": stored.namespace, "title": stored.title, "created": created}
 
 
@@ -339,10 +348,19 @@ def update_document(
         return {"error": "Invalid update", "details": _format_validation_error(e)}
 
     embedding = None
-    if "title" in fields or "content" in fields:
+    if "content" in fields:
+        new_content = fields["content"]
         new_title = fields.get("title", doc.title)
-        new_content = fields.get("content", doc.content)
-        embedding = _safe_embed(f"{new_title}\n{new_content}")
+        if len(new_content) >= CHUNK_THRESHOLD:
+            raw_chunks = _chunk_text(new_content, CHUNK_SIZE, CHUNK_OVERLAP)
+            pairs = [(c, _safe_embed(c)) for c in raw_chunks]
+            valid = [(c, e) for c, e in pairs if e is not None]
+            _db().replace_document_chunks(id, valid or None)
+        else:
+            _db().replace_document_chunks(id, None)
+            embedding = _safe_embed(f"{new_title}\n{new_content}")
+    elif "title" in fields and len(doc.content) < CHUNK_THRESHOLD:
+        embedding = _safe_embed(f"{fields['title']}\n{doc.content}")
 
     updated = _db().update_document(id, embedding=embedding, **fields)
     if not updated:
