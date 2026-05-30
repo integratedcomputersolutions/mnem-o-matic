@@ -48,9 +48,18 @@ mkdir -p .claude/skills && cp -r skills/mnemomatic .claude/skills/mnemomatic
 
 A built-in, read-only web viewer lets you browse stored documents, knowledge, and notes in the browser — no MCP client required. It's view-only: no creating, editing, or deleting.
 
-<!-- TODO: add screenshot(s) — drop image files into assets/ and they'll render below -->
 <div align="center">
-<img src="assets/web-viewer.png" alt="Mnem-O-matic web viewer" width="800">
+<table>
+<tr>
+<td align="center"><a href="assets/mnemomatic-ui-login.png"><img src="assets/mnemomatic-ui-login.png" alt="Shared-secret login" width="360"></a><br><sub>Shared-secret login</sub></td>
+<td align="center"><a href="assets/mnemomatic-ui-namespaces.png"><img src="assets/mnemomatic-ui-namespaces.png" alt="Namespaces overview" width="360"></a><br><sub>Namespaces</sub></td>
+</tr>
+<tr>
+<td align="center"><a href="assets/mnemomatic-ui-content.png"><img src="assets/mnemomatic-ui-content.png" alt="Browsing a namespace" width="360"></a><br><sub>Browsing a namespace</sub></td>
+<td align="center"><a href="assets/mnemomatic-ui-content-details.png"><img src="assets/mnemomatic-ui-content-details.png" alt="Item detail" width="360"></a><br><sub>Item detail</sub></td>
+</tr>
+</table>
+<sub><i>Click any image to view full size.</i></sub>
 </div>
 
 The viewer is disabled by default. Set a shared secret to enable it:
