@@ -44,10 +44,24 @@ mkdir -p ~/.claude/skills && cp -r skills/mnemomatic ~/.claude/skills/mnemomatic
 mkdir -p .claude/skills && cp -r skills/mnemomatic .claude/skills/mnemomatic
 ```
 
+## Web Viewer
+
+A built-in, read-only web viewer lets you browse stored documents, knowledge, and notes in the browser — no MCP client required. It's view-only: no creating, editing, or deleting.
+
+The viewer is disabled by default. Set a shared secret to enable it:
+
+```bash
+docker run -e MNEMOMATIC_UI_TOKEN=your-viewer-secret ...
+```
+
+Then open `http://your-host:8000/ui` and enter the token once. There are no user accounts — access is a single shared secret, kept separate from the MCP API key. When `MNEMOMATIC_UI_TOKEN` is unset, `/ui` is not served at all.
+
+See the [Usage Guide](docs/usage.md#web-viewer) for details and security notes.
+
 ## Documentation
 
 - [Installation Guide](docs/installation.md) — prerequisites, Docker profiles, TLS setup, configuration, development
-- [Usage Guide](docs/usage.md) — connecting clients, authentication, tools, search, resources
+- [Usage Guide](docs/usage.md) — connecting clients, authentication, tools, search, resources, web viewer
 - [Tech Stack](docs/tech-stack.md) — architecture decisions, embeddings, concurrency, performance
 
 ## License
