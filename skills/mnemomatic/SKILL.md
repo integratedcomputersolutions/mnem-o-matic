@@ -41,6 +41,12 @@ search("authentication") → result with resource_uri: "mnemomatic://document/ab
 read(item_type="document", id="abc-123") → full content
 ```
 
+Large documents are split into overlapping chunks at store time, so a document hit's
+`snippet` is the single most relevant passage — not the whole file. This keeps search
+focused without flooding your context with entire documents. Always `read` the document
+to retrieve its complete content before relying on it; the matched passage alone may omit
+context elsewhere in the file.
+
 ## What to Store
 
 | Type | Use for | Deduplication key |
