@@ -64,6 +64,11 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         method = request.method
         path = request.url.path
 
+        # The web viewer under /ui carries its own shared-secret gate, so the
+        # MCP Bearer token does not apply to it.
+        if path == "/ui" or path.startswith("/ui/"):
+            return await call_next(request)
+
         # If auth is disabled, just log and proceed
         if not self.auth_enabled:
             response = await call_next(request)

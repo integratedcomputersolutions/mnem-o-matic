@@ -204,6 +204,7 @@ Environment variables (set in `docker-compose.yml` or passed to Docker):
 | `MNEMOMATIC_HOST`           | `0.0.0.0`                   | Server bind address                                      |
 | `MNEMOMATIC_PORT`           | `8000`                      | Server port (inside container)                           |
 | `MNEMOMATIC_API_KEY`        | *(unset)*                   | API key for Bearer token auth. Auth disabled when unset. |
+| `MNEMOMATIC_UI_TOKEN`       | *(unset)*                   | Shared secret for the read-only web viewer at `/ui`. Viewer disabled when unset. |
 | `MNEMOMATIC_EMBED_URL`      | *(unset)*                   | Ollama-compatible embedding endpoint (lite image)        |
 | `MNEMOMATIC_EMBED_MODEL`    | *(empty)*                   | Model name passed to the external embedder               |
 | `MNEMOMATIC_EMBED_DIM`      | `384`                       | Embedding dimension — must match the model's output      |

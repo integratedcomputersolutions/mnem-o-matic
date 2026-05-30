@@ -114,6 +114,26 @@ All error responses include a `details` field explaining the exact issue.
   docker compose up -e MNEMOMATIC_API_KEY=your-key
   ```
 
+## Web Viewer
+
+A minimal, **read-only** web viewer is available at `/ui` for browsing stored documents, knowledge, and notes. It has no create, edit, or delete functionality.
+
+The viewer is **disabled by default**. Enable it by setting a shared secret:
+
+```yaml
+services:
+  mnemomatic:
+    environment:
+      - MNEMOMATIC_UI_TOKEN=your-viewer-secret
+```
+
+Then open `http://your-host:8000/ui`, enter the token once (stored in an HttpOnly cookie), and browse by namespace.
+
+Notes:
+- There are **no user accounts** — access is a single shared secret, separate from `MNEMOMATIC_API_KEY` (the viewer is exempt from MCP Bearer auth and uses its own gate).
+- The viewer is served on the same host/port as the MCP endpoint. Because that port is typically bound to `0.0.0.0`, the shared secret is what keeps it private — choose a strong token, or additionally restrict the port at the network level (VPN, reverse proxy, firewall).
+- When `MNEMOMATIC_UI_TOKEN` is unset, `/ui` is not registered at all.
+
 ## CLI Interface
 
 `mnemomatic-cli` provides shell access to a running Mnem-O-matic server for agents and users without MCP support.
