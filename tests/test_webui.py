@@ -72,6 +72,13 @@ class TestGate(WebUITestBase):
         self.assertEqual(resp.status_code, 200)
         self.assertIn("access token", resp.text)
 
+    def test_static_css_public(self):
+        # The stylesheet must load without the cookie so the login page is styled.
+        resp = self.client.get("/ui/static/bootstrap.min.css")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("text/css", resp.headers["content-type"])
+        self.assertIn("Bootstrap", resp.text[:200])
+
     def test_wrong_token_rejected(self):
         resp = self.client.post("/ui/login", data={"token": "nope"})
         self.assertEqual(resp.status_code, 401)
