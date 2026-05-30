@@ -48,6 +48,11 @@ mkdir -p .claude/skills && cp -r skills/mnemomatic .claude/skills/mnemomatic
 
 A built-in, read-only web viewer lets you browse stored documents, knowledge, and notes in the browser — no MCP client required. It's view-only: no creating, editing, or deleting.
 
+<!-- TODO: add screenshot(s) — drop image files into assets/ and they'll render below -->
+<div align="center">
+<img src="assets/web-viewer.png" alt="Mnem-O-matic web viewer" width="800">
+</div>
+
 The viewer is disabled by default. Set a shared secret to enable it:
 
 ```bash
