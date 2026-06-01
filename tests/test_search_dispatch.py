@@ -110,13 +110,14 @@ class SearchDispatchTest(unittest.TestCase):
         self.assertEqual(self.fake_db.calls, [])
 
     def test_hybrid_no_embedder_degrades_silently(self):
-        # No embedder: degrade to FTS, append _metadata, but DO NOT log — the
-        # info-log is reserved for the embed-failure case below.
+        # No embedder: degrade to FTS and append the degrade entry, but DO NOT
+        # log — the info-log is reserved for the embed-failure case below. The
+        # appended _metadata content itself is pinned by test_degraded_metadata.
         with self.assertNoLogs("mnemomatic", level="INFO"):
             res = self._search(None, None, query="hello", mode="hybrid")
         self.assertEqual(self._backends(), ["fts"])
         self.assertEqual(res[0], {"source": "fts"})
-        self.assertTrue(res[-1]["_metadata"]["degraded"])
+        self.assertEqual(len(res), 2)  # fts hit + degrade entry
 
     def test_hybrid_embed_ok_uses_hybrid(self):
         res = self._search(SENTINEL_EMBEDDER, EMBEDDING, query="hello", mode="hybrid")
@@ -124,19 +125,26 @@ class SearchDispatchTest(unittest.TestCase):
         self.assertEqual(res, [{"source": "hybrid"}])  # no degradation metadata
 
     def test_hybrid_embed_fail_degrades_with_log(self):
+        # Embedder present but embedding fails: degrade to FTS AND log the reason.
         with self.assertLogs("mnemomatic", level="INFO") as cm:
             res = self._search(SENTINEL_EMBEDDER, None, query="hello", mode="hybrid")
         self.assertEqual(self._backends(), ["fts"])
-        self.assertTrue(res[-1]["_metadata"]["degraded"])
+        self.assertEqual(len(res), 2)  # fts hit + degrade entry
         self.assertTrue(any("degrading to fulltext" in m for m in cm.output))
 
     # --- degradation metadata shape ------------------------------------------
 
-    def test_degraded_metadata_shape(self):
+    def test_degraded_metadata(self):
+        # Both degrade branches append this exact entry from one code path, so
+        # pinning it once (here) covers the metadata content for #5 and #7 too.
         res = self._search(None, None, query="hello", mode="hybrid")
-        meta = res[-1]["_metadata"]
-        self.assertEqual(meta["degraded"], True)
-        self.assertIn("fulltext", meta["reason"])
+        self.assertEqual(
+            res[-1],
+            {"_metadata": {
+                "degraded": True,
+                "reason": "Semantic search unavailable; results from fulltext search only",
+            }},
+        )
 
     # --- input validation (single-element error list, no DB call) ------------
 
@@ -163,17 +171,15 @@ class SearchDispatchTest(unittest.TestCase):
 
     # --- limit clamping to [1, MAX_SEARCH_LIMIT] -----------------------------
 
-    def test_limit_clamped_to_minimum(self):
-        self._search(SENTINEL_EMBEDDER, EMBEDDING, query="hi", mode="fulltext", limit=0)
-        self.assertEqual(self.fake_db.calls[0][4], 1)
-
-    def test_limit_clamped_to_maximum(self):
-        self._search(SENTINEL_EMBEDDER, EMBEDDING, query="hi", mode="fulltext", limit=10_000)
-        self.assertEqual(self.fake_db.calls[0][4], server.MAX_SEARCH_LIMIT)
-
-    def test_limit_passed_through_when_in_range(self):
-        self._search(SENTINEL_EMBEDDER, EMBEDDING, query="hi", mode="fulltext", limit=25)
-        self.assertEqual(self.fake_db.calls[0][4], 25)
+    def test_limit_clamped_to_range(self):
+        # (requested, expected) — below range, above range, and in range.
+        cases = [(0, 1), (10_000, server.MAX_SEARCH_LIMIT), (25, 25)]
+        for requested, expected in cases:
+            with self.subTest(limit=requested):
+                self.fake_db.calls.clear()
+                self._search(SENTINEL_EMBEDDER, EMBEDDING, query="hi",
+                             mode="fulltext", limit=requested)
+                self.assertEqual(self.fake_db.calls[0][4], expected)
 
     # --- query routing & passthrough -----------------------------------------
 
