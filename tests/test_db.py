@@ -79,6 +79,11 @@ class TestDocumentCRUD(unittest.TestCase):
         new_emb = _fake_embedding("T\nnew")
         updated = self.db.update_document(stored.id, content="new", embedding=new_emb)
         self.assertEqual(updated.content, "new")
+        # The new embedding must actually be written: querying with it returns
+        # this doc as the exact (score ~1.0) top hit.
+        results = self.db.search_vec(new_emb, table="documents", namespace="ns")
+        self.assertEqual(results[0].id, stored.id)
+        self.assertAlmostEqual(results[0].score, 1.0, places=4)
 
     def test_update_nonexistent_returns_none(self):
         self.assertIsNone(self.db.update_document("no-such-id", content="x"))
@@ -568,9 +573,10 @@ class TestSearch(unittest.TestCase):
         results = self.db.search_fts("xyznonexistent")
         self.assertEqual(results, [])
 
-    def test_vec_returns_results(self):
+    def test_vec_all_tables_finds_document(self):
+        # Default table="all" unions every type; the stored doc must be present.
         results = self.db.search_vec(self.doc_emb, namespace="ns")
-        self.assertTrue(len(results) > 0)
+        self.assertIn(self.doc_id, [r.id for r in results])
 
     def test_vec_exact_embedding_is_top_result(self):
         results = self.db.search_vec(self.doc_emb, table="documents", namespace="ns")

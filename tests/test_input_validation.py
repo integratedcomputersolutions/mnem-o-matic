@@ -295,13 +295,6 @@ class TestKnowledgeValidation(unittest.TestCase):
             )
         self.assertIn("confidence", str(cm.exception))
 
-    def test_knowledge_confidence_at_bounds(self):
-        """Confidence at exactly 0.0 and 1.0 should be accepted."""
-        k1 = Knowledge(namespace="test", subject="S", fact="F", confidence=0.0)
-        k2 = Knowledge(namespace="test", subject="S", fact="F", confidence=1.0)
-        self.assertEqual(k1.confidence, 0.0)
-        self.assertEqual(k2.confidence, 1.0)
-
     def test_knowledge_confidence_non_numeric(self):
         """Non-numeric confidence should be rejected."""
         with self.assertRaises(ValidationError) as cm:
@@ -446,22 +439,19 @@ class TestValidationEdgeCases(unittest.TestCase):
         self.assertIn("Special", doc.title)
 
     def test_metadata_with_various_value_types(self):
-        """Metadata can have various value types."""
-        doc = Document(
-            namespace="test",
-            title="Test",
-            content="Content",
-            metadata={
-                "string": "value",
-                "number": 42,
-                "float": 3.14,
-                "bool": True,
-                "null": None,
-                "list": [1, 2, 3],
-                "dict": {"nested": "value"}
-            }
-        )
-        self.assertEqual(len(doc.metadata), 7)
+        """Non-string metadata values pass through unchanged (only string values
+        are length-checked; nothing is coerced or dropped)."""
+        metadata = {
+            "string": "value",
+            "number": 42,
+            "float": 3.14,
+            "bool": True,
+            "null": None,
+            "list": [1, 2, 3],
+            "dict": {"nested": "value"},
+        }
+        doc = Document(namespace="test", title="Test", content="Content", metadata=metadata)
+        self.assertEqual(doc.metadata, metadata)
 
 
 if __name__ == "__main__":

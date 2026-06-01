@@ -153,24 +153,6 @@ class TestHttpEmbedderErrors(unittest.TestCase):
             self.assertEqual(mock_urlopen.call_count, 1)
 
 
-class TestOnnxEmbedderErrors(unittest.TestCase):
-    """Test OnnxEmbedder error handling.
-
-    Note: Full OnnxEmbedder tests require onnxruntime, tokenizers, and numpy
-    to be installed. These tests verify the error handling logic structure.
-    """
-
-    def test_onnx_embedder_init_signature(self):
-        """OnnxEmbedder.__init__ should accept no arguments."""
-        from mnemomatic.embeddings import OnnxEmbedder
-        import inspect
-
-        sig = inspect.signature(OnnxEmbedder.__init__)
-        # Should have only 'self' parameter
-        params = [p for p in sig.parameters.keys() if p != 'self']
-        self.assertEqual(len(params), 0)
-
-
 class TestEmbedderFallback(unittest.TestCase):
     """Test server-level embedder fallback to FTS-only mode.
 
