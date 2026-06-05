@@ -95,12 +95,14 @@ class TestGate(WebUITestBase):
         self.assertEqual(self.client.get("/ui").status_code, 303)
 
     def test_namespace_view_requires_auth(self):
-        self.assertEqual(self.client.get("/ui/ns/proj").status_code, 303)
+        resp = self.client.get("/ui/ns/proj")
+        self.assertEqual(resp.status_code, 303)
+        self.assertEqual(resp.headers["location"], "/ui/login")
 
     def test_item_view_requires_auth(self):
-        self.assertEqual(
-            self.client.get(f"/ui/item/document/{self.ids['document']}").status_code, 303
-        )
+        resp = self.client.get(f"/ui/item/document/{self.ids['document']}")
+        self.assertEqual(resp.status_code, 303)
+        self.assertEqual(resp.headers["location"], "/ui/login")
 
 
 class TestViews(WebUITestBase):
