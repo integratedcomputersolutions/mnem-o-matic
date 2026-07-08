@@ -134,15 +134,13 @@ class TestJSONCorruption(unittest.TestCase):
         self.assertEqual(doc.tags, ["new"])
 
     def test_corrupted_json_logs_warning(self):
-        """Corrupted JSON is logged at WARNING level."""
+        """Reading a corrupted JSON field emits a WARNING (not just a silent default)."""
         self._corrupt_field("documents", self.doc_stored.id, "tags", "bad json")
         with patch("mnemomatic.db.logger") as mock_logger:
-            # Call a function that reads the corrupted field
-            doc = self.db.get_document(self.doc_stored.id)
-            # Logger.warning should have been called
-            # (Note: This is a direct call test, so we verify the logger would be called)
-            self.assertIsNotNone(doc)
-            self.assertEqual(doc.tags, [])
+            self.db.get_document(self.doc_stored.id)
+        mock_logger.warning.assert_called_once()
+        # The message identifies it as a corrupted-JSON recovery.
+        self.assertIn("Corrupted JSON field", mock_logger.warning.call_args.args[0])
 
 
 if __name__ == "__main__":

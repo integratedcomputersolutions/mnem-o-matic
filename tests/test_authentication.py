@@ -1,308 +1,224 @@
-"""Tests for Bearer token authentication middleware.
+"""Tests for the Bearer token authentication middleware (mnemomatic.auth).
 
-This tests CRITICAL #3: Authentication Inconsistency
-- Optional authentication (enabled/disabled modes)
-- Bearer token validation
-- Header format validation
-- Error messages and logging
-- Timing attack prevention
+These drive BearerAuthMiddleware end-to-end through a Starlette TestClient so the
+real dispatch() path is exercised: 401/403 status codes, the exact error bodies,
+the /ui bypass, the constant-time token comparison, and the brute-force lockout —
+not merely constructor state. A few constructor tests cover the api_key
+normalization that gates it all.
 """
 
-import unittest
-from unittest.mock import AsyncMock, MagicMock, patch
-import logging
+import hmac
 import sys
+import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from mnemomatic.auth import BearerAuthMiddleware
-from mnemomatic.throttle import FailureThrottle
 from starlette.applications import Starlette
-from starlette.requests import Request
-from starlette.responses import JSONResponse, PlainTextResponse
+from starlette.responses import PlainTextResponse
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
+from mnemomatic.auth import BearerAuthMiddleware
+from mnemomatic.throttle import FailureThrottle
 
-def _make_client(api_key: str) -> TestClient:
-    """A tiny app behind the auth middleware, for behavioral tests."""
-    app = Starlette(routes=[Route("/data", lambda r: PlainTextResponse("ok"))])
-    return TestClient(BearerAuthMiddleware(app, api_key=api_key), follow_redirects=False)
-
-
-class TestBearerAuthMiddlewareDisabled(unittest.TestCase):
-    """Test middleware when authentication is disabled."""
-
-    def setUp(self):
-        """Create middleware with auth disabled."""
-        self.app = AsyncMock()
-        self.middleware = BearerAuthMiddleware(self.app, api_key="")
-        self.assertFalse(self.middleware.auth_enabled)
-
-    def test_auth_disabled_on_init(self):
-        """Middleware should recognize auth is disabled."""
-        middleware = BearerAuthMiddleware(AsyncMock(), api_key="")
-        self.assertFalse(middleware.auth_enabled)
-        self.assertEqual(middleware.api_key, "")
-
-    def test_auth_disabled_allows_request_without_header(self):
-        """When auth disabled, request without Authorization header should be allowed."""
-        # This test verifies the middleware behavior but needs async handling
-        # We'll test the key logic: auth_enabled check
-        self.assertFalse(self.middleware.auth_enabled)
-
-    def test_auth_disabled_trims_api_key(self):
-        """API key should be trimmed of whitespace."""
-        middleware = BearerAuthMiddleware(AsyncMock(), api_key="   ")
-        self.assertFalse(middleware.auth_enabled)
-        self.assertEqual(middleware.api_key, "")
+API_KEY = "test-secret-key-12345"
 
 
-class TestBearerAuthMiddlewareEnabled(unittest.TestCase):
-    """Test middleware when authentication is enabled."""
-
-    def setUp(self):
-        """Create middleware with auth enabled."""
-        self.app = AsyncMock()
-        self.test_key = "test-secret-key-12345"
-        self.middleware = BearerAuthMiddleware(self.app, api_key=self.test_key)
-        self.assertTrue(self.middleware.auth_enabled)
-
-    def test_auth_enabled_on_init(self):
-        """Middleware should recognize auth is enabled."""
-        middleware = BearerAuthMiddleware(AsyncMock(), api_key="secret")
-        self.assertTrue(middleware.auth_enabled)
-        self.assertEqual(middleware.api_key, "secret")
-
-    def test_auth_enabled_trims_api_key(self):
-        """API key should be trimmed of whitespace."""
-        middleware = BearerAuthMiddleware(AsyncMock(), api_key="  secret  ")
-        self.assertTrue(middleware.auth_enabled)
-        self.assertEqual(middleware.api_key, "secret")
-
-    def test_valid_bearer_token_accepted(self):
-        """Valid Bearer token should be accepted."""
-        self.assertTrue(self.middleware.auth_enabled)
-        # Logic: token matches, should not return error
-        # This would be tested in async test
-
-    def test_missing_authorization_header_rejected(self):
-        """Missing Authorization header should return 401."""
-        # Middleware checks: if not auth_header: return 401
-        self.assertTrue(self.middleware.auth_enabled)
-
-    def test_empty_authorization_header_rejected(self):
-        """Empty Authorization header should return 401."""
-        self.assertTrue(self.middleware.auth_enabled)
-
-    def test_wrong_scheme_rejected(self):
-        """Authorization with wrong scheme (not Bearer) should return 401."""
-        # Middleware checks: if not auth_header.lower().startswith("bearer ")
-        self.assertTrue(self.middleware.auth_enabled)
-
-    def test_invalid_token_rejected(self):
-        """Invalid Bearer token should return 403."""
-        self.assertTrue(self.middleware.auth_enabled)
-
-    def test_empty_token_rejected(self):
-        """Bearer token with no value should return 401."""
-        self.assertTrue(self.middleware.auth_enabled)
+async def _ok(request):
+    return PlainTextResponse("ok")
 
 
-class TestBearerAuthMiddlewareHeaderParsing(unittest.TestCase):
-    """Test header parsing and validation logic."""
+def _client(api_key, exempt_ui=False):
+    """A TestClient over BearerAuthMiddleware wrapping a trivial app.
 
-    def test_bearer_prefix_case_insensitive(self):
-        """Bearer prefix should be case-insensitive."""
-        middleware = BearerAuthMiddleware(AsyncMock(), api_key="secret")
-        # Middleware uses: auth_header.lower().startswith("bearer ")
-        test_headers = ["Bearer ", "bearer ", "BEARER ", "BeArEr "]
-        for header in test_headers:
-            self.assertTrue(header.lower().startswith("bearer "))
-
-    def test_token_extraction_removes_bearer_prefix(self):
-        """Token extraction should remove 'Bearer ' prefix."""
-        middleware = BearerAuthMiddleware(AsyncMock(), api_key="secret")
-        # Middleware uses: token = auth_header[7:].strip()
-        test_cases = [
-            ("Bearer token123", "token123"),
-            ("Bearer  token123", "token123"),
-            ("Bearer token123  ", "token123"),
-            ("Bearer token123 ", "token123"),
-        ]
-        for header, expected_token in test_cases:
-            extracted = header[7:].strip()
-            self.assertEqual(extracted, expected_token)
-
-    def test_header_whitespace_handling(self):
-        """Middleware should handle leading/trailing whitespace in header."""
-        middleware = BearerAuthMiddleware(AsyncMock(), api_key="secret")
-        # Middleware gets: auth_header = request.headers.get("authorization", "").strip()
-        test_cases = [
-            "  Bearer token  ",
-            "\tBearer token\t",
-            "\nBearer token\n",
-        ]
-        for header in test_cases:
-            trimmed = header.strip()
-            self.assertTrue(trimmed.lower().startswith("bearer "))
+    Routes mirror the real shape: a protected MCP path and the /ui paths that
+    are exempt only when the web viewer is registered (exempt_ui=True).
+    """
+    app = Starlette(routes=[
+        Route("/mcp", _ok),
+        Route("/ui", _ok),
+        Route("/ui/login", _ok),
+    ])
+    return TestClient(BearerAuthMiddleware(app, api_key=api_key, exempt_ui=exempt_ui))
 
 
-class TestBearerAuthMiddlewareTimingAttacks(unittest.TestCase):
-    """Test protection against timing attacks."""
+class TestConstructor(unittest.TestCase):
+    """api_key normalization and the auth_enabled flag derived from it."""
 
-    def test_constant_time_comparison_used(self):
-        """Middleware should use hmac.compare_digest for token comparison."""
-        import hmac
-        # Verify hmac.compare_digest is used in middleware
-        middleware = BearerAuthMiddleware(AsyncMock(), api_key="secret")
-        # The middleware uses: hmac.compare_digest(token, self.api_key)
-        # This is constant-time and prevents timing attacks
+    def test_empty_key_disables_auth(self):
+        mw = BearerAuthMiddleware(AsyncMock(), api_key="")
+        self.assertFalse(mw.auth_enabled)
+        self.assertEqual(mw.api_key, "")
 
-        # Test that compare_digest gives same result regardless of position
-        key = "secret-key"
-        wrong_keys = [
-            "secret-key-wrong",  # Wrong at end
-            "wrong-secret-key",  # Wrong at start
-            "s3cr3t-k3y",        # Wrong in middle
-            "",                  # Empty
-        ]
+    def test_whitespace_only_key_disables_auth(self):
+        # A key of only whitespace trims to "" → auth disabled.
+        mw = BearerAuthMiddleware(AsyncMock(), api_key="   ")
+        self.assertFalse(mw.auth_enabled)
+        self.assertEqual(mw.api_key, "")
 
-        for wrong_key in wrong_keys:
-            # All should return False (different keys)
-            self.assertFalse(hmac.compare_digest(wrong_key, key))
-
-        # Correct key should return True
-        self.assertTrue(hmac.compare_digest(key, key))
+    def test_nonempty_key_enables_auth_and_is_trimmed(self):
+        mw = BearerAuthMiddleware(AsyncMock(), api_key="  secret  ")
+        self.assertTrue(mw.auth_enabled)
+        self.assertEqual(mw.api_key, "secret")
 
 
-class TestBearerAuthMiddlewareErrorMessages(unittest.TestCase):
-    """Test error messages are descriptive."""
+class TestAuthDisabled(unittest.TestCase):
+    """With no key, every request passes through regardless of headers."""
 
-    def test_missing_header_error_message(self):
-        """Error message for missing header should be descriptive."""
-        middleware = BearerAuthMiddleware(AsyncMock(), api_key="secret")
-        # When auth enabled and no header, should return:
-        # {"error": "Missing Authorization header", "details": "..."}
-        self.assertTrue(middleware.auth_enabled)
+    def test_request_without_header_allowed(self):
+        resp = _client("").get("/mcp")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.text, "ok")
 
-    def test_invalid_format_error_message(self):
-        """Error message for invalid format should be descriptive."""
-        middleware = BearerAuthMiddleware(AsyncMock(), api_key="secret")
-        # When header doesn't start with "Bearer ", should return:
-        # {"error": "Invalid Authorization header format", "details": "..."}
-        self.assertTrue(middleware.auth_enabled)
-
-    def test_invalid_token_error_message(self):
-        """Error message for invalid token should be descriptive."""
-        middleware = BearerAuthMiddleware(AsyncMock(), api_key="secret")
-        # When token is wrong, should return:
-        # {"error": "Invalid API key", "details": "..."}
-        self.assertTrue(middleware.auth_enabled)
+    def test_request_with_header_allowed(self):
+        resp = _client("").get("/mcp", headers={"Authorization": "Bearer anything"})
+        self.assertEqual(resp.status_code, 200)
 
 
-class TestBearerAuthMiddlewareLogging(unittest.TestCase):
-    """Test that requests are logged appropriately."""
+class TestAuthEnabled(unittest.TestCase):
+    """With a key set, dispatch() enforces the Bearer scheme and token."""
 
-    def test_auth_enabled_logged_on_init(self):
-        """When auth enabled, initialization should be logged."""
-        with patch("mnemomatic.auth.logger") as mock_logger:
-            middleware = BearerAuthMiddleware(AsyncMock(), api_key="secret")
-            # Should log: "Authentication enabled (Bearer token required)"
-            self.assertTrue(middleware.auth_enabled)
+    def test_valid_token_accepted(self):
+        resp = _client(API_KEY).get("/mcp", headers={"Authorization": f"Bearer {API_KEY}"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.text, "ok")
 
-    def test_auth_disabled_logged_on_init(self):
-        """When auth disabled, initialization should be logged as warning."""
-        with patch("mnemomatic.auth.logger") as mock_logger:
-            middleware = BearerAuthMiddleware(AsyncMock(), api_key="")
-            # Should log warning about auth disabled
-            self.assertFalse(middleware.auth_enabled)
+    def test_scheme_is_case_insensitive(self):
+        resp = _client(API_KEY).get("/mcp", headers={"Authorization": f"bearer {API_KEY}"})
+        self.assertEqual(resp.status_code, 200)
 
-    def test_unauthorized_requests_logged(self):
-        """Unauthorized requests should be logged at warning level."""
-        # This would be tested in async integration tests
-        pass
+    def test_surrounding_whitespace_in_token_tolerated(self):
+        # token = auth_header[7:].strip(), so extra spaces still match.
+        resp = _client(API_KEY).get("/mcp", headers={"Authorization": f"Bearer  {API_KEY} "})
+        self.assertEqual(resp.status_code, 200)
 
-    def test_authenticated_requests_logged(self):
-        """Successful authentication should be logged at debug level."""
-        # This would be tested in async integration tests
-        pass
+    def test_missing_header_401(self):
+        resp = _client(API_KEY).get("/mcp")
+        self.assertEqual(resp.status_code, 401)
+        self.assertEqual(resp.json(), {
+            "error": "Missing Authorization header",
+            "details": "Required format: 'Authorization: Bearer <token>'",
+        })
 
+    def test_wrong_scheme_401(self):
+        resp = _client(API_KEY).get("/mcp", headers={"Authorization": f"Basic {API_KEY}"})
+        self.assertEqual(resp.status_code, 401)
+        self.assertEqual(resp.json()["error"], "Invalid Authorization header format")
 
-class TestBearerAuthMiddlewareIntegration(unittest.TestCase):
-    """Integration-style tests for complete auth flow."""
+    def test_bearer_with_no_token_401(self):
+        # "Bearer " is trimmed to "Bearer" by the leading strip(), so it fails
+        # the "bearer " prefix check and is reported as a format error. (The
+        # separate "Token is empty" branch is therefore unreachable via a real
+        # header — the strip() removes the trailing space that would expose it.)
+        resp = _client(API_KEY).get("/mcp", headers={"Authorization": "Bearer "})
+        self.assertEqual(resp.status_code, 401)
+        self.assertEqual(resp.json()["error"], "Invalid Authorization header format")
 
-    def test_single_code_path_for_all_configs(self):
-        """Middleware should handle both auth enabled and disabled modes."""
-        app = AsyncMock()
+    def test_wrong_token_403(self):
+        resp = _client(API_KEY).get("/mcp", headers={"Authorization": "Bearer wrong-key"})
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(resp.json()["error"], "Invalid API key")
 
-        # Test auth disabled
-        middleware_disabled = BearerAuthMiddleware(app, api_key="")
-        self.assertFalse(middleware_disabled.auth_enabled)
-
-        # Test auth enabled
-        middleware_enabled = BearerAuthMiddleware(app, api_key="secret")
-        self.assertTrue(middleware_enabled.auth_enabled)
-
-        # Both should be same middleware class, just configured differently
-        self.assertEqual(type(middleware_disabled), type(middleware_enabled))
-
-    def test_client_ip_extraction(self):
-        """Middleware should extract client IP for logging."""
-        # Middleware uses: client_ip = request.client[0] if request.client else "unknown"
-
-        # Test valid client
-        request = MagicMock()
-        request.client = ("192.168.1.100", 12345)
-        client_ip = request.client[0] if request.client else "unknown"
-        self.assertEqual(client_ip, "192.168.1.100")
-
-        # Test missing client
-        request.client = None
-        client_ip = request.client[0] if request.client else "unknown"
-        self.assertEqual(client_ip, "unknown")
+    def test_token_compared_with_constant_time_digest(self):
+        # The middleware must delegate to hmac.compare_digest (timing-safe),
+        # not a plain ==. Wrap the real function so behavior is unchanged while
+        # we assert it was called with (presented token, configured key).
+        with patch("mnemomatic.auth.hmac.compare_digest", wraps=hmac.compare_digest) as cd:
+            resp = _client(API_KEY).get("/mcp", headers={"Authorization": f"Bearer {API_KEY}"})
+        self.assertEqual(resp.status_code, 200)
+        cd.assert_called_once_with(API_KEY, API_KEY)
 
 
-class TestBearerAuthThrottling(unittest.TestCase):
+class TestUIExemption(unittest.TestCase):
+    """/ui carries its own shared-secret gate, so the MCP Bearer token is not
+    enforced there — but only when the viewer is registered (exempt_ui=True)."""
+
+    def test_ui_root_exempt_without_token(self):
+        resp = _client(API_KEY, exempt_ui=True).get("/ui")
+        self.assertEqual(resp.status_code, 200)
+
+    def test_ui_subpath_exempt_without_token(self):
+        resp = _client(API_KEY, exempt_ui=True).get("/ui/login")
+        self.assertEqual(resp.status_code, 200)
+
+    def test_mcp_path_still_protected_when_ui_exempt(self):
+        resp = _client(API_KEY, exempt_ui=True).get("/mcp")
+        self.assertEqual(resp.status_code, 401)
+
+    def test_ui_requires_bearer_when_viewer_disabled(self):
+        # Default (viewer not registered): /ui paths get no free pass.
+        client = _client(API_KEY)
+        self.assertEqual(client.get("/ui").status_code, 401)
+        self.assertEqual(client.get("/ui/login").status_code, 401)
+
+
+class TestLogging(unittest.TestCase):
+    """Initialization and per-request logging side effects."""
+
+    def test_enabled_logs_info_on_init(self):
+        with patch("mnemomatic.auth.logger") as log:
+            BearerAuthMiddleware(AsyncMock(), api_key="secret")
+        log.info.assert_called_once_with("Authentication enabled (Bearer token required)")
+
+    def test_disabled_logs_warning_on_init(self):
+        with patch("mnemomatic.auth.logger") as log:
+            BearerAuthMiddleware(AsyncMock(), api_key="")
+        log.warning.assert_called_once()
+
+    def test_unauthorized_request_logged_as_warning(self):
+        client = _client(API_KEY)
+        with patch("mnemomatic.auth.logger") as log:
+            client.get("/mcp")  # missing header → 401
+        log.warning.assert_called()
+
+    def test_authenticated_request_logged_at_debug(self):
+        client = _client(API_KEY)
+        with patch("mnemomatic.auth.logger") as log:
+            client.get("/mcp", headers={"Authorization": f"Bearer {API_KEY}"})
+        log.debug.assert_called()
+
+
+class TestThrottling(unittest.TestCase):
     """Repeated invalid keys must lock the client out with 429 responses."""
 
     def test_lockout_after_repeated_invalid_keys(self):
-        client = _make_client("right-key")
+        client = _client(API_KEY)
         for _ in range(5):
-            resp = client.get("/data", headers={"Authorization": "Bearer wrong"})
+            resp = client.get("/mcp", headers={"Authorization": "Bearer wrong"})
             self.assertEqual(resp.status_code, 403)
         # Locked out: even the correct key is refused until the lockout expires.
-        resp = client.get("/data", headers={"Authorization": "Bearer right-key"})
+        resp = client.get("/mcp", headers={"Authorization": f"Bearer {API_KEY}"})
         self.assertEqual(resp.status_code, 429)
         self.assertIn("Retry-After", resp.headers)
 
     def test_success_clears_failure_count(self):
-        client = _make_client("right-key")
+        client = _client(API_KEY)
         for _ in range(4):
-            client.get("/data", headers={"Authorization": "Bearer wrong"})
+            client.get("/mcp", headers={"Authorization": "Bearer wrong"})
         # A success before the threshold resets the counter...
-        resp = client.get("/data", headers={"Authorization": "Bearer right-key"})
+        resp = client.get("/mcp", headers={"Authorization": f"Bearer {API_KEY}"})
         self.assertEqual(resp.status_code, 200)
         # ...so the next failure doesn't trip the lockout.
-        resp = client.get("/data", headers={"Authorization": "Bearer wrong"})
+        resp = client.get("/mcp", headers={"Authorization": "Bearer wrong"})
         self.assertEqual(resp.status_code, 403)
-        resp = client.get("/data", headers={"Authorization": "Bearer right-key"})
+        resp = client.get("/mcp", headers={"Authorization": f"Bearer {API_KEY}"})
         self.assertEqual(resp.status_code, 200)
 
     def test_missing_header_does_not_count_toward_lockout(self):
         # Only credential guesses are throttled; misconfigured clients that
         # send no header at all keep getting 401, never 429.
-        client = _make_client("right-key")
+        client = _client(API_KEY)
         for _ in range(10):
-            self.assertEqual(client.get("/data").status_code, 401)
-        resp = client.get("/data", headers={"Authorization": "Bearer right-key"})
+            self.assertEqual(client.get("/mcp").status_code, 401)
+        resp = client.get("/mcp", headers={"Authorization": f"Bearer {API_KEY}"})
         self.assertEqual(resp.status_code, 200)
 
     def test_auth_disabled_never_throttles(self):
-        client = _make_client("")
+        client = _client("")
         for _ in range(10):
-            resp = client.get("/data", headers={"Authorization": "Bearer whatever"})
+            resp = client.get("/mcp", headers={"Authorization": "Bearer whatever"})
             self.assertEqual(resp.status_code, 200)
 
 
@@ -335,36 +251,6 @@ class TestFailureThrottle(unittest.TestCase):
         throttle = FailureThrottle(max_failures=1, window=60, lockout=0.0)
         throttle.record_failure("ip")
         self.assertEqual(throttle.retry_after("ip"), 0)
-
-
-class TestBearerAuthMiddlewareEdgeCases(unittest.TestCase):
-    """Test edge cases and unusual inputs."""
-
-    def test_very_long_token(self):
-        """Middleware should handle very long tokens."""
-        long_token = "x" * 10000
-        middleware = BearerAuthMiddleware(AsyncMock(), api_key=long_token)
-        self.assertEqual(middleware.api_key, long_token)
-
-    def test_token_with_special_characters(self):
-        """Middleware should handle tokens with special characters."""
-        special_token = "secret!@#$%^&*()_+-=[]{}|;:',.<>?/~`"
-        middleware = BearerAuthMiddleware(AsyncMock(), api_key=special_token)
-        self.assertEqual(middleware.api_key, special_token)
-
-    def test_bearer_with_multiple_spaces(self):
-        """Token extraction should handle multiple spaces after Bearer."""
-        header = "Bearer   token123"
-        token = header[7:].strip()
-        self.assertEqual(token, "token123")
-
-    def test_bearer_case_variations(self):
-        """Bearer prefix matching should be case-insensitive."""
-        variations = ["Bearer", "bearer", "BEARER", "BeArEr"]
-        for variant in variations:
-            header = f"{variant} token"
-            matches = header.lower().startswith("bearer ")
-            self.assertTrue(matches)
 
 
 if __name__ == "__main__":
