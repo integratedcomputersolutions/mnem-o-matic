@@ -229,6 +229,60 @@ class TestDocumentValidation(unittest.TestCase):
         )
         self.assertEqual(len(doc.metadata), 3)
 
+    def test_document_metadata_nested_value_too_long(self):
+        """The size limit applies to non-string values via their serialized form."""
+        with self.assertRaises(ValidationError) as cm:
+            Document(
+                namespace="test",
+                title="Test",
+                content="Content",
+                metadata={"key": ["x" * 100] * 200}  # ~20KB serialized list
+            )
+        self.assertIn("metadata", str(cm.exception))
+
+    def test_document_metadata_nested_dict_too_long(self):
+        """Oversized nested dicts should be rejected too."""
+        with self.assertRaises(ValidationError) as cm:
+            Document(
+                namespace="test",
+                title="Test",
+                content="Content",
+                metadata={"key": {f"k{i}": "x" * 100 for i in range(200)}}
+            )
+        self.assertIn("metadata", str(cm.exception))
+
+    def test_document_metadata_non_serializable_value(self):
+        """Values json.dumps can't store must be rejected at validation time."""
+        with self.assertRaises(ValidationError) as cm:
+            Document(
+                namespace="test",
+                title="Test",
+                content="Content",
+                metadata={"key": object()}
+            )
+        self.assertIn("serializable", str(cm.exception))
+
+    def test_document_metadata_key_too_long(self):
+        """Metadata keys are length-limited."""
+        with self.assertRaises(ValidationError) as cm:
+            Document(
+                namespace="test",
+                title="Test",
+                content="Content",
+                metadata={"k" * 201: "value"}
+            )
+        self.assertIn("metadata", str(cm.exception))
+
+    def test_document_metadata_small_nested_values_ok(self):
+        """Reasonably-sized nested structures remain valid."""
+        doc = Document(
+            namespace="test",
+            title="Test",
+            content="Content",
+            metadata={"list": [1, 2, 3], "dict": {"a": {"b": "c"}}, "num": 42}
+        )
+        self.assertEqual(len(doc.metadata), 3)
+
 
 class TestKnowledgeValidation(unittest.TestCase):
     """Test Knowledge input validation."""
@@ -439,8 +493,8 @@ class TestValidationEdgeCases(unittest.TestCase):
         self.assertIn("Special", doc.title)
 
     def test_metadata_with_various_value_types(self):
-        """Non-string metadata values pass through unchanged (only string values
-        are length-checked; nothing is coerced or dropped)."""
+        """Metadata values of any JSON type pass through unchanged (every value
+        is size-checked on its serialized form; nothing is coerced or dropped)."""
         metadata = {
             "string": "value",
             "number": 42,

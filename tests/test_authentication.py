@@ -2,8 +2,9 @@
 
 These drive BearerAuthMiddleware end-to-end through a Starlette TestClient so the
 real dispatch() path is exercised: 401/403 status codes, the exact error bodies,
-the /ui bypass, and the constant-time token comparison — not merely constructor
-state. A few constructor tests cover the api_key normalization that gates it all.
+the /ui bypass, the constant-time token comparison, and the brute-force lockout —
+not merely constructor state. A few constructor tests cover the api_key
+normalization that gates it all.
 """
 
 import hmac
@@ -20,6 +21,7 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from mnemomatic.auth import BearerAuthMiddleware
+from mnemomatic.throttle import FailureThrottle
 
 API_KEY = "test-secret-key-12345"
 
@@ -28,17 +30,18 @@ async def _ok(request):
     return PlainTextResponse("ok")
 
 
-def _client(api_key):
+def _client(api_key, exempt_ui=False):
     """A TestClient over BearerAuthMiddleware wrapping a trivial app.
 
-    Routes mirror the real shape: a protected MCP path and the exempt /ui paths.
+    Routes mirror the real shape: a protected MCP path and the /ui paths that
+    are exempt only when the web viewer is registered (exempt_ui=True).
     """
     app = Starlette(routes=[
         Route("/mcp", _ok),
         Route("/ui", _ok),
         Route("/ui/login", _ok),
     ])
-    return TestClient(BearerAuthMiddleware(app, api_key=api_key))
+    return TestClient(BearerAuthMiddleware(app, api_key=api_key, exempt_ui=exempt_ui))
 
 
 class TestConstructor(unittest.TestCase):
@@ -130,15 +133,25 @@ class TestAuthEnabled(unittest.TestCase):
 
 class TestUIExemption(unittest.TestCase):
     """/ui carries its own shared-secret gate, so the MCP Bearer token is not
-    enforced there even when auth is enabled."""
+    enforced there — but only when the viewer is registered (exempt_ui=True)."""
 
     def test_ui_root_exempt_without_token(self):
-        resp = _client(API_KEY).get("/ui")
+        resp = _client(API_KEY, exempt_ui=True).get("/ui")
         self.assertEqual(resp.status_code, 200)
 
     def test_ui_subpath_exempt_without_token(self):
-        resp = _client(API_KEY).get("/ui/login")
+        resp = _client(API_KEY, exempt_ui=True).get("/ui/login")
         self.assertEqual(resp.status_code, 200)
+
+    def test_mcp_path_still_protected_when_ui_exempt(self):
+        resp = _client(API_KEY, exempt_ui=True).get("/mcp")
+        self.assertEqual(resp.status_code, 401)
+
+    def test_ui_requires_bearer_when_viewer_disabled(self):
+        # Default (viewer not registered): /ui paths get no free pass.
+        client = _client(API_KEY)
+        self.assertEqual(client.get("/ui").status_code, 401)
+        self.assertEqual(client.get("/ui/login").status_code, 401)
 
 
 class TestLogging(unittest.TestCase):
@@ -165,6 +178,79 @@ class TestLogging(unittest.TestCase):
         with patch("mnemomatic.auth.logger") as log:
             client.get("/mcp", headers={"Authorization": f"Bearer {API_KEY}"})
         log.debug.assert_called()
+
+
+class TestThrottling(unittest.TestCase):
+    """Repeated invalid keys must lock the client out with 429 responses."""
+
+    def test_lockout_after_repeated_invalid_keys(self):
+        client = _client(API_KEY)
+        for _ in range(5):
+            resp = client.get("/mcp", headers={"Authorization": "Bearer wrong"})
+            self.assertEqual(resp.status_code, 403)
+        # Locked out: even the correct key is refused until the lockout expires.
+        resp = client.get("/mcp", headers={"Authorization": f"Bearer {API_KEY}"})
+        self.assertEqual(resp.status_code, 429)
+        self.assertIn("Retry-After", resp.headers)
+
+    def test_success_clears_failure_count(self):
+        client = _client(API_KEY)
+        for _ in range(4):
+            client.get("/mcp", headers={"Authorization": "Bearer wrong"})
+        # A success before the threshold resets the counter...
+        resp = client.get("/mcp", headers={"Authorization": f"Bearer {API_KEY}"})
+        self.assertEqual(resp.status_code, 200)
+        # ...so the next failure doesn't trip the lockout.
+        resp = client.get("/mcp", headers={"Authorization": "Bearer wrong"})
+        self.assertEqual(resp.status_code, 403)
+        resp = client.get("/mcp", headers={"Authorization": f"Bearer {API_KEY}"})
+        self.assertEqual(resp.status_code, 200)
+
+    def test_missing_header_does_not_count_toward_lockout(self):
+        # Only credential guesses are throttled; misconfigured clients that
+        # send no header at all keep getting 401, never 429.
+        client = _client(API_KEY)
+        for _ in range(10):
+            self.assertEqual(client.get("/mcp").status_code, 401)
+        resp = client.get("/mcp", headers={"Authorization": f"Bearer {API_KEY}"})
+        self.assertEqual(resp.status_code, 200)
+
+    def test_auth_disabled_never_throttles(self):
+        client = _client("")
+        for _ in range(10):
+            resp = client.get("/mcp", headers={"Authorization": "Bearer whatever"})
+            self.assertEqual(resp.status_code, 200)
+
+
+class TestFailureThrottle(unittest.TestCase):
+    """Unit tests for the throttle primitive itself."""
+
+    def test_locks_after_max_failures(self):
+        throttle = FailureThrottle(max_failures=3, window=60, lockout=300)
+        for _ in range(2):
+            throttle.record_failure("1.2.3.4")
+        self.assertEqual(throttle.retry_after("1.2.3.4"), 0)
+        throttle.record_failure("1.2.3.4")
+        self.assertGreater(throttle.retry_after("1.2.3.4"), 0)
+
+    def test_clients_are_independent(self):
+        throttle = FailureThrottle(max_failures=2, window=60, lockout=300)
+        throttle.record_failure("attacker")
+        throttle.record_failure("attacker")
+        self.assertGreater(throttle.retry_after("attacker"), 0)
+        self.assertEqual(throttle.retry_after("innocent"), 0)
+
+    def test_success_resets_failures(self):
+        throttle = FailureThrottle(max_failures=2, window=60, lockout=300)
+        throttle.record_failure("ip")
+        throttle.record_success("ip")
+        throttle.record_failure("ip")
+        self.assertEqual(throttle.retry_after("ip"), 0)
+
+    def test_lockout_expires(self):
+        throttle = FailureThrottle(max_failures=1, window=60, lockout=0.0)
+        throttle.record_failure("ip")
+        self.assertEqual(throttle.retry_after("ip"), 0)
 
 
 if __name__ == "__main__":
