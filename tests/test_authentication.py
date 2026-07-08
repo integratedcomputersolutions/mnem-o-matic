@@ -17,8 +17,18 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from mnemomatic.auth import BearerAuthMiddleware
+from mnemomatic.throttle import FailureThrottle
+from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, PlainTextResponse
+from starlette.routing import Route
+from starlette.testclient import TestClient
+
+
+def _make_client(api_key: str) -> TestClient:
+    """A tiny app behind the auth middleware, for behavioral tests."""
+    app = Starlette(routes=[Route("/data", lambda r: PlainTextResponse("ok"))])
+    return TestClient(BearerAuthMiddleware(app, api_key=api_key), follow_redirects=False)
 
 
 class TestBearerAuthMiddlewareDisabled(unittest.TestCase):
@@ -252,6 +262,79 @@ class TestBearerAuthMiddlewareIntegration(unittest.TestCase):
         request.client = None
         client_ip = request.client[0] if request.client else "unknown"
         self.assertEqual(client_ip, "unknown")
+
+
+class TestBearerAuthThrottling(unittest.TestCase):
+    """Repeated invalid keys must lock the client out with 429 responses."""
+
+    def test_lockout_after_repeated_invalid_keys(self):
+        client = _make_client("right-key")
+        for _ in range(5):
+            resp = client.get("/data", headers={"Authorization": "Bearer wrong"})
+            self.assertEqual(resp.status_code, 403)
+        # Locked out: even the correct key is refused until the lockout expires.
+        resp = client.get("/data", headers={"Authorization": "Bearer right-key"})
+        self.assertEqual(resp.status_code, 429)
+        self.assertIn("Retry-After", resp.headers)
+
+    def test_success_clears_failure_count(self):
+        client = _make_client("right-key")
+        for _ in range(4):
+            client.get("/data", headers={"Authorization": "Bearer wrong"})
+        # A success before the threshold resets the counter...
+        resp = client.get("/data", headers={"Authorization": "Bearer right-key"})
+        self.assertEqual(resp.status_code, 200)
+        # ...so the next failure doesn't trip the lockout.
+        resp = client.get("/data", headers={"Authorization": "Bearer wrong"})
+        self.assertEqual(resp.status_code, 403)
+        resp = client.get("/data", headers={"Authorization": "Bearer right-key"})
+        self.assertEqual(resp.status_code, 200)
+
+    def test_missing_header_does_not_count_toward_lockout(self):
+        # Only credential guesses are throttled; misconfigured clients that
+        # send no header at all keep getting 401, never 429.
+        client = _make_client("right-key")
+        for _ in range(10):
+            self.assertEqual(client.get("/data").status_code, 401)
+        resp = client.get("/data", headers={"Authorization": "Bearer right-key"})
+        self.assertEqual(resp.status_code, 200)
+
+    def test_auth_disabled_never_throttles(self):
+        client = _make_client("")
+        for _ in range(10):
+            resp = client.get("/data", headers={"Authorization": "Bearer whatever"})
+            self.assertEqual(resp.status_code, 200)
+
+
+class TestFailureThrottle(unittest.TestCase):
+    """Unit tests for the throttle primitive itself."""
+
+    def test_locks_after_max_failures(self):
+        throttle = FailureThrottle(max_failures=3, window=60, lockout=300)
+        for _ in range(2):
+            throttle.record_failure("1.2.3.4")
+        self.assertEqual(throttle.retry_after("1.2.3.4"), 0)
+        throttle.record_failure("1.2.3.4")
+        self.assertGreater(throttle.retry_after("1.2.3.4"), 0)
+
+    def test_clients_are_independent(self):
+        throttle = FailureThrottle(max_failures=2, window=60, lockout=300)
+        throttle.record_failure("attacker")
+        throttle.record_failure("attacker")
+        self.assertGreater(throttle.retry_after("attacker"), 0)
+        self.assertEqual(throttle.retry_after("innocent"), 0)
+
+    def test_success_resets_failures(self):
+        throttle = FailureThrottle(max_failures=2, window=60, lockout=300)
+        throttle.record_failure("ip")
+        throttle.record_success("ip")
+        throttle.record_failure("ip")
+        self.assertEqual(throttle.retry_after("ip"), 0)
+
+    def test_lockout_expires(self):
+        throttle = FailureThrottle(max_failures=1, window=60, lockout=0.0)
+        throttle.record_failure("ip")
+        self.assertEqual(throttle.retry_after("ip"), 0)
 
 
 class TestBearerAuthMiddlewareEdgeCases(unittest.TestCase):

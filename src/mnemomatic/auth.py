@@ -11,6 +11,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from mnemomatic.throttle import FailureThrottle
+
 logger = logging.getLogger("mnemomatic")
 
 
@@ -20,18 +22,26 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
     When initialized with api_key="", authentication is disabled but request
     logging is still performed. This allows a single code path regardless of
     auth configuration.
+
+    Repeated invalid-key attempts from the same client are throttled: after a
+    burst of failures the client gets 429 responses (with Retry-After) until
+    the lockout expires, regardless of what credential it presents.
     """
 
-    def __init__(self, app, api_key: str = ""):
+    def __init__(self, app, api_key: str = "", exempt_ui: bool = False):
         """Initialize middleware.
 
         Args:
             app: ASGI application
             api_key: API key for Bearer token validation. If empty, auth is disabled.
+            exempt_ui: Skip Bearer validation for /ui paths. Only set this when the
+                web viewer is registered — it carries its own shared-secret gate.
         """
         super().__init__(app)
         self.api_key = api_key.strip()
         self.auth_enabled = bool(self.api_key)
+        self.exempt_ui = exempt_ui
+        self._throttle = FailureThrottle()
 
         if self.auth_enabled:
             logger.info("Authentication enabled (Bearer token required)")
@@ -39,12 +49,13 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
             logger.warning("Authentication disabled — server is running without API key validation")
 
     def _reject(self, reason: str, error: str, details: str, status: int,
-                method: str, path: str, client_ip: str) -> JSONResponse:
+                method: str, path: str, client_ip: str,
+                headers: dict | None = None) -> JSONResponse:
         """Log an unauthorized request and build its JSON error response."""
         logger.warning(
             "Unauthorized request: %s (%s %s from %s)", reason, method, path, client_ip,
         )
-        return JSONResponse({"error": error, "details": details}, status_code=status)
+        return JSONResponse({"error": error, "details": details}, status_code=status, headers=headers)
 
     async def dispatch(self, request: Request, call_next):
         """Process request and enforce authentication if enabled.
@@ -65,8 +76,9 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         path = request.url.path
 
         # The web viewer under /ui carries its own shared-secret gate, so the
-        # MCP Bearer token does not apply to it.
-        if path == "/ui" or path.startswith("/ui/"):
+        # MCP Bearer token does not apply to it. Only honored when the viewer
+        # is actually registered — otherwise /ui is protected like any path.
+        if self.exempt_ui and (path == "/ui" or path.startswith("/ui/")):
             return await call_next(request)
 
         # If auth is disabled, just log and proceed
@@ -77,6 +89,17 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
                 method, path, client_ip,
             )
             return response
+
+        # Locked-out clients are refused before any credential check
+        wait = self._throttle.retry_after(client_ip)
+        if wait:
+            return self._reject(
+                "throttled (too many failed attempts)",
+                "Too many failed authentication attempts",
+                f"Retry after {wait} seconds",
+                429, method, path, client_ip,
+                headers={"Retry-After": str(wait)},
+            )
 
         # Auth is enabled — validate token
         if not auth_header:
@@ -109,6 +132,7 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
 
         # Validate token using constant-time comparison (prevents timing attacks)
         if not hmac.compare_digest(token, self.api_key):
+            self._throttle.record_failure(client_ip)
             return self._reject(
                 "invalid API key",
                 "Invalid API key",
@@ -117,6 +141,7 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
             )
 
         # Authentication successful
+        self._throttle.record_success(client_ip)
         logger.debug(
             "Authenticated request: %s %s from %s",
             method, path, client_ip,

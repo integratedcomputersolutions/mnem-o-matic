@@ -3,8 +3,11 @@
 A minimal, server-rendered HTML browser for the stored documents, knowledge,
 and notes. It is strictly read-only — no create, edit, or delete — and has no
 user accounts. Access is gated by a single pre-shared secret
-(``MNEMOMATIC_UI_TOKEN``): the visitor enters it once on a login page and it is
-stored in an HttpOnly cookie thereafter. When the token is unset the viewer is
+(``MNEMOMATIC_UI_TOKEN``): the visitor enters it once on a login page. The
+cookie stores a session value derived from the token with a per-process HMAC
+key — never the token itself — so a captured cookie can't reveal the secret
+and stops working when the server restarts. Repeated wrong tokens from the
+same client trigger a temporary lockout. When the token is unset the viewer is
 not registered at all, so it stays off by default.
 
 The routes live under ``/ui`` on the same ASGI app as the MCP endpoint;
@@ -15,14 +18,19 @@ Styling is stock Bootstrap 5 (vendored under ``static/`` and served at
 ``/ui/static/bootstrap.min.css``) — defaults only, no custom CSS.
 """
 
+import hashlib
 import hmac
 import html
+import secrets
 from datetime import timezone
 from pathlib import Path
+from urllib.parse import quote
 
 from starlette.requests import Request
 from starlette.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from starlette.routing import Route
+
+from mnemomatic.throttle import FailureThrottle
 
 COOKIE_NAME = "mnemomatic_ui"
 STATIC_DIR = Path(__file__).parent / "static"
@@ -35,10 +43,23 @@ _ITEM_GETTERS = {
 }
 
 
-def _authed(request: Request, token: str) -> bool:
-    """True when the request carries a cookie matching the shared secret."""
+def _authed(request: Request, session_value: str) -> bool:
+    """True when the request carries a cookie matching the derived session value."""
     cookie = request.cookies.get(COOKIE_NAME, "")
-    return bool(token) and hmac.compare_digest(cookie, token)
+    return bool(session_value) and hmac.compare_digest(cookie, session_value)
+
+
+def _is_https(request: Request) -> bool:
+    """True when the client connection is HTTPS, honoring the reverse proxy's
+    X-Forwarded-Proto (Caddy and nginx set it by default)."""
+    proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+    return proto.strip().lower() == "https"
+
+
+def _ns_href(namespace: str) -> str:
+    """Namespace link with the path segment percent-encoded (a namespace may
+    contain any character, including quotes and slashes)."""
+    return f"/ui/ns/{quote(namespace, safe='')}"
 
 
 def _esc(value) -> str:
@@ -49,7 +70,8 @@ def _esc(value) -> str:
 def _page(title: str, body: str, show_logout: bool = True) -> str:
     """Wrap body fragments in the shared page chrome (stock Bootstrap)."""
     logout = (
-        '<a class="btn btn-sm btn-outline-light" href="/ui/logout">Log out</a>'
+        '<form method="post" action="/ui/logout" class="m-0">'
+        '<button type="submit" class="btn btn-sm btn-outline-light">Log out</button></form>'
         if show_logout else ""
     )
     return f"""<!DOCTYPE html>
@@ -104,7 +126,7 @@ def _breadcrumb(*crumbs: tuple) -> str:
         if i == len(crumbs) - 1 or href is None:
             items.append(f'<li class="breadcrumb-item active" aria-current="page">{_esc(label)}</li>')
         else:
-            items.append(f'<li class="breadcrumb-item"><a href="{href}">{_esc(label)}</a></li>')
+            items.append(f'<li class="breadcrumb-item"><a href="{_esc(href)}">{_esc(label)}</a></li>')
     return f'<nav aria-label="breadcrumb"><ol class="breadcrumb">{"".join(items)}</ol></nav>'
 
 
@@ -139,24 +161,46 @@ def build_routes(db_getter, token: str) -> list[Route]:
         db_getter: zero-arg callable returning the shared Database instance.
         token: the shared secret required to view; never empty when registered.
     """
+    # The cookie carries this derived value, never the token itself. The HMAC
+    # key is random per process, so cookies stop working across restarts and a
+    # captured cookie cannot be turned back into the shared secret.
+    session_value = hmac.new(secrets.token_bytes(32), token.encode(), hashlib.sha256).hexdigest()
+    throttle = FailureThrottle()
+
+    def _client(request: Request) -> str:
+        return request.client.host if request.client else "unknown"
 
     def static_css(request: Request) -> Response:
         # Public asset (no cookie) so the login page is styled too.
         return FileResponse(STATIC_DIR / "bootstrap.min.css", media_type="text/css")
 
     def login_form(request: Request) -> Response:
-        if _authed(request, token):
+        if _authed(request, session_value):
             return RedirectResponse("/ui", status_code=303)
         return HTMLResponse(_login_page())
 
     async def login_submit(request: Request) -> Response:
+        client = _client(request)
+        wait = throttle.retry_after(client)
+        if wait:
+            return HTMLResponse(
+                _login_page(f"Too many failed attempts. Try again in {wait} seconds."),
+                status_code=429,
+                headers={"Retry-After": str(wait)},
+            )
         form = await request.form()
         supplied = (form.get("token") or "").strip()
         if not hmac.compare_digest(supplied, token):
+            throttle.record_failure(client)
             return HTMLResponse(_login_page("Incorrect token."), status_code=401)
+        throttle.record_success(client)
         resp = RedirectResponse("/ui", status_code=303)
         # HttpOnly so client JS can't read it; SameSite=Lax is fine for a viewer.
-        resp.set_cookie(COOKIE_NAME, token, httponly=True, samesite="lax", max_age=30 * 86400)
+        # Secure whenever the client connected over HTTPS (directly or via proxy).
+        resp.set_cookie(
+            COOKIE_NAME, session_value, httponly=True, samesite="lax",
+            secure=_is_https(request), max_age=30 * 86400,
+        )
         return resp
 
     def logout(request: Request) -> Response:
@@ -165,7 +209,7 @@ def build_routes(db_getter, token: str) -> list[Route]:
         return resp
 
     def index(request: Request) -> Response:
-        if not _authed(request, token):
+        if not _authed(request, session_value):
             return RedirectResponse("/ui/login", status_code=303)
         db = db_getter()
         namespaces = db.list_namespaces()
@@ -175,7 +219,7 @@ def build_routes(db_getter, token: str) -> list[Route]:
         rows = []
         for ns in namespaces:
             rows.append(
-                f'<tr><td><a href="/ui/ns/{_esc(ns)}">{_esc(ns)}</a></td>'
+                f'<tr><td><a href="{_esc(_ns_href(ns))}">{_esc(ns)}</a></td>'
                 f'<td class="text-end">{len(db.list_documents(ns))}</td>'
                 f'<td class="text-end">{len(db.list_knowledge(ns))}</td>'
                 f'<td class="text-end">{len(db.list_notes(ns))}</td></tr>'
@@ -190,7 +234,7 @@ def build_routes(db_getter, token: str) -> list[Route]:
         return HTMLResponse(_page("Namespaces", body))
 
     def namespace_view(request: Request) -> Response:
-        if not _authed(request, token):
+        if not _authed(request, session_value):
             return RedirectResponse("/ui/login", status_code=303)
         ns = request.path_params["namespace"]
         db = db_getter()
@@ -223,7 +267,7 @@ def build_routes(db_getter, token: str) -> list[Route]:
         return HTMLResponse(_page(ns, body))
 
     def item_view(request: Request) -> Response:
-        if not _authed(request, token):
+        if not _authed(request, session_value):
             return RedirectResponse("/ui/login", status_code=303)
         item_type = request.path_params["item_type"]
         item_id = request.path_params["id"]
@@ -252,7 +296,7 @@ def build_routes(db_getter, token: str) -> list[Route]:
             meta_rows = [("Source", item.source)]
 
         info = [
-            ("Namespace", f'<a href="/ui/ns/{_esc(item.namespace)}">{_esc(item.namespace)}</a>'),
+            ("Namespace", f'<a href="{_esc(_ns_href(item.namespace))}">{_esc(item.namespace)}</a>'),
             *[(label, _esc(val)) for label, val in meta_rows],
             ("Tags", _tags_html(item.tags)),
             ("Created", _fmt_dt(item.created_at)),
@@ -276,7 +320,7 @@ def build_routes(db_getter, token: str) -> list[Route]:
             )
 
         body = (
-            _breadcrumb(("Namespaces", "/ui"), (item.namespace, f"/ui/ns/{item.namespace}"), (heading, None))
+            _breadcrumb(("Namespaces", "/ui"), (item.namespace, _ns_href(item.namespace)), (heading, None))
             + '<div class="card">'
             + f'<div class="card-header"><h1 class="h5 mb-0">{_esc(heading)}</h1></div>'
             + '<div class="card-body">'
@@ -292,9 +336,11 @@ def build_routes(db_getter, token: str) -> list[Route]:
         Route("/ui", index, methods=["GET"]),
         Route("/ui/login", login_form, methods=["GET"]),
         Route("/ui/login", login_submit, methods=["POST"]),
-        Route("/ui/logout", logout, methods=["GET"]),
+        Route("/ui/logout", logout, methods=["POST"]),
         Route("/ui/static/bootstrap.min.css", static_css, methods=["GET"]),
-        Route("/ui/ns/{namespace}", namespace_view, methods=["GET"]),
+        # :path so namespaces containing '/' (decoded from %2F before routing)
+        # still resolve to the namespace view.
+        Route("/ui/ns/{namespace:path}", namespace_view, methods=["GET"]),
         Route("/ui/item/{item_type}/{id}", item_view, methods=["GET"]),
     ]
 

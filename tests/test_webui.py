@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
@@ -89,10 +90,39 @@ class TestGate(WebUITestBase):
 
     def test_logout_clears_cookie(self):
         self._auth()
-        resp = self.client.get("/ui/logout")
+        resp = self.client.post("/ui/logout")
         self.assertEqual(resp.status_code, 303)
         # cookie removed → index redirects back to login
         self.assertEqual(self.client.get("/ui").status_code, 303)
+
+    def test_logout_rejects_get(self):
+        # Logout mutates state, so a plain link/GET (CSRF-able) must not work.
+        self._auth()
+        self.assertEqual(self.client.get("/ui/logout").status_code, 405)
+
+    def test_cookie_does_not_contain_token(self):
+        # The cookie must hold a derived session value, never the shared secret.
+        self._auth()
+        self.assertNotEqual(self.client.cookies[COOKIE_NAME], TOKEN)
+        self.assertNotIn(TOKEN, self.client.cookies[COOKIE_NAME])
+
+    def test_raw_token_as_cookie_rejected(self):
+        # Forging the cookie from a known/leaked token must not authenticate.
+        self.client.cookies.set(COOKIE_NAME, TOKEN)
+        resp = self.client.get("/ui")
+        self.assertEqual(resp.status_code, 303)
+        self.assertEqual(resp.headers["location"], "/ui/login")
+
+    def test_login_throttled_after_repeated_failures(self):
+        for _ in range(5):
+            self.assertEqual(
+                self.client.post("/ui/login", data={"token": "nope"}).status_code, 401
+            )
+        # Locked out now — even the correct token is refused until the lockout expires.
+        resp = self.client.post("/ui/login", data={"token": TOKEN})
+        self.assertEqual(resp.status_code, 429)
+        self.assertIn("Retry-After", resp.headers)
+        self.assertNotIn(COOKIE_NAME, self.client.cookies)
 
     def test_namespace_view_requires_auth(self):
         self.assertEqual(self.client.get("/ui/ns/proj").status_code, 303)
@@ -142,9 +172,35 @@ class TestViews(WebUITestBase):
         resp = self.client.get("/ui/item/document/does-not-exist")
         self.assertEqual(resp.status_code, 404)
 
+    def test_malicious_namespace_escaped_everywhere(self):
+        # A namespace is attacker-controlled via the MCP API. It must be
+        # HTML-escaped in every rendering context, including link hrefs
+        # (the item-view breadcrumb used to interpolate it raw).
+        evil_ns = '"><script>alert(1)</script>'
+        doc, _ = self.db.store_document(
+            Document(namespace=evil_ns, title="T", content="c"), embedding=None
+        )
+        for path in ("/ui", f"/ui/item/document/{doc.id}"):
+            resp = self.client.get(path)
+            self.assertEqual(resp.status_code, 200)
+            self.assertNotIn("<script>alert(1)</script>", resp.text, f"unescaped namespace in {path}")
+
+    def test_namespace_links_url_encoded(self):
+        # Namespaces may contain URL-special characters; links must encode them
+        # so the round trip back to the namespace view works.
+        ns = 'a/b?c d"e'
+        self.db.store_note(Note(namespace=ns, title="n", content="x"), embedding=None)
+        index = self.client.get("/ui")
+        encoded = f"/ui/ns/{quote(ns, safe='')}"
+        self.assertIn(encoded, index.text)
+        resp = self.client.get(encoded)
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("Notes", resp.text)
+
 
 class TestBearerExemption(unittest.TestCase):
-    """BearerAuthMiddleware must let /ui through without an MCP Bearer token."""
+    """BearerAuthMiddleware must let /ui through without an MCP Bearer token,
+    but only when the viewer is registered (exempt_ui=True)."""
 
     def setUp(self):
         self._tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
@@ -153,7 +209,7 @@ class TestBearerExemption(unittest.TestCase):
         _seed(self.db)
         app = Starlette()
         register_webui(app, lambda: self.db, TOKEN)
-        wrapped = BearerAuthMiddleware(app, api_key="mcp-key")
+        wrapped = BearerAuthMiddleware(app, api_key="mcp-key", exempt_ui=True)
         self.client = TestClient(wrapped, follow_redirects=False)
 
     def tearDown(self):
@@ -170,6 +226,13 @@ class TestBearerExemption(unittest.TestCase):
     def test_non_ui_still_requires_bearer(self):
         resp = self.client.get("/mcp")
         self.assertEqual(resp.status_code, 401)
+
+    def test_ui_requires_bearer_when_viewer_disabled(self):
+        # Without exempt_ui (viewer not registered), /ui paths get no free pass.
+        wrapped = BearerAuthMiddleware(Starlette(), api_key="mcp-key")
+        client = TestClient(wrapped, follow_redirects=False)
+        self.assertEqual(client.get("/ui").status_code, 401)
+        self.assertEqual(client.get("/ui/anything").status_code, 401)
 
 
 if __name__ == "__main__":

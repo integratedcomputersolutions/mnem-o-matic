@@ -1,6 +1,8 @@
-from datetime import datetime, timezone
-from pydantic import BaseModel, Field, field_validator
+import json
 import uuid
+from datetime import datetime, timezone
+
+from pydantic import BaseModel, Field, field_validator
 
 # Validation constants
 MAX_NAMESPACE_LENGTH = 100
@@ -12,7 +14,8 @@ MAX_SOURCE_LENGTH = 100
 MAX_TAGS = 100
 MAX_TAG_LENGTH = 50
 MAX_METADATA_KEYS = 50
-MAX_METADATA_VALUE_LENGTH = 10_000
+MAX_METADATA_KEY_LENGTH = 200
+MAX_METADATA_VALUE_LENGTH = 10_000  # measured on the JSON-serialized value
 
 
 def _utcnow() -> datetime:
@@ -52,8 +55,19 @@ def _validate_metadata(v):
             raise ValueError(f"metadata keys must be strings, got {type(key).__name__}")
         if not key:
             raise ValueError("metadata keys must not be empty")
-        if isinstance(value, str) and len(value) > MAX_METADATA_VALUE_LENGTH:
-            raise ValueError(f"metadata value exceeds max length {MAX_METADATA_VALUE_LENGTH}")
+        if len(key) > MAX_METADATA_KEY_LENGTH:
+            raise ValueError(f"metadata key exceeds max length {MAX_METADATA_KEY_LENGTH}: {key[:20]}...")
+        # Size-check the serialized form so nested lists/dicts are bounded too,
+        # and reject anything json.dumps can't store (it would fail at the DB
+        # layer otherwise). RecursionError guards absurdly deep nesting.
+        try:
+            serialized = json.dumps(value)
+        except (TypeError, ValueError, RecursionError):
+            raise ValueError(f"metadata value for key {key!r} is not JSON-serializable")
+        if len(serialized) > MAX_METADATA_VALUE_LENGTH:
+            raise ValueError(
+                f"metadata value for key {key!r} exceeds max serialized length {MAX_METADATA_VALUE_LENGTH}"
+            )
     return v
 
 

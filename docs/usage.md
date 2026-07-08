@@ -127,10 +127,12 @@ services:
       - MNEMOMATIC_UI_TOKEN=your-viewer-secret
 ```
 
-Then open `http://your-host:8000/ui`, enter the token once (stored in an HttpOnly cookie), and browse by namespace.
+Then open `https://your-host/ui` (or `http://your-host:8000/ui` for direct access), enter the token once, and browse by namespace.
 
 Notes:
-- There are **no user accounts** — access is a single shared secret, separate from `MNEMOMATIC_API_KEY` (the viewer is exempt from MCP Bearer auth and uses its own gate).
+- There are **no user accounts** — access is a single shared secret, separate from `MNEMOMATIC_API_KEY` (the viewer is exempt from MCP Bearer auth and uses its own gate; the exemption only exists while the viewer is enabled).
+- The session cookie is HttpOnly and stores a value **derived** from the token with a per-process key — never the token itself. It is marked `Secure` when the connection is HTTPS (directly or via a proxy that sets `X-Forwarded-Proto`). Restarting the server invalidates existing sessions, so viewers re-enter the token.
+- Repeated wrong tokens from the same client trigger a temporary lockout (HTTP 429). The same applies to repeated invalid MCP API keys.
 - The viewer is served on the same host/port as the MCP endpoint. Because that port is typically bound to `0.0.0.0`, the shared secret is what keeps it private — choose a strong token, or additionally restrict the port at the network level (VPN, reverse proxy, firewall).
 - When `MNEMOMATIC_UI_TOKEN` is unset, `/ui` is not registered at all.
 

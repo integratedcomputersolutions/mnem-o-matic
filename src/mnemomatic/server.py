@@ -878,8 +878,9 @@ def main():
     app = CompactToolsMiddleware(app)
 
     # Middleware handles both authenticated and non-authenticated modes
-    # If API_KEY is empty, auth is disabled but logging still tracks requests
-    app = BearerAuthMiddleware(app, api_key=API_KEY)
+    # If API_KEY is empty, auth is disabled but logging still tracks requests.
+    # /ui is exempt from Bearer auth only when the viewer is actually registered.
+    app = BearerAuthMiddleware(app, api_key=API_KEY, exempt_ui=bool(UI_TOKEN))
 
     if CORS_ORIGINS:
         from starlette.middleware.cors import CORSMiddleware
