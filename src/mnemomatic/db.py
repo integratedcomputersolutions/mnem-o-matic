@@ -42,7 +42,13 @@ _TABLE_RESOURCE_URI = {
 
 
 def _chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[str]:
-    """Split text into overlapping chunks, breaking at paragraph/sentence boundaries when possible."""
+    """Split text into overlapping chunks, breaking at paragraph/sentence boundaries when possible.
+
+    Break points are only accepted past ``start + overlap`` so that the next
+    window start (``end - overlap``) always moves forward. Accepting an earlier
+    break used to let ``start`` stall or move backward, looping forever and
+    appending chunks until memory ran out.
+    """
     if len(text) <= chunk_size:
         return [text]
     chunks = []
@@ -50,7 +56,7 @@ def _chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OV
     while start < len(text):
         end = min(start + chunk_size, len(text))
         if end < len(text):
-            para_break = text.rfind("\n\n", start, end)
+            para_break = text.rfind("\n\n", start + overlap, end)
             if para_break > start:
                 end = para_break + 2
             else:
@@ -62,7 +68,8 @@ def _chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OV
         chunks.append(text[start:end])
         if end >= len(text):
             break
-        start = end - overlap
+        # max() guards forward progress even if overlap >= chunk_size.
+        start = max(end - overlap, start + 1)
     return chunks
 
 

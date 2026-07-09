@@ -7,9 +7,10 @@ Run with: python -m unittest tests/test_db.py -v
 
 import math
 import random
+import signal
 import unittest
 
-from mnemomatic.db import Database, _DOCUMENT_FIELDS, _KNOWLEDGE_FIELDS, _NOTE_FIELDS
+from mnemomatic.db import Database, _chunk_text, _DOCUMENT_FIELDS, _KNOWLEDGE_FIELDS, _NOTE_FIELDS
 from mnemomatic.models import Document, Knowledge, Note
 
 EMBEDDING_DIM = 384
@@ -619,6 +620,71 @@ class TestSearch(unittest.TestCase):
             self.db.store_document(doc, _fake_embedding(f"auth doc {i}\nauthentication content"))
         results = self.db.search_fts("authentication", limit=3)
         self.assertLessEqual(len(results), 3)
+
+
+# ── Chunking ───────────────────────────────────────────────────────────────────
+
+class TestChunkText(unittest.TestCase):
+    """_chunk_text must terminate and make forward progress on any input.
+
+    Regression: a paragraph break landing within `overlap` chars of a window's
+    start made `start = end - overlap` stall forever, appending identical
+    chunks until memory ran out (server killed mid tool-call).
+    """
+
+    def setUp(self):
+        # Abort loudly instead of hanging CI if the loop ever regresses.
+        signal.alarm(20)
+
+    def tearDown(self):
+        signal.alarm(0)
+
+    def _assert_covers(self, text, chunks, chunk_size):
+        self.assertGreater(len(chunks), 0)
+        self.assertTrue(text.startswith(chunks[0][:10]))
+        self.assertTrue(text.endswith(chunks[-1][-10:]))
+        self.assertGreaterEqual(sum(len(c) for c in chunks), len(text))
+        for c in chunks:
+            self.assertLessEqual(len(c), chunk_size)
+
+    def test_paragraph_break_near_window_start_terminates(self):
+        # A "\n\n" exactly `overlap` chars past a window start reproduced the
+        # stall: end = break + 2 = 365, next start = 365 - 200 = 165 = start.
+        text = "x" * 363 + "\n\n" + "y" * 2000
+        chunks = _chunk_text(text, chunk_size=1000, overlap=200)
+        self.assertLess(len(chunks), 20)
+        self._assert_covers(text, chunks, 1000)
+
+    def test_all_paragraph_breaks_early_in_window(self):
+        # Repeated short paragraphs followed by long unbreakable runs keep the
+        # candidate break early in every window.
+        text = ("ab\n\n" + "z" * 1500) * 5
+        chunks = _chunk_text(text, chunk_size=1000, overlap=200)
+        self.assertLess(len(chunks), 50)
+        self._assert_covers(text, chunks, 1000)
+
+    def test_no_break_points_at_all(self):
+        text = "a" * 5000
+        chunks = _chunk_text(text, chunk_size=1000, overlap=200)
+        self.assertLess(len(chunks), 10)
+        self._assert_covers(text, chunks, 1000)
+
+    def test_short_text_single_chunk(self):
+        self.assertEqual(_chunk_text("short", chunk_size=1000, overlap=200), ["short"])
+
+    def test_overlap_not_smaller_than_chunk_size_still_terminates(self):
+        # Nonsensical config must degrade gracefully, not loop forever.
+        text = "word. " * 500
+        chunks = _chunk_text(text, chunk_size=100, overlap=100)
+        self._assert_covers(text, chunks, 100)
+
+    def test_consecutive_chunks_overlap(self):
+        # The start of each chunk re-covers the tail of the previous one.
+        text = ("Sentence one is here. " * 20 + "\n\n") * 10
+        chunks = _chunk_text(text, chunk_size=1000, overlap=200)
+        self.assertGreater(len(chunks), 1)
+        for a, b in zip(chunks, chunks[1:]):
+            self.assertIn(b[:20], a, "consecutive chunks should share overlapping text")
 
 
 if __name__ == "__main__":
