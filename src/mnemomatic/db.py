@@ -15,6 +15,12 @@ logger = logging.getLogger("mnemomatic")
 
 EMBEDDING_DIM = int(os.environ.get("MNEMOMATIC_EMBED_DIM", "384"))
 BUSY_TIMEOUT_MS = 5000
+
+# Bumped whenever the on-disk schema changes shape. Stored in PRAGMA
+# user_version; Database._init_schema migrates older databases forward.
+# Version 1: vec0 tables gained a `namespace` partition key so namespace-
+# filtered KNN happens inside the index instead of post-filtering in Python.
+SCHEMA_VERSION = 1
 CHUNK_THRESHOLD = int(os.environ.get("MNEMOMATIC_CHUNK_THRESHOLD", "2000"))
 CHUNK_SIZE = int(os.environ.get("MNEMOMATIC_CHUNK_SIZE", "1000"))
 CHUNK_OVERLAP = int(os.environ.get("MNEMOMATIC_CHUNK_OVERLAP", "200"))
@@ -267,20 +273,6 @@ class Database:
             END;
         """)
 
-        # Vector tables
-        conn.execute(f"""
-            CREATE VIRTUAL TABLE IF NOT EXISTS vec_documents
-            USING vec0(embedding float[{EMBEDDING_DIM}])
-        """)
-        conn.execute(f"""
-            CREATE VIRTUAL TABLE IF NOT EXISTS vec_knowledge
-            USING vec0(embedding float[{EMBEDDING_DIM}])
-        """)
-        conn.execute(f"""
-            CREATE VIRTUAL TABLE IF NOT EXISTS vec_notes
-            USING vec0(embedding float[{EMBEDDING_DIM}])
-        """)
-
         # Chunks table for large documents
         conn.execute("""
             CREATE TABLE IF NOT EXISTS document_chunks (
@@ -291,10 +283,19 @@ class Database:
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_document_id ON document_chunks(document_id)")
-        conn.execute(f"""
-            CREATE VIRTUAL TABLE IF NOT EXISTS vec_document_chunks
-            USING vec0(embedding float[{EMBEDDING_DIM}])
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS schema_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
         """)
+        conn.commit()
+
+        # Vector tables: created fresh with a namespace partition key, or
+        # migrated in place when the database predates SCHEMA_VERSION 1.
+        self._ensure_vec_schema(conn)
+
         conn.executescript("""
             CREATE TRIGGER IF NOT EXISTS document_chunks_ad AFTER DELETE ON document_chunks BEGIN
                 DELETE FROM vec_document_chunks WHERE rowid = old.id;
@@ -302,6 +303,91 @@ class Database:
         """)
 
         conn.commit()
+
+    # ── Vec schema + migration ──
+
+    # (vec table, parent table whose namespace partitions it, SQL that yields
+    # rowid/namespace/embedding for every valid legacy row — orphans dropped)
+    _VEC_MIGRATION_SOURCES = {
+        "vec_documents": "SELECT v.rowid AS rowid, t.namespace AS namespace, v.embedding AS embedding "
+                         "FROM vec_documents v JOIN documents t ON t.rowid = v.rowid",
+        "vec_knowledge": "SELECT v.rowid AS rowid, t.namespace AS namespace, v.embedding AS embedding "
+                         "FROM vec_knowledge v JOIN knowledge t ON t.rowid = v.rowid",
+        "vec_notes": "SELECT v.rowid AS rowid, t.namespace AS namespace, v.embedding AS embedding "
+                     "FROM vec_notes v JOIN notes t ON t.rowid = v.rowid",
+        "vec_document_chunks": "SELECT v.rowid AS rowid, t.namespace AS namespace, v.embedding AS embedding "
+                               "FROM vec_document_chunks v "
+                               "JOIN document_chunks dc ON dc.id = v.rowid "
+                               "JOIN documents t ON t.id = dc.document_id",
+    }
+
+    @staticmethod
+    def _create_vec_table(conn: sqlite3.Connection, name: str) -> None:
+        conn.execute(f"""
+            CREATE VIRTUAL TABLE {name}
+            USING vec0(namespace TEXT partition key, embedding float[{EMBEDDING_DIM}])
+        """)
+
+    def _ensure_vec_schema(self, conn: sqlite3.Connection) -> None:
+        """Create or migrate the vec0 tables, then record schema version and dim.
+
+        Fails fast when MNEMOMATIC_EMBED_DIM disagrees with the dimension the
+        database was created with — a mismatch would otherwise surface later as
+        confusing insert/search errors against half-usable vector tables.
+        """
+        version = conn.execute("PRAGMA user_version").fetchone()["user_version"]
+
+        if version >= SCHEMA_VERSION:
+            stored = conn.execute("SELECT value FROM schema_meta WHERE key = 'embed_dim'").fetchone()
+            if stored and int(stored["value"]) != EMBEDDING_DIM:
+                raise RuntimeError(
+                    f"Embedding dimension mismatch: database was created with dim {stored['value']} "
+                    f"but MNEMOMATIC_EMBED_DIM={EMBEDDING_DIM}. Set MNEMOMATIC_EMBED_DIM={stored['value']} "
+                    f"to keep the existing index, or re-index by dropping the vec_* tables "
+                    f"(embeddings are recomputed on the next store of each item)."
+                )
+            return
+
+        # Version 0: either a fresh database or one from before schema
+        # versioning whose vec tables lack the partition key.
+        legacy = [
+            name for name in self._VEC_MIGRATION_SOURCES
+            if (row := conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)
+            ).fetchone()) and "partition key" not in row["sql"].lower()
+        ]
+
+        conn.execute("BEGIN")
+        try:
+            for name, source_sql in self._VEC_MIGRATION_SOURCES.items():
+                rows = []
+                if name in legacy:
+                    rows = conn.execute(source_sql).fetchall()
+                    if rows:
+                        found_dim = len(rows[0]["embedding"]) // 4
+                        if found_dim != EMBEDDING_DIM:
+                            raise RuntimeError(
+                                f"Cannot migrate {name}: stored embeddings have dim {found_dim} "
+                                f"but MNEMOMATIC_EMBED_DIM={EMBEDDING_DIM}. "
+                                f"Set MNEMOMATIC_EMBED_DIM={found_dim} and retry."
+                            )
+                    conn.execute(f"DROP TABLE {name}")
+                    logger.info("Migrating %s to partitioned schema (%d embeddings)", name, len(rows))
+                self._create_vec_table(conn, name)
+                for row in rows:
+                    conn.execute(
+                        f"INSERT INTO {name} (rowid, namespace, embedding) VALUES (?, ?, ?)",
+                        (row["rowid"], row["namespace"], row["embedding"]),
+                    )
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('embed_dim', ?)",
+                (str(EMBEDDING_DIM),),
+            )
+            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
 
     # ── Generic CRUD helpers ──
 
@@ -322,11 +408,13 @@ class Database:
         conn.commit()
         return True
 
-    def _upsert_vec(self, conn: sqlite3.Connection, vec_table: str, rowid: int, embedding: list[float]) -> None:
+    def _upsert_vec(self, conn: sqlite3.Connection, vec_table: str, rowid: int, embedding: list[float], namespace: str) -> None:
         """Write an embedding for rowid, inserting the vec row if it doesn't exist yet.
 
         The insert fallback matters when a row was first stored without an embedding
         (e.g. FTS-only mode) and later re-stored once an embedder is available.
+        The item's namespace never changes on update, so only the embedding column
+        is written (vec0 forbids UPDATE on partition key columns anyway).
         """
         updated = conn.execute(
             f"UPDATE {vec_table} SET embedding = ? WHERE rowid = ?",
@@ -334,8 +422,8 @@ class Database:
         ).rowcount
         if updated == 0:
             conn.execute(
-                f"INSERT INTO {vec_table} (rowid, embedding) VALUES (?, ?)",
-                (rowid, _serialize_embedding(embedding)),
+                f"INSERT INTO {vec_table} (rowid, namespace, embedding) VALUES (?, ?, ?)",
+                (rowid, namespace, _serialize_embedding(embedding)),
             )
 
     def _list_items(self, table: str, converter, namespace: str) -> list:
@@ -364,7 +452,7 @@ class Database:
         if not row:
             return None
         if embedding is not None:
-            self._upsert_vec(conn, vec_table, row["rowid"], embedding)
+            self._upsert_vec(conn, vec_table, row["rowid"], embedding, row["namespace"])
         conn.commit()
         return converter(row)
 
@@ -384,8 +472,8 @@ class Database:
                 (doc.content, doc.mime_type, json.dumps(doc.tags), json.dumps(doc.metadata), now, existing["id"]),
             )
             if embedding is not None:
-                self._upsert_vec(conn, "vec_documents", existing["rowid"], embedding)
-            self._replace_document_chunks(conn, existing["id"], chunks)
+                self._upsert_vec(conn, "vec_documents", existing["rowid"], embedding, doc.namespace)
+            self._replace_document_chunks(conn, existing["id"], chunks, namespace=doc.namespace)
             conn.commit()
             return Document(
                 id=existing["id"],
@@ -408,10 +496,10 @@ class Database:
         ).fetchone()["rowid"]
         if embedding is not None:
             conn.execute(
-                "INSERT INTO vec_documents (rowid, embedding) VALUES (?, ?)",
-                (rowid, _serialize_embedding(embedding)),
+                "INSERT INTO vec_documents (rowid, namespace, embedding) VALUES (?, ?, ?)",
+                (rowid, doc.namespace, _serialize_embedding(embedding)),
             )
-        self._replace_document_chunks(conn, doc.id, chunks)
+        self._replace_document_chunks(conn, doc.id, chunks, namespace=doc.namespace)
         conn.commit()
         return doc, True
 
@@ -449,7 +537,7 @@ class Database:
                 (k.fact, k.confidence, k.source, json.dumps(k.tags), json.dumps(k.metadata), now, existing["id"]),
             )
             if embedding is not None:
-                self._upsert_vec(conn, "vec_knowledge", existing["rowid"], embedding)
+                self._upsert_vec(conn, "vec_knowledge", existing["rowid"], embedding, k.namespace)
             conn.commit()
             return Knowledge(
                 id=existing["id"],
@@ -473,8 +561,8 @@ class Database:
         ).fetchone()["rowid"]
         if embedding is not None:
             conn.execute(
-                "INSERT INTO vec_knowledge (rowid, embedding) VALUES (?, ?)",
-                (rowid, _serialize_embedding(embedding)),
+                "INSERT INTO vec_knowledge (rowid, namespace, embedding) VALUES (?, ?, ?)",
+                (rowid, k.namespace, _serialize_embedding(embedding)),
             )
         conn.commit()
         return k, True
@@ -507,7 +595,7 @@ class Database:
                 (note.content, note.source, json.dumps(note.tags), json.dumps(note.metadata), now, existing["id"]),
             )
             if embedding is not None:
-                self._upsert_vec(conn, "vec_notes", existing["rowid"], embedding)
+                self._upsert_vec(conn, "vec_notes", existing["rowid"], embedding, note.namespace)
             conn.commit()
             return Note(
                 id=existing["id"],
@@ -530,8 +618,8 @@ class Database:
         ).fetchone()["rowid"]
         if embedding is not None:
             conn.execute(
-                "INSERT INTO vec_notes (rowid, embedding) VALUES (?, ?)",
-                (rowid, _serialize_embedding(embedding)),
+                "INSERT INTO vec_notes (rowid, namespace, embedding) VALUES (?, ?, ?)",
+                (rowid, note.namespace, _serialize_embedding(embedding)),
             )
         conn.commit()
         return note, True
@@ -628,12 +716,25 @@ class Database:
     def rename_namespace(self, old: str, new: str) -> dict[str, int]:
         conn = self._get_conn()
         counts = {}
+        # vec0 forbids UPDATE on partition key columns, so the moved rows'
+        # vectors are captured up front and rewritten under the new namespace.
+        vec_rows = {
+            name: conn.execute(f"{source_sql} WHERE t.namespace = ?", (old,)).fetchall()
+            for name, source_sql in self._VEC_MIGRATION_SOURCES.items()
+        }
         try:
             for table in _TABLES:
                 cur = conn.execute(
                     f"UPDATE {table} SET namespace = ? WHERE namespace = ?", (new, old)
                 )
                 counts[table] = cur.rowcount
+            for name, rows in vec_rows.items():
+                for row in rows:
+                    conn.execute(f"DELETE FROM {name} WHERE rowid = ?", (row["rowid"],))
+                    conn.execute(
+                        f"INSERT INTO {name} (rowid, namespace, embedding) VALUES (?, ?, ?)",
+                        (row["rowid"], new, row["embedding"]),
+                    )
             conn.commit()
         except sqlite3.IntegrityError:
             conn.rollback()
@@ -701,17 +802,19 @@ class Database:
     def _vec_search_table(self, table: str, embedding: list[float], namespace: str | None, limit: int) -> list[SearchResult]:
         conn = self._get_conn()
         vec_table = f"vec_{table}"
-        # Fetch extra rows when namespace filtering so we still have `limit` after filtering.
-        fetch_limit = limit * 3 if namespace else limit
 
         # sqlite-vec requires LIMIT to be directly on a simple vec0 query — JOINs and
         # CTEs hide the LIMIT from its query planner. So we do two queries:
-        # 1. KNN scan on vec0 (satisfies LIMIT requirement) → rowids + distances
+        # 1. KNN scan on vec0 (satisfies LIMIT requirement) → rowids + distances.
+        #    The namespace partition key filters inside the index, so a small
+        #    namespace still yields its own `limit` nearest neighbors.
         # 2. Single IN lookup on the main table → all detail rows at once (not N+1)
-        vec_rows = conn.execute(
-            f"SELECT rowid, distance FROM {vec_table} WHERE embedding MATCH ? AND k = ?",
-            (_serialize_embedding(embedding), fetch_limit),
-        ).fetchall()
+        knn_sql = f"SELECT rowid, distance FROM {vec_table} WHERE embedding MATCH ? AND k = ?"
+        knn_params: list = [_serialize_embedding(embedding), limit]
+        if namespace:
+            knn_sql += " AND namespace = ?"
+            knn_params.append(namespace)
+        vec_rows = conn.execute(knn_sql, knn_params).fetchall()
 
         if not vec_rows:
             return []
@@ -720,12 +823,9 @@ class Database:
         placeholders = ",".join("?" * len(vec_rows))
         params: list = [row["rowid"] for row in vec_rows]
 
-        sql = f"SELECT *, rowid FROM {table} WHERE rowid IN ({placeholders})"
-        if namespace:
-            sql += " AND namespace = ?"
-            params.append(namespace)
-
-        detail_rows = conn.execute(sql, params).fetchall()
+        detail_rows = conn.execute(
+            f"SELECT *, rowid FROM {table} WHERE rowid IN ({placeholders})", params
+        ).fetchall()
 
         results = []
         for row in sorted(detail_rows, key=lambda r: rowid_distance[r["rowid"]])[:limit]:
@@ -754,19 +854,28 @@ class Database:
             updated_at=datetime.fromisoformat(row["updated_at"]),
         )
 
-    def _replace_document_chunks(self, conn: sqlite3.Connection, doc_id: str, chunks: list[tuple[str, list[float]]] | None) -> None:
-        """Delete existing chunks for a document and optionally insert new ones. Does not commit."""
+    def _replace_document_chunks(self, conn: sqlite3.Connection, doc_id: str, chunks: list[tuple[str, list[float]]] | None, namespace: str | None = None) -> None:
+        """Delete existing chunks for a document and optionally insert new ones. Does not commit.
+
+        namespace partitions the chunk vectors; when the caller doesn't already
+        have it (the public replace path), it is looked up from the document.
+        """
         conn.execute("DELETE FROM document_chunks WHERE document_id = ?", (doc_id,))
         if not chunks:
             return
+        if namespace is None:
+            row = conn.execute("SELECT namespace FROM documents WHERE id = ?", (doc_id,)).fetchone()
+            if row is None:
+                return
+            namespace = row["namespace"]
         for i, (content, chunk_embedding) in enumerate(chunks):
             cursor = conn.execute(
                 "INSERT INTO document_chunks (document_id, chunk_index, content) VALUES (?, ?, ?)",
                 (doc_id, i, content),
             )
             conn.execute(
-                "INSERT INTO vec_document_chunks (rowid, embedding) VALUES (?, ?)",
-                (cursor.lastrowid, _serialize_embedding(chunk_embedding)),
+                "INSERT INTO vec_document_chunks (rowid, namespace, embedding) VALUES (?, ?, ?)",
+                (cursor.lastrowid, namespace, _serialize_embedding(chunk_embedding)),
             )
 
     def _vec_search_document_chunks(self, embedding: list[float], namespace: str | None, limit: int) -> list[SearchResult]:
@@ -774,10 +883,14 @@ class Database:
         conn = self._get_conn()
         fetch_limit = limit * 3  # over-fetch to account for per-document dedup
 
-        vec_rows = conn.execute(
-            "SELECT rowid, distance FROM vec_document_chunks WHERE embedding MATCH ? AND k = ?",
-            (_serialize_embedding(embedding), fetch_limit),
-        ).fetchall()
+        # Namespace filtering happens inside the KNN via the partition key, so
+        # the over-fetch only compensates for multiple chunks per document.
+        knn_sql = "SELECT rowid, distance FROM vec_document_chunks WHERE embedding MATCH ? AND k = ?"
+        knn_params: list = [_serialize_embedding(embedding), fetch_limit]
+        if namespace:
+            knn_sql += " AND namespace = ?"
+            knn_params.append(namespace)
+        vec_rows = conn.execute(knn_sql, knn_params).fetchall()
         if not vec_rows:
             return []
 
@@ -785,18 +898,13 @@ class Database:
         placeholders = ",".join("?" * len(vec_rows))
         params: list = [row["rowid"] for row in vec_rows]
 
-        sql = f"""
+        rows = conn.execute(f"""
             SELECT dc.id AS chunk_rowid, dc.document_id, dc.content AS chunk_content,
                    d.namespace, d.title, d.tags
             FROM document_chunks dc
             JOIN documents d ON d.id = dc.document_id
             WHERE dc.id IN ({placeholders})
-        """
-        if namespace:
-            sql += " AND d.namespace = ?"
-            params.append(namespace)
-
-        rows = conn.execute(sql, params).fetchall()
+        """, params).fetchall()
 
         # Keep only the best-scoring chunk per document
         best: dict[str, tuple] = {}

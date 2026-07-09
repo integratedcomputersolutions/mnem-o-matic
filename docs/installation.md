@@ -211,6 +211,12 @@ Environment variables (set in `docker-compose.yml` or passed to Docker):
 | `MNEMOMATIC_MODEL_PATH`     | `/app/model/model.onnx`     | Path to the ONNX model file (full image only)            |
 | `MNEMOMATIC_TOKENIZER_PATH` | `/app/model/tokenizer.json` | Path to the tokenizer file (full image only)             |
 
+> **Changing `MNEMOMATIC_EMBED_DIM`:** the embedding dimension is baked into the database's vector tables at creation. The server records it and refuses to start on a mismatch rather than corrupting the index. To switch embedding models with a different dimension, drop the `vec_*` tables (`sqlite3 data/mnemomatic.db "DROP TABLE vec_documents; DROP TABLE vec_knowledge; DROP TABLE vec_notes; DROP TABLE vec_document_chunks;"`) and re-store your content so it is re-embedded — or keep a separate database per embedder.
+
+## Schema Migrations
+
+The database schema is versioned (`PRAGMA user_version`). On startup the server migrates older databases forward automatically — for example, databases created before v1 have their vector tables rebuilt with a namespace partition key (embeddings are preserved; no re-embedding needed). Migrations run in a single transaction: if one fails, the database is left untouched.
+
 ## Data Portability
 
 The entire database is a single SQLite file. The default setup bind-mounts `./data:/data`, so `mnemomatic.db` lives directly in your project directory where you can back it up, copy it to another machine, or open it with any SQLite tool.
