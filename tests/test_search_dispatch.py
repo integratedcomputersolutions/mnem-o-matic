@@ -19,6 +19,7 @@ fires ONLY on embed-failure, not the no-embedder case; semantic/hybrid embed the
 original query while FTS uses the escaped query; validation and limit clamping.
 """
 
+import sqlite3
 import sys
 import unittest
 from pathlib import Path
@@ -27,6 +28,8 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 import mnemomatic.server as server
+from mnemomatic.db import Database
+from mnemomatic.models import Document
 
 # A non-None stand-in for "an embedder is configured". search() only checks the
 # embedder for None-ness; the actual embedding is produced by _safe_embed, which
@@ -205,6 +208,82 @@ class SearchDispatchTest(unittest.TestCase):
         self.assertEqual(backend, "hybrid")
         self.assertEqual(fts_arg, '"a AND b"')           # FTS arg escaped
         self.assertEqual(embedding, EMBEDDING)           # embedding handed to hybrid
+
+    def test_db_error_returns_tool_error_not_exception(self):
+        # A sqlite error escaping search() surfaces as a protocol-level failure
+        # to MCP clients; it must come back as the tool's own error shape.
+        failing_db = MagicMock()
+        failing_db.search_fts.side_effect = sqlite3.OperationalError('fts5: syntax error near "?"')
+        with patch.object(server, "_db", return_value=failing_db), \
+             patch.object(server, "_embedder", return_value=None):
+            res = server.search(query="hello", mode="fulltext")
+        self.assertEqual(len(res), 1)
+        self.assertEqual(res[0]["error"], "Search failed")
+        self.assertIn("syntax error", res[0]["details"])
+
+
+class TestEscapeFtsQuery(unittest.TestCase):
+    """_escape_fts_query must never let FTS5 syntax through unquoted.
+
+    Regression: the old blacklist missed '?', ':', '^', and NEAR, so a query
+    like 'remains open?' reached FTS5 raw and raised OperationalError
+    ('fts5: syntax error near "?"') as a protocol-level failure.
+    """
+
+    def test_bare_words_pass_through(self):
+        for q in ("hello", "hello world", "auth mechanism 42", "café naïve"):
+            self.assertEqual(server._escape_fts_query(q), q)
+
+    def test_punctuation_is_quoted(self):
+        cases = {
+            "remains open?": '"remains open?"',
+            "subject:foo": '"subject:foo"',
+            "^prefix": '"^prefix"',
+            "std::vector": '"std::vector"',
+            "a AND b": '"a AND b"',
+            "a NEAR b": '"a NEAR b"',
+            'say "hi"': '"say ""hi"""',
+            "wild*card": '"wild*card"',
+            "dash-ed": '"dash-ed"',
+            "(group)": '"(group)"',
+        }
+        for raw, expected in cases.items():
+            self.assertEqual(server._escape_fts_query(raw), expected)
+
+    def test_operator_words_quoted_even_when_bare(self):
+        # AND/OR/NOT/NEAR are alphanumeric, so the bare-word check alone
+        # would let them through as operators.
+        for q in ("import AND export", "this OR that", "not NOT me", "a NEAR b"):
+            self.assertTrue(server._escape_fts_query(q).startswith('"'))
+
+
+class TestEscapedQueriesAgainstRealFts(unittest.TestCase):
+    """Escaped output must be valid FTS5 syntax against a real database."""
+
+    PUNCTUATION_QUERIES = [
+        "remains open?", "subject:foo", "^caret", "a NEAR b", 'quo"te',
+        "std::vector", "(parens)", "trail-", "*star", "semi;colon", "what???",
+    ]
+
+    def setUp(self):
+        self.db = Database(":memory:")
+        self.db.store_document(
+            Document(namespace="ns", title="doc", content="the subject remains open for review"),
+            embedding=None,
+        )
+
+    def tearDown(self):
+        self.db.close()
+
+    def test_no_query_raises(self):
+        for raw in self.PUNCTUATION_QUERIES:
+            with self.subTest(query=raw):
+                self.db.search_fts(server._escape_fts_query(raw))  # must not raise
+
+    def test_quoted_phrase_still_matches(self):
+        results = self.db.search_fts(server._escape_fts_query("remains open?"))
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].title, "doc")
 
 
 if __name__ == "__main__":
