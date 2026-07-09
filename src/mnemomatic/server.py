@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import threading
 from importlib.metadata import PackageNotFoundError, version
 
@@ -139,24 +140,27 @@ def _validate_embedding_dimension(embedder) -> None:
 def _escape_fts_query(query: str) -> str:
     """Escape special characters in FTS5 queries.
 
-    FTS5 treats certain characters as operators (AND, OR, NOT, *, etc.).
-    This function escapes them so they're treated as literal search terms.
+    FTS5 gives punctuation syntactic meaning — AND/OR/NOT/NEAR operators,
+    ``()`` grouping, ``*`` prefix match, ``-`` and ``:`` column filters,
+    ``^`` initial-token match, ``"`` phrases — and anything else it can't
+    tokenize is a syntax error (e.g. a trailing ``?``). So instead of
+    blacklisting known operators, allow a query through bare only when it is
+    entirely plain words; everything else is quoted into a literal phrase.
 
     Examples:
         "import AND" → '"import AND"'
         "std::vector" → '"std::vector"'
+        "remains open?" → '"remains open?"'
     """
-    # FTS5 operators and special characters: AND, OR, NOT, parentheses, quotes, etc.
-    # Check for FTS5 operators (case-insensitive, word boundaries)
-    has_operators = bool(re.search(r'\b(AND|OR|NOT)\b', query, re.IGNORECASE))
-    has_special_chars = any(char in query for char in ["(", ")", "*", "-", '"'])
+    is_bare_words = bool(re.fullmatch(r"[\w\s]+", query))
+    has_operators = bool(re.search(r"\b(AND|OR|NOT|NEAR)\b", query, re.IGNORECASE))
 
-    if has_operators or has_special_chars:
-        # Quote the entire query to make it a phrase search
-        # This treats the whole query as a literal phrase, preventing operator interpretation
-        escaped = query.replace('"', '""')
-        return f'"{escaped}"'
-    return query
+    if is_bare_words and not has_operators:
+        return query
+    # Quote the entire query to make it a phrase search. This treats the whole
+    # query as a literal phrase, preventing operator interpretation.
+    escaped = query.replace('"', '""')
+    return f'"{escaped}"'
 
 
 def _safe_embed(text: str) -> list[float] | None:
@@ -655,25 +659,31 @@ def search(
         return [{"error": "Semantic search not available",
                  "details": "No embedder configured. Set MNEMOMATIC_EMBED_URL or use the full image with the built-in model."}]
 
-    # hybrid silently degrades to fulltext when no embedder is available
-    if mode == "fulltext" or (mode == "hybrid" and emb is None):
-        results = _db().search_fts(fts_query, table=table, namespace=namespace, limit=limit)
-        if mode == "hybrid" and emb is None:
-            degraded = True
-    elif mode == "semantic":
-        embedding = _safe_embed(query)
-        if embedding is None:
-            return [{"error": "Semantic search failed", "details": "Embedding service is unavailable. Try fulltext mode."}]
-        results = _db().search_vec(embedding, table=table, namespace=namespace, limit=limit)
-    else:  # hybrid with embedder
-        embedding = _safe_embed(query)
-        # If embedding fails, degrade to fulltext search
-        if embedding is None:
-            logger.info("Hybrid search degrading to fulltext due to embedding failure")
+    try:
+        # hybrid silently degrades to fulltext when no embedder is available
+        if mode == "fulltext" or (mode == "hybrid" and emb is None):
             results = _db().search_fts(fts_query, table=table, namespace=namespace, limit=limit)
-            degraded = True
-        else:
-            results = _db().search_hybrid(fts_query, embedding, table=table, namespace=namespace, limit=limit)
+            if mode == "hybrid" and emb is None:
+                degraded = True
+        elif mode == "semantic":
+            embedding = _safe_embed(query)
+            if embedding is None:
+                return [{"error": "Semantic search failed", "details": "Embedding service is unavailable. Try fulltext mode."}]
+            results = _db().search_vec(embedding, table=table, namespace=namespace, limit=limit)
+        else:  # hybrid with embedder
+            embedding = _safe_embed(query)
+            # If embedding fails, degrade to fulltext search
+            if embedding is None:
+                logger.info("Hybrid search degrading to fulltext due to embedding failure")
+                results = _db().search_fts(fts_query, table=table, namespace=namespace, limit=limit)
+                degraded = True
+            else:
+                results = _db().search_hybrid(fts_query, embedding, table=table, namespace=namespace, limit=limit)
+    except sqlite3.Error as e:
+        # Escaping should keep FTS5 syntax errors out, but any residual DB
+        # error must come back as a tool-level error, not a protocol failure.
+        logger.warning("Search failed for query %r: %s", query, e)
+        return [{"error": "Search failed", "details": str(e)}]
 
     # Convert results to dicts and add degradation metadata if applicable
     response = [r.model_dump() for r in results]
