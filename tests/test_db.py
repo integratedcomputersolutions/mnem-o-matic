@@ -8,9 +8,19 @@ Run with: python -m unittest tests/test_db.py -v
 import math
 import random
 import signal
+import sqlite3
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
-from mnemomatic.db import Database, _chunk_text, _DOCUMENT_FIELDS, _KNOWLEDGE_FIELDS, _NOTE_FIELDS
+import sqlite_vec
+
+import mnemomatic.db
+from mnemomatic.db import (
+    Database, SCHEMA_VERSION, _chunk_text, _serialize_embedding,
+    _DOCUMENT_FIELDS, _KNOWLEDGE_FIELDS, _NOTE_FIELDS,
+)
 from mnemomatic.models import Document, Knowledge, Note
 
 EMBEDDING_DIM = 384
@@ -620,6 +630,217 @@ class TestSearch(unittest.TestCase):
             self.db.store_document(doc, _fake_embedding(f"auth doc {i}\nauthentication content"))
         results = self.db.search_fts("authentication", limit=3)
         self.assertLessEqual(len(results), 3)
+
+
+# ── Namespace-partitioned vector search ────────────────────────────────────────
+
+def _axis_embedding(axis: int, wobble: float = 0.0) -> list[float]:
+    """A unit vector on `axis`, optionally tilted slightly toward axis 1."""
+    vec = [0.0] * EMBEDDING_DIM
+    vec[axis] = 1.0
+    if wobble:
+        vec[1] += wobble
+    norm = math.sqrt(sum(x * x for x in vec))
+    return [x / norm for x in vec]
+
+
+class TestVecNamespacePartition(unittest.TestCase):
+    """Namespace filtering must happen inside the KNN, not by post-filtering.
+
+    Regression: the old code fetched limit*3 global nearest neighbors and then
+    dropped other-namespace rows in Python, so a small namespace drowned out by
+    a large one returned zero results despite having perfectly good matches.
+    """
+
+    def setUp(self):
+        self.db = Database(":memory:")
+
+    def tearDown(self):
+        self.db.close()
+
+    def test_small_namespace_not_drowned_out_by_large_one(self):
+        # 30 "big" docs sit right next to the query vector; the 2 "small" docs
+        # are orthogonal to it, so none of them are in the global top limit*3.
+        for i in range(30):
+            self.db.store_document(
+                Document(namespace="big", title=f"big {i}", content="x"),
+                _axis_embedding(0, wobble=0.001 * (i + 1)),
+            )
+        for i in range(2):
+            self.db.store_document(
+                Document(namespace="small", title=f"small {i}", content="x"),
+                _axis_embedding(100 + i),
+            )
+        results = self.db.search_vec(_axis_embedding(0), table="documents", namespace="small", limit=5)
+        self.assertEqual(sorted(r.title for r in results), ["small 0", "small 1"])
+
+    def test_namespace_filter_applies_to_knowledge_and_notes(self):
+        self.db.store_knowledge(Knowledge(namespace="a", subject="s", fact="f"), _axis_embedding(0))
+        self.db.store_note(Note(namespace="b", title="n", content="c"), _axis_embedding(0, wobble=0.01))
+        results = self.db.search_vec(_axis_embedding(0), table="all", namespace="a", limit=10)
+        self.assertEqual([r.type for r in results], ["knowledge"])
+
+    def test_chunk_search_respects_namespace(self):
+        chunks_a = [("alpha chunk", _axis_embedding(0))]
+        chunks_b = [("beta chunk", _axis_embedding(0, wobble=0.01))]
+        self.db.store_document(Document(namespace="a", title="doc a", content="x" * 3000), None, chunks_a)
+        self.db.store_document(Document(namespace="b", title="doc b", content="y" * 3000), None, chunks_b)
+        results = self.db.search_vec(_axis_embedding(0), table="documents", namespace="a", limit=5)
+        self.assertEqual([r.title for r in results], ["doc a"])
+        self.assertEqual(results[0].snippet, "alpha chunk")
+
+    def test_rename_namespace_moves_vectors(self):
+        self.db.store_document(Document(namespace="old-ns", title="d", content="x"), _axis_embedding(0))
+        self.db.store_document(
+            Document(namespace="old-ns", title="big", content="x" * 3000), None,
+            [("chunky", _axis_embedding(2))],
+        )
+        self.db.rename_namespace("old-ns", "new-ns")
+        hits = self.db.search_vec(_axis_embedding(0), table="documents", namespace="new-ns", limit=5)
+        self.assertIn("d", [r.title for r in hits])
+        chunk_hits = self.db.search_vec(_axis_embedding(2), table="documents", namespace="new-ns", limit=5)
+        self.assertIn("big", [r.title for r in chunk_hits])
+        self.assertEqual(self.db.search_vec(_axis_embedding(0), table="documents", namespace="old-ns", limit=5), [])
+
+    def test_upsert_after_fts_only_store_lands_in_namespace(self):
+        # Stored without an embedding first (FTS-only mode), then re-stored
+        # with one: the vec row must be inserted with the right partition.
+        self.db.store_document(Document(namespace="ns", title="t", content="x"), None)
+        self.db.store_document(Document(namespace="ns", title="t", content="x"), _axis_embedding(0))
+        results = self.db.search_vec(_axis_embedding(0), table="documents", namespace="ns", limit=5)
+        self.assertEqual([r.title for r in results], ["t"])
+
+
+# ── Schema versioning + migration ──────────────────────────────────────────────
+
+_LEGACY_DOCUMENTS_DDL = """
+    CREATE TABLE documents (
+        id TEXT PRIMARY KEY,
+        namespace TEXT NOT NULL,
+        title TEXT NOT NULL,
+        content TEXT NOT NULL,
+        mime_type TEXT NOT NULL DEFAULT 'text/markdown',
+        tags TEXT NOT NULL DEFAULT '[]',
+        metadata TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX idx_documents_ns_title ON documents(namespace, title);
+    CREATE TABLE document_chunks (
+        id INTEGER PRIMARY KEY,
+        document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+        chunk_index INTEGER NOT NULL,
+        content TEXT NOT NULL
+    );
+"""
+
+
+def _build_legacy_db(path: str, dim: int = EMBEDDING_DIM) -> None:
+    """Create a pre-versioning database: vec0 tables WITHOUT a partition key."""
+    conn = sqlite3.connect(path)
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+    conn.executescript(_LEGACY_DOCUMENTS_DDL)
+    conn.execute(f"CREATE VIRTUAL TABLE vec_documents USING vec0(embedding float[{dim}])")
+    conn.execute(f"CREATE VIRTUAL TABLE vec_document_chunks USING vec0(embedding float[{dim}])")
+    for i, ns in enumerate(["proj-a", "proj-a", "proj-b"]):
+        rowid = conn.execute(
+            "INSERT INTO documents (id, namespace, title, content, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00') RETURNING rowid",
+            (f"id-{i}", ns, f"doc {i}", "content"),
+        ).fetchone()[0]
+        emb = [0.0] * dim
+        emb[i] = 1.0
+        conn.execute(
+            "INSERT INTO vec_documents (rowid, embedding) VALUES (?, ?)",
+            (rowid, _serialize_embedding(emb)),
+        )
+    chunk_rowid = conn.execute(
+        "INSERT INTO document_chunks (document_id, chunk_index, content) VALUES ('id-0', 0, 'chunk text') RETURNING id"
+    ).fetchone()[0]
+    emb = [0.0] * dim
+    emb[5] = 1.0
+    conn.execute(
+        "INSERT INTO vec_document_chunks (rowid, embedding) VALUES (?, ?)",
+        (chunk_rowid, _serialize_embedding(emb)),
+    )
+    conn.commit()
+    conn.close()
+
+
+class TestSchemaMigration(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self._tmp.close()
+        self.path = self._tmp.name
+        Path(self.path).unlink()  # legacy builder wants to create it fresh
+
+    def tearDown(self):
+        Path(self.path).unlink(missing_ok=True)
+
+    def _user_version(self, db: Database) -> int:
+        return db._get_conn().execute("PRAGMA user_version").fetchone()["user_version"]
+
+    def test_fresh_database_is_current_version(self):
+        db = Database(self.path)
+        try:
+            self.assertEqual(self._user_version(db), SCHEMA_VERSION)
+            meta = db._get_conn().execute("SELECT value FROM schema_meta WHERE key='embed_dim'").fetchone()
+            self.assertEqual(int(meta["value"]), EMBEDDING_DIM)
+        finally:
+            db.close()
+
+    def test_legacy_database_is_migrated_with_data_preserved(self):
+        _build_legacy_db(self.path)
+        db = Database(self.path)
+        try:
+            self.assertEqual(self._user_version(db), SCHEMA_VERSION)
+            sql = db._get_conn().execute(
+                "SELECT sql FROM sqlite_master WHERE name='vec_documents'"
+            ).fetchone()["sql"]
+            self.assertIn("partition key", sql.lower())
+            # Embeddings survived and are namespace-partitioned now.
+            results = db.search_vec(_axis_embedding(2), table="documents", namespace="proj-b", limit=5)
+            self.assertEqual([r.title for r in results], ["doc 2"])
+            # Chunk vector survived too (chunk hit shadows the whole-doc one).
+            chunk_hits = db.search_vec(_axis_embedding(5), table="documents", namespace="proj-a", limit=5)
+            self.assertIn("chunk text", [r.snippet for r in chunk_hits])
+            # Old data remains readable.
+            self.assertEqual(db.get_document("id-0").title, "doc 0")
+        finally:
+            db.close()
+
+    def test_migration_is_idempotent_across_reopens(self):
+        _build_legacy_db(self.path)
+        Database(self.path).close()
+        db = Database(self.path)  # must not attempt to migrate again
+        try:
+            self.assertEqual(self._user_version(db), SCHEMA_VERSION)
+            results = db.search_vec(_axis_embedding(2), table="documents", namespace="proj-b", limit=5)
+            self.assertEqual(len(results), 1)
+        finally:
+            db.close()
+
+    def test_dim_mismatch_on_versioned_db_fails_fast(self):
+        Database(self.path).close()  # created with the real EMBEDDING_DIM
+        with patch.object(mnemomatic.db, "EMBEDDING_DIM", EMBEDDING_DIM * 2):
+            with self.assertRaises(RuntimeError) as cm:
+                Database(self.path)
+        self.assertIn("MNEMOMATIC_EMBED_DIM", str(cm.exception))
+        self.assertIn(str(EMBEDDING_DIM), str(cm.exception))
+
+    def test_dim_mismatch_on_legacy_db_fails_before_migrating(self):
+        _build_legacy_db(self.path, dim=EMBEDDING_DIM)
+        with patch.object(mnemomatic.db, "EMBEDDING_DIM", 8):
+            with self.assertRaises(RuntimeError) as cm:
+                Database(self.path)
+        self.assertIn("MNEMOMATIC_EMBED_DIM", str(cm.exception))
+        # The failed migration must not have bumped the version or dropped data.
+        conn = sqlite3.connect(self.path)
+        self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 0)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0], 3)
+        conn.close()
 
 
 # ── Chunking ───────────────────────────────────────────────────────────────────
