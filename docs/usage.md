@@ -261,7 +261,7 @@ Once connected, your LLM has access to these tools:
 | `search`             | Search across all stored data                        |
 | `read`               | Fetch full content of an item by ID                  |
 | `list_items`         | List item summaries in a namespace, newest first, paginated with `limit`/`offset` (response includes `total`) |
-| `rename_namespace`   | Rename a namespace atomically across all item types  |
+| `rename_namespace`   | Rename a namespace atomically across all item types. Merges into an existing target: on title/subject collisions the moved item replaces the target's (upsert semantics); the response reports `replaced` counts. |
 | `delete_namespace`   | Permanently delete all items in a namespace          |
 
 ### Input Validation & Limits

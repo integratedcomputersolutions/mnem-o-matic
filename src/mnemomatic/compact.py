@@ -27,7 +27,7 @@ _COMPACT_DESCRIPTIONS: dict[str, str] = {
     "delete_knowledge": "Permanently delete a knowledge entry by id.",
     "delete_note":      "Permanently delete a note by id.",
     "tag":              "Add or remove tags on any item without changing other fields.",
-    "rename_namespace": "Rename a namespace across all items. Works as merge if target exists.",
+    "rename_namespace": "Rename a namespace across all items. Merges into existing target; moved items win title/subject conflicts.",
     "delete_namespace": "Permanently delete all items in a namespace.",
 }
 

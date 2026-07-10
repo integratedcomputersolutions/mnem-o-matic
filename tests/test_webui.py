@@ -146,6 +146,17 @@ class TestViews(WebUITestBase):
         self.assertIn("proj", resp.text)
         self.assertIn("/ui/ns/proj", resp.text)
 
+    def test_index_shows_per_type_counts(self):
+        # Seeded: 1 document, 1 knowledge, 1 note. Add a second document so the
+        # counts are distinguishable per column.
+        self.db.store_document(
+            Document(namespace="proj", title="Second Doc", content="more"), embedding=None
+        )
+        resp = self.client.get("/ui")
+        row = next(line for line in resp.text.splitlines() if "/ui/ns/proj" in line)
+        self.assertIn('<td class="text-end">2</td>', row)  # documents
+        self.assertEqual(row.count('<td class="text-end">1</td>'), 2)  # knowledge, notes
+
     def test_namespace_lists_items(self):
         resp = self.client.get("/ui/ns/proj")
         self.assertEqual(resp.status_code, 200)

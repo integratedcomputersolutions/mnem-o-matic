@@ -184,6 +184,26 @@ def _safe_embed(text: str) -> list[float] | None:
         return None
 
 
+def _safe_embed_batch(texts: list[str]) -> list[list[float] | None]:
+    """Embed many texts at once, one None per failed item.
+
+    Uses the embedder's embed_batch (single padded inference for ONNX,
+    concurrent requests for HTTP) and falls back to sequential _safe_embed
+    for embedders that don't provide one.
+    """
+    emb = _embedder()
+    if emb is None or not texts:
+        return [None] * len(texts)
+    batch = getattr(emb, "embed_batch", None)
+    if batch is None:
+        return [_safe_embed(t) for t in texts]
+    try:
+        return batch(texts)
+    except Exception as e:
+        logger.error("Batch embedding failed: %s: %s", type(e).__name__, e)
+        return [None] * len(texts)
+
+
 def _knowledge_embed_text(subject: str, fact: str) -> str:
     """Text embedded for a knowledge entry. Shared by store and update so they never drift."""
     return f"{subject}: {fact}"
@@ -205,8 +225,8 @@ def _embed_document_body(title: str, content: str) -> tuple[list[float] | None, 
     embeddings are dropped; if none survive, chunks is None.
     """
     if len(content) >= CHUNK_THRESHOLD:
-        pairs = [(c, _safe_embed(c)) for c in _chunk_text(content, CHUNK_SIZE, CHUNK_OVERLAP)]
-        chunks = [(c, e) for c, e in pairs if e is not None]
+        texts = _chunk_text(content, CHUNK_SIZE, CHUNK_OVERLAP)
+        chunks = [(c, e) for c, e in zip(texts, _safe_embed_batch(texts)) if e is not None]
         return None, (chunks or None)
     return _safe_embed(f"{title}\n{content}"), None
 
@@ -818,22 +838,25 @@ def delete_namespace(namespace: str) -> dict:
 def rename_namespace(old_namespace: str, new_namespace: str) -> dict:
     """Rename a namespace across all documents, knowledge entries, and notes.
 
-    Moves every item in old_namespace to new_namespace atomically. Fails if
-    new_namespace already exists and has items with conflicting titles or subjects
-    — resolve conflicts first by deleting or renaming the colliding items.
+    Moves every item in old_namespace to new_namespace atomically. If
+    new_namespace already exists this acts as a merge: on a title/subject
+    collision the moved item replaces the target's item (the same upsert
+    semantics as the store tools). Check `replaced` in the response to see
+    how many target items were overwritten.
 
     Args:
         old_namespace: The namespace to rename.
-        new_namespace: The new name for the namespace.
+        new_namespace: The new name for the namespace. Must differ from old_namespace.
     """
     try:
-        counts = _db().rename_namespace(old_namespace, new_namespace)
+        counts, replaced = _db().rename_namespace(old_namespace, new_namespace)
     except ValueError as e:
         return {"error": str(e)}
     return {
         "old_namespace": old_namespace,
         "new_namespace": new_namespace,
         "renamed": counts,
+        "replaced": replaced,
         "total": sum(counts.values()),
     }
 

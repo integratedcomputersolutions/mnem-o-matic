@@ -398,8 +398,9 @@ class TestRenameNamespace(unittest.TestCase):
 
     def test_rename_moves_all_content_types(self):
         self._store_all()
-        counts = self.db.rename_namespace("old", "new")
+        counts, replaced = self.db.rename_namespace("old", "new")
         self.assertEqual(counts, {"documents": 1, "knowledge": 1, "notes": 1})
+        self.assertEqual(sum(replaced.values()), 0)
         self.assertNotIn("old", self.db.list_namespaces())
         self.assertIn("new", self.db.list_namespaces())
 
@@ -416,25 +417,61 @@ class TestRenameNamespace(unittest.TestCase):
         doc_new = Document(namespace="new", title="T-new", content="C")
         self.db.store_document(doc_new, _fake_embedding("T-new\nC"))
 
-        counts = self.db.rename_namespace("old", "new")
+        counts, replaced = self.db.rename_namespace("old", "new")
         self.assertEqual(counts["documents"], 1)
+        self.assertEqual(sum(replaced.values()), 0)
         docs = self.db.list_documents("new")
         titles = {d.title for d in docs}
         self.assertIn("T-old", titles)
         self.assertIn("T-new", titles)
 
-    def test_rename_conflict_raises_value_error(self):
-        doc_a = Document(namespace="old", title="Same", content="C")
-        self.db.store_document(doc_a, _fake_embedding("Same\nC"))
-        doc_b = Document(namespace="new", title="Same", content="C")
-        self.db.store_document(doc_b, _fake_embedding("Same\nC"))
+    def test_rename_conflict_moved_item_wins(self):
+        # Merge semantics mirror the store_* upsert: on a title collision the
+        # moved item replaces the target's, and the replacement is reported.
+        doc_a, _ = self.db.store_document(
+            Document(namespace="old", title="Same", content="from-old"), _fake_embedding("a"))
+        doc_b, _ = self.db.store_document(
+            Document(namespace="new", title="Same", content="from-new"), _fake_embedding("b"))
 
+        counts, replaced = self.db.rename_namespace("old", "new")
+        self.assertEqual(counts["documents"], 1)
+        self.assertEqual(replaced["documents"], 1)
+        docs = self.db.list_documents("new")
+        self.assertEqual(len(docs), 1)
+        self.assertEqual(docs[0].id, doc_a.id)
+        self.assertEqual(docs[0].content, "from-old")
+        self.assertIsNone(self.db.get_document(doc_b.id))
+
+    def test_rename_conflict_replaces_vectors_and_chunks(self):
+        # The overwritten target's vector and chunk rows must not linger.
+        loser_emb = _fake_embedding("loser")
+        self.db.store_document(
+            Document(namespace="new", title="Same", content="x" * 3000), None,
+            chunks=[("loser chunk", loser_emb)],
+        )
+        winner, _ = self.db.store_document(
+            Document(namespace="old", title="Same", content="winner"), _fake_embedding("winner"))
+
+        _, replaced = self.db.rename_namespace("old", "new")
+        self.assertEqual(replaced["documents"], 1)
+        conn = self.db._get_conn()
+        self.assertEqual(conn.execute("SELECT COUNT(*) AS n FROM document_chunks").fetchone()["n"], 0)
+        self.assertEqual(conn.execute("SELECT COUNT(*) AS n FROM vec_document_chunks").fetchone()["n"], 0)
+        # The loser's vector is gone: searching with it returns only the winner.
+        results = self.db.search_vec(loser_emb, table="documents", namespace="new", limit=5)
+        self.assertEqual([r.id for r in results], [winner.id])
+
+    def test_rename_to_same_namespace_raises(self):
+        self._store_all()
         with self.assertRaises(ValueError):
-            self.db.rename_namespace("old", "new")
+            self.db.rename_namespace("old", "old")
+        # Nothing was deleted by the guard.
+        self.assertEqual(len(self.db.list_documents("old")), 1)
 
     def test_rename_nonexistent_namespace_returns_zero_counts(self):
-        counts = self.db.rename_namespace("ghost", "new")
+        counts, replaced = self.db.rename_namespace("ghost", "new")
         self.assertEqual(sum(counts.values()), 0)
+        self.assertEqual(sum(replaced.values()), 0)
 
     def test_renamed_items_searchable_in_new_namespace(self):
         doc = Document(namespace="old", title="auth guide", content="JWT tokens")
@@ -446,6 +483,17 @@ class TestRenameNamespace(unittest.TestCase):
         self.assertTrue(len(results) > 0)
         results_old = self.db.search_fts("JWT", namespace="old")
         self.assertEqual(results_old, [])
+
+    def test_namespace_counts(self):
+        self._store_all()  # one of each type in "old"
+        self.db.store_document(Document(namespace="zeta", title="d", content="c"), None)
+        counts = self.db.namespace_counts()
+        self.assertEqual(list(counts), ["old", "zeta"])  # sorted
+        self.assertEqual(counts["old"], {"documents": 1, "knowledge": 1, "notes": 1})
+        self.assertEqual(counts["zeta"], {"documents": 1, "knowledge": 0, "notes": 0})
+
+    def test_namespace_counts_empty_db(self):
+        self.assertEqual(self.db.namespace_counts(), {})
 
 
 # ── Paginated listing ──────────────────────────────────────────────────────────

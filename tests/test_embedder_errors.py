@@ -9,6 +9,7 @@ This tests CRITICAL #1: Error Handling Gaps
 
 import json
 import logging
+import time
 import unittest
 from unittest.mock import MagicMock, Mock, patch
 import urllib.error
@@ -20,7 +21,7 @@ from pathlib import Path
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from mnemomatic.embeddings import HttpEmbedder, OnnxEmbedder
+from mnemomatic.embeddings import HttpEmbedder
 
 
 class TestHttpEmbedderErrors(unittest.TestCase):
@@ -220,6 +221,122 @@ class TestEmbedderFallback(unittest.TestCase):
         # Call _safe_embed - it should return None since embedder is None
         result = server._safe_embed("test text")
         self.assertIsNone(result)
+
+
+def _mock_embedding_response(req, timeout=None):
+    """urlopen stand-in: returns an embedding derived from the request's prompt."""
+    prompt = json.loads(req.data)["prompt"]
+    cm = MagicMock()
+    cm.__enter__.return_value.read.return_value = json.dumps(
+        {"embedding": [float(len(prompt)), 0.5]}
+    ).encode()
+    return cm
+
+
+class TestHttpEmbedderBatch(unittest.TestCase):
+    """embed_batch runs requests concurrently while preserving order and
+    per-item failure semantics."""
+
+    def setUp(self):
+        self.embedder = HttpEmbedder("http://localhost:11434/api/embeddings", model="m")
+
+    def test_batch_preserves_order(self):
+        texts = ["a", "bb", "ccc", "dddd"]
+        with patch("urllib.request.urlopen", side_effect=_mock_embedding_response):
+            results = self.embedder.embed_batch(texts)
+        # Each embedding encodes its prompt's length → order must line up.
+        self.assertEqual([r[0] for r in results], [1.0, 2.0, 3.0, 4.0])
+
+    def test_batch_partial_failure_returns_none_for_failed_items(self):
+        def flaky(req, timeout=None):
+            if json.loads(req.data)["prompt"] == "bad":
+                raise urllib.error.URLError("boom")
+            return _mock_embedding_response(req)
+
+        with patch("urllib.request.urlopen", side_effect=flaky):
+            results = self.embedder.embed_batch(["ok", "bad", "fine"])
+        self.assertIsNotNone(results[0])
+        self.assertIsNone(results[1])
+        self.assertIsNotNone(results[2])
+
+    def test_batch_empty_input(self):
+        self.assertEqual(self.embedder.embed_batch([]), [])
+
+    def test_batch_uses_embed_cache(self):
+        # Duplicate texts hit the lru_cache; the network sees each text once.
+        with patch("urllib.request.urlopen", side_effect=_mock_embedding_response) as mock_urlopen:
+            self.embedder.embed_batch(["same", "same", "same"])
+        self.assertEqual(mock_urlopen.call_count, 1)
+
+    def test_batch_requests_run_concurrently(self):
+        # 8 requests at 100ms each: sequential would take ≥800ms; concurrent
+        # execution must finish in roughly one round trip.
+        def slow(req, timeout=None):
+            time.sleep(0.1)
+            return _mock_embedding_response(req)
+
+        texts = [f"text {i}" for i in range(8)]
+        with patch("urllib.request.urlopen", side_effect=slow):
+            start = time.perf_counter()
+            results = self.embedder.embed_batch(texts)
+            elapsed = time.perf_counter() - start
+        self.assertTrue(all(r is not None for r in results))
+        self.assertLess(elapsed, 0.5, f"batch took {elapsed:.2f}s — requests ran sequentially?")
+
+
+class TestSafeEmbedBatch(unittest.TestCase):
+    """server._safe_embed_batch dispatch: batch when available, safe fallbacks."""
+
+    def _with_embedder(self, embedder):
+        from mnemomatic import server
+        return patch.object(server, "_embedder", return_value=embedder)
+
+    def test_no_embedder_returns_all_none(self):
+        from mnemomatic import server
+        with self._with_embedder(None):
+            self.assertEqual(server._safe_embed_batch(["a", "b"]), [None, None])
+
+    def test_embedder_with_batch_called_once(self):
+        from mnemomatic import server
+        embedder = MagicMock()
+        embedder.embed_batch.return_value = [[0.1], [0.2]]
+        with self._with_embedder(embedder):
+            results = server._safe_embed_batch(["a", "b"])
+        embedder.embed_batch.assert_called_once_with(["a", "b"])
+        self.assertEqual(results, [[0.1], [0.2]])
+
+    def test_embedder_without_batch_falls_back_to_sequential(self):
+        from mnemomatic import server
+        embedder = Mock(spec=["embed"])  # no embed_batch attribute
+        embedder.embed.side_effect = lambda t: [float(len(t))]
+        with self._with_embedder(embedder):
+            results = server._safe_embed_batch(["a", "bb"])
+        self.assertEqual(results, [[1.0], [2.0]])
+
+    def test_batch_exception_degrades_to_all_none(self):
+        from mnemomatic import server
+        embedder = MagicMock()
+        embedder.embed_batch.side_effect = RuntimeError("embedder down")
+        with self._with_embedder(embedder):
+            self.assertEqual(server._safe_embed_batch(["a", "b"]), [None, None])
+
+    def test_document_body_chunks_embed_as_one_batch(self):
+        # A chunked document must produce exactly one embed_batch call, with
+        # failed chunks dropped from the result.
+        from mnemomatic import server
+        embedder = MagicMock()
+        embedder.embed_batch.side_effect = lambda texts: [
+            [0.1] if i % 2 == 0 else None for i in range(len(texts))
+        ]
+        content = ("paragraph text. " * 40 + "\n\n") * 5  # well over CHUNK_THRESHOLD
+        with self._with_embedder(embedder):
+            embedding, chunks = server._embed_document_body("T", content)
+        self.assertIsNone(embedding)
+        embedder.embed_batch.assert_called_once()
+        texts = embedder.embed_batch.call_args[0][0]
+        self.assertGreater(len(texts), 1)
+        self.assertEqual(len(chunks), (len(texts) + 1) // 2)  # odd indices dropped
+        self.assertTrue(all(e == [0.1] for _, e in chunks))
 
 
 if __name__ == "__main__":
