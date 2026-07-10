@@ -1,6 +1,7 @@
 import functools
 import json
 import logging
+import math
 import os
 import socket
 import urllib.error
@@ -14,6 +15,26 @@ TOKENIZER_PATH = os.environ.get("MNEMOMATIC_TOKENIZER_PATH", "/app/model/tokeniz
 EMBED_TIMEOUT = int(os.environ.get("MNEMOMATIC_EMBED_TIMEOUT", "30"))
 # Concurrent requests used by HttpEmbedder.embed_batch (chunked documents).
 EMBED_CONCURRENCY = int(os.environ.get("MNEMOMATIC_EMBED_CONCURRENCY", "8"))
+
+
+def _l2_normalize(vec: list[float]) -> list[float]:
+    """Scale a vector to unit length.
+
+    The score math in db.py (L2 distance → cosine similarity) is only correct
+    for unit vectors. The built-in ONNX embedder normalizes as part of pooling;
+    external endpoints return whatever their model produces, so their output is
+    normalized here. Already-unit vectors pass through unchanged.
+
+    Raises:
+        ValueError: for a zero vector or non-numeric elements — a broken
+                    embedding must not be stored.
+    """
+    norm = math.sqrt(sum(x * x for x in vec))
+    if norm == 0.0:
+        raise ValueError("embedding has zero norm")
+    if abs(norm - 1.0) < 1e-6:
+        return vec
+    return [x / norm for x in vec]
 
 
 class OnnxEmbedder:
@@ -184,12 +205,13 @@ class HttpEmbedder:
                 f"Embedding service at {self.url} returned invalid JSON: {e}"
             )
 
-        # Extract embedding
+        # Extract embedding; normalize so downstream cosine scoring holds for
+        # any external model (raises for zero/non-numeric vectors).
         try:
             embedding = data["embedding"]
             if not isinstance(embedding, list):
                 raise TypeError(f"embedding field is {type(embedding).__name__}, expected list")
-            return embedding
+            return _l2_normalize(embedding)
         except KeyError:
             logger.error(
                 "Embedding service response missing 'embedding' field. Got: %s",
