@@ -209,10 +209,14 @@ Environment variables (set in `docker-compose.yml` or passed to Docker):
 | `MNEMOMATIC_EMBED_MODEL`    | *(empty)*                   | Model name passed to the external embedder               |
 | `MNEMOMATIC_EMBED_CONCURRENCY` | `8`                      | Parallel requests to the external embedder when embedding chunked documents |
 | `MNEMOMATIC_EMBED_DIM`      | `384`                       | Embedding dimension — must match the model's output      |
+| `MNEMOMATIC_EMBED_QUERY_PREFIX` | *(empty)*               | Task prefix prepended to search queries before embedding (asymmetric models) |
+| `MNEMOMATIC_EMBED_DOC_PREFIX` | *(empty)*                 | Task prefix prepended to stored content before embedding (asymmetric models) |
 | `MNEMOMATIC_MODEL_PATH`     | `/app/model/model.onnx`     | Path to the ONNX model file (full image only)            |
 | `MNEMOMATIC_TOKENIZER_PATH` | `/app/model/tokenizer.json` | Path to the tokenizer file (full image only)             |
 
 > **Changing `MNEMOMATIC_EMBED_DIM`:** the embedding dimension is baked into the database's vector tables at creation. The server records it and refuses to start on a mismatch rather than corrupting the index. To switch embedding models with a different dimension, drop the `vec_*` tables (`sqlite3 data/mnemomatic.db "DROP TABLE vec_documents; DROP TABLE vec_knowledge; DROP TABLE vec_notes; DROP TABLE vec_document_chunks;"`) and re-store your content so it is re-embedded — or keep a separate database per embedder.
+
+> **Asymmetric embedding models:** some models are trained with task prefixes that differ between queries and stored content — e.g. EmbeddingGemma expects `task: search result | query: ` on queries and `title: none | text: ` on documents. Set `MNEMOMATIC_EMBED_QUERY_PREFIX` and `MNEMOMATIC_EMBED_DOC_PREFIX` accordingly (include the trailing space). Prefixes are applied at embedding time only and never appear in stored content or search snippets. Because the document prefix is baked into stored vectors, changing prefixes — like changing models — requires re-embedding existing content. The built-in MiniLM model is symmetric: leave both unset.
 
 ## Schema Migrations
 

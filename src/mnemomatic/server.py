@@ -29,6 +29,14 @@ UI_TOKEN = os.environ.get("MNEMOMATIC_UI_TOKEN", "").strip()
 MAX_SEARCH_LIMIT = 100
 MAX_LIST_LIMIT = 200
 
+# Optional task prefixes for asymmetric embedding models (e.g. EmbeddingGemma
+# wants "task: search result | query: " on queries and "title: none | text: "
+# on stored content). Empty by default — symmetric models like the built-in
+# MiniLM need none. Prefixes are baked into stored vectors, so changing them
+# (like changing models) requires re-embedding existing content.
+EMBED_QUERY_PREFIX = os.environ.get("MNEMOMATIC_EMBED_QUERY_PREFIX", "")
+EMBED_DOC_PREFIX = os.environ.get("MNEMOMATIC_EMBED_DOC_PREFIX", "")
+
 # Tool annotation presets
 _ANN_READ_ONLY = ToolAnnotations(readOnlyHint=True, openWorldHint=False)
 _ANN_STORE = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False)
@@ -204,6 +212,16 @@ def _safe_embed_batch(texts: list[str]) -> list[list[float] | None]:
         return [None] * len(texts)
 
 
+def _embed_query(text: str) -> list[float] | None:
+    """Embedding for a search query, with the configured query prefix applied."""
+    return _safe_embed(EMBED_QUERY_PREFIX + text)
+
+
+def _embed_content(text: str) -> list[float] | None:
+    """Embedding for stored content, with the configured document prefix applied."""
+    return _safe_embed(EMBED_DOC_PREFIX + text)
+
+
 def _knowledge_embed_text(subject: str, fact: str) -> str:
     """Text embedded for a knowledge entry. Shared by store and update so they never drift."""
     return f"{subject}: {fact}"
@@ -226,9 +244,12 @@ def _embed_document_body(title: str, content: str) -> tuple[list[float] | None, 
     """
     if len(content) >= CHUNK_THRESHOLD:
         texts = _chunk_text(content, CHUNK_SIZE, CHUNK_OVERLAP)
-        chunks = [(c, e) for c, e in zip(texts, _safe_embed_batch(texts)) if e is not None]
+        # The document prefix is applied for embedding only; stored chunk
+        # content stays raw so snippets never leak the prefix.
+        embeddings = _safe_embed_batch([EMBED_DOC_PREFIX + t for t in texts])
+        chunks = [(c, e) for c, e in zip(texts, embeddings) if e is not None]
         return None, (chunks or None)
-    return _safe_embed(f"{title}\n{content}"), None
+    return _embed_content(f"{title}\n{content}"), None
 
 
 # ── Tools ──
@@ -333,7 +354,7 @@ def store_knowledge(
     except ValidationError as e:
         return {"error": "Invalid knowledge entry", "details": _format_validation_error(e)}
 
-    embedding = _safe_embed(_knowledge_embed_text(subject, fact))
+    embedding = _embed_content(_knowledge_embed_text(subject, fact))
     stored, created = _db().store_knowledge(k, embedding)
     return {"id": stored.id, "namespace": stored.namespace, "subject": stored.subject, "created": created}
 
@@ -361,14 +382,14 @@ def _document_update_embedding(id: str, existing: Document, fields: dict) -> lis
 
 def _knowledge_update_embedding(id: str, existing: Knowledge, fields: dict) -> list[float] | None:
     if "subject" in fields or "fact" in fields:
-        return _safe_embed(_knowledge_embed_text(
+        return _embed_content(_knowledge_embed_text(
             fields.get("subject", existing.subject), fields.get("fact", existing.fact)))
     return None
 
 
 def _note_update_embedding(id: str, existing: Note, fields: dict) -> list[float] | None:
     if "title" in fields or "content" in fields:
-        return _safe_embed(_note_embed_text(
+        return _embed_content(_note_embed_text(
             fields.get("title", existing.title), fields.get("content", existing.content)))
     return None
 
@@ -551,7 +572,7 @@ def store_note(
     except ValidationError as e:
         return {"error": "Invalid note", "details": _format_validation_error(e)}
 
-    embedding = _safe_embed(_note_embed_text(title, content))
+    embedding = _embed_content(_note_embed_text(title, content))
     stored, created = _db().store_note(note, embedding)
     return {"id": stored.id, "namespace": stored.namespace, "title": stored.title, "created": created}
 
@@ -687,12 +708,12 @@ def search(
             if mode == "hybrid" and emb is None:
                 degraded = True
         elif mode == "semantic":
-            embedding = _safe_embed(query)
+            embedding = _embed_query(query)
             if embedding is None:
                 return [{"error": "Semantic search failed", "details": "Embedding service is unavailable. Try fulltext mode."}]
             results = _db().search_vec(embedding, table=table, namespace=namespace, limit=limit)
         else:  # hybrid with embedder
-            embedding = _safe_embed(query)
+            embedding = _embed_query(query)
             # If embedding fails, degrade to fulltext search
             if embedding is None:
                 logger.info("Hybrid search degrading to fulltext due to embedding failure")
