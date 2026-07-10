@@ -303,6 +303,10 @@ def _build_parser() -> argparse.ArgumentParser:
     for ltype in _RESOURCE_TYPES:
         p_ls = list_sub.add_parser(ltype, help=f"List {ltype} in a namespace")
         p_ls.add_argument("namespace")
+        p_ls.add_argument("-l", "--limit", type=int, default=None, metavar="N",
+                          help="Page size — switches to the paginated list_items tool (max 200)")
+        p_ls.add_argument("-o", "--offset", type=int, default=0, metavar="N",
+                          help="Items to skip, for fetching subsequent pages (requires --limit)")
 
     return root
 
@@ -399,5 +403,15 @@ def main():
                     _run(lambda: client.call_tool("delete_namespace", {
                         "namespace": args.namespace}), pretty)
         case "list":
-            _run(lambda: client.read_resource(
-                f"mnemomatic://{args.list_type}/{args.namespace}"), pretty)
+            if args.limit is not None:
+                # Paginated path via the list_items tool (server >= 1.2).
+                singular = {"documents": "document", "knowledge": "knowledge", "notes": "note"}
+                _run(lambda: client.call_tool("list_items", {
+                    "item_type": singular[args.list_type],
+                    "namespace": args.namespace,
+                    "limit": args.limit,
+                    "offset": args.offset,
+                }), pretty)
+            else:
+                _run(lambda: client.read_resource(
+                    f"mnemomatic://{args.list_type}/{args.namespace}"), pretty)

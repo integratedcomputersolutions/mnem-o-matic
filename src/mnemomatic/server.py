@@ -27,6 +27,7 @@ EMBED_URL = os.environ.get("MNEMOMATIC_EMBED_URL", "")
 EMBED_MODEL = os.environ.get("MNEMOMATIC_EMBED_MODEL", "")
 UI_TOKEN = os.environ.get("MNEMOMATIC_UI_TOKEN", "").strip()
 MAX_SEARCH_LIMIT = 100
+MAX_LIST_LIMIT = 200
 
 # Tool annotation presets
 _ANN_READ_ONLY = ToolAnnotations(readOnlyHint=True, openWorldHint=False)
@@ -712,6 +713,42 @@ def _get_resource(item_type: str, id: str) -> str:
     if obj is None:
         return json.dumps({"error": f"{item_type.capitalize()} {id} not found"})
     return obj.model_dump_json()
+
+
+@mcp.tool(annotations=_ANN_READ_ONLY)
+def list_items(item_type: str, namespace: str, limit: int = 50, offset: int = 0) -> dict:
+    """List items of one type in a namespace, newest first, with pagination.
+
+    Use this to browse or inventory a namespace — e.g. reviewing what's stored,
+    finding stale entries, or walking a large namespace page by page. For
+    finding content by topic, prefer the search tool.
+
+    Results are summaries (id, title/subject, tags, updated_at, ...) without
+    document/note bodies; use the read tool to fetch an item's full content.
+    The response's `total` is the overall item count, so `offset + len(items)
+    < total` means there are more pages.
+
+    Args:
+        item_type: The item type — "document", "knowledge", or "note".
+        namespace: The namespace to list.
+        limit: Maximum items per page (default 50, max 200).
+        offset: Number of items to skip — pass the previous offset + limit to
+                fetch the next page (default 0).
+    """
+    try:
+        limit = max(1, min(int(limit), MAX_LIST_LIMIT))
+        offset = max(0, int(offset))
+        items, total = _db().list_page(item_type, namespace, limit, offset)
+    except ValueError as e:
+        return {"error": str(e)}
+    return {
+        "items": items,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "namespace": namespace,
+        "item_type": item_type,
+    }
 
 
 @mcp.tool(annotations=_ANN_READ_ONLY)

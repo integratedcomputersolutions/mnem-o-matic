@@ -225,6 +225,10 @@ mnemomatic-cli list documents myproject
 mnemomatic-cli list knowledge myproject
 mnemomatic-cli list notes myproject
 
+# Paginated listing for large namespaces (uses the list_items tool)
+mnemomatic-cli list documents myproject --limit 20
+mnemomatic-cli list documents myproject --limit 20 --offset 20
+
 # Namespace management
 mnemomatic-cli namespace list
 mnemomatic-cli namespace rename old-project new-project
@@ -256,6 +260,7 @@ Once connected, your LLM has access to these tools:
 | `tag`                | Add or remove tags on any entry                      |
 | `search`             | Search across all stored data                        |
 | `read`               | Fetch full content of an item by ID                  |
+| `list_items`         | List item summaries in a namespace, newest first, paginated with `limit`/`offset` (response includes `total`) |
 | `rename_namespace`   | Rename a namespace atomically across all item types  |
 | `delete_namespace`   | Permanently delete all items in a namespace          |
 
