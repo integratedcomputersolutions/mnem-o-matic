@@ -112,9 +112,9 @@ class TestHttpEmbedderErrors(unittest.TestCase):
             self.assertIn("invalid embedding", str(cm.exception))
 
     def test_http_embedder_success(self):
-        """Successful embedding request should return list of floats."""
+        """Successful embedding request should return the (normalized) vector."""
         with patch("urllib.request.urlopen") as mock_urlopen:
-            embedding = [0.1, 0.2, 0.3, 0.4]
+            embedding = [0.6, 0.8]  # already unit length → passes through unchanged
             mock_resp = MagicMock()
             mock_resp.read.return_value = json.dumps({"embedding": embedding}).encode()
             mock_resp.__enter__.return_value = mock_resp
@@ -123,6 +123,45 @@ class TestHttpEmbedderErrors(unittest.TestCase):
 
             result = self.embedder.embed("test text")
             self.assertEqual(result, embedding)
+
+    def test_http_embedder_normalizes_unnormalized_vectors(self):
+        """External models may return non-unit vectors; scoring assumes unit."""
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_resp = MagicMock()
+            mock_resp.read.return_value = json.dumps({"embedding": [3.0, 4.0]}).encode()
+            mock_resp.__enter__.return_value = mock_resp
+            mock_resp.__exit__.return_value = None
+            mock_urlopen.return_value = mock_resp
+
+            result = self.embedder.embed("unnormalized")
+            self.assertAlmostEqual(result[0], 0.6, places=9)
+            self.assertAlmostEqual(result[1], 0.8, places=9)
+
+    def test_http_embedder_zero_vector_rejected(self):
+        """A zero vector is a broken embedding and must not be stored."""
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_resp = MagicMock()
+            mock_resp.read.return_value = json.dumps({"embedding": [0.0, 0.0]}).encode()
+            mock_resp.__enter__.return_value = mock_resp
+            mock_resp.__exit__.return_value = None
+            mock_urlopen.return_value = mock_resp
+
+            with self.assertRaises(RuntimeError) as cm:
+                self.embedder.embed("zero")
+            self.assertIn("invalid embedding", str(cm.exception))
+
+    def test_http_embedder_non_numeric_vector_rejected(self):
+        """Non-numeric elements previously slipped through to the DB layer."""
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_resp = MagicMock()
+            mock_resp.read.return_value = json.dumps({"embedding": ["a", "b"]}).encode()
+            mock_resp.__enter__.return_value = mock_resp
+            mock_resp.__exit__.return_value = None
+            mock_urlopen.return_value = mock_resp
+
+            with self.assertRaises(RuntimeError) as cm:
+                self.embedder.embed("strings")
+            self.assertIn("invalid embedding", str(cm.exception))
 
     def test_http_embedder_validation_url_required(self):
         """HttpEmbedder should require non-empty URL."""
@@ -134,7 +173,7 @@ class TestHttpEmbedderErrors(unittest.TestCase):
     def test_http_embedder_caching(self):
         """Same text should be cached (second call shouldn't hit network)."""
         with patch("urllib.request.urlopen") as mock_urlopen:
-            embedding = [0.1, 0.2, 0.3, 0.4]
+            embedding = [0.6, 0.8]
             mock_resp = MagicMock()
             mock_resp.read.return_value = json.dumps({"embedding": embedding}).encode()
             mock_resp.__enter__.return_value = mock_resp
@@ -244,8 +283,9 @@ class TestHttpEmbedderBatch(unittest.TestCase):
         texts = ["a", "bb", "ccc", "dddd"]
         with patch("urllib.request.urlopen", side_effect=_mock_embedding_response):
             results = self.embedder.embed_batch(texts)
-        # Each embedding encodes its prompt's length → order must line up.
-        self.assertEqual([r[0] for r in results], [1.0, 2.0, 3.0, 4.0])
+        # Each embedding encodes its prompt's length as [len, 0.5]; the vectors
+        # are normalized on return, but the component ratio (2·len) survives.
+        self.assertEqual([round(r[0] / r[1]) for r in results], [2, 4, 6, 8])
 
     def test_batch_partial_failure_returns_none_for_failed_items(self):
         def flaky(req, timeout=None):
