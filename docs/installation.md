@@ -211,12 +211,32 @@ Environment variables (set in `docker-compose.yml` or passed to Docker):
 | `MNEMOMATIC_EMBED_DIM`      | `384`                       | Embedding dimension — must match the model's output      |
 | `MNEMOMATIC_EMBED_QUERY_PREFIX` | *(empty)*               | Task prefix prepended to search queries before embedding (asymmetric models) |
 | `MNEMOMATIC_EMBED_DOC_PREFIX` | *(empty)*                 | Task prefix prepended to stored content before embedding (asymmetric models) |
+| `MNEMOMATIC_REINDEX`        | *(unset)*                   | Set to `1` for one startup to rebuild the vector index and re-embed all content (after changing model/dim/prefixes). Remove afterwards. |
 | `MNEMOMATIC_MODEL_PATH`     | `/app/model/model.onnx`     | Path to the ONNX model file (full image only)            |
 | `MNEMOMATIC_TOKENIZER_PATH` | `/app/model/tokenizer.json` | Path to the tokenizer file (full image only)             |
 
-> **Changing `MNEMOMATIC_EMBED_DIM`:** the embedding dimension is baked into the database's vector tables at creation. The server records it and refuses to start on a mismatch rather than corrupting the index. To switch embedding models with a different dimension, drop the `vec_*` tables (`sqlite3 data/mnemomatic.db "DROP TABLE vec_documents; DROP TABLE vec_knowledge; DROP TABLE vec_notes; DROP TABLE vec_document_chunks;"`) and re-store your content so it is re-embedded — or keep a separate database per embedder.
+> **Changing `MNEMOMATIC_EMBED_DIM`:** the embedding dimension is baked into the database's vector tables at creation. The server records it and refuses to start on a mismatch rather than corrupting the index — unless `MNEMOMATIC_REINDEX=1` is set, in which case it rebuilds the index at the new dimension (see below).
 
 > **Asymmetric embedding models:** some models are trained with task prefixes that differ between queries and stored content — e.g. EmbeddingGemma expects `task: search result | query: ` on queries and `title: none | text: ` on documents. Set `MNEMOMATIC_EMBED_QUERY_PREFIX` and `MNEMOMATIC_EMBED_DOC_PREFIX` accordingly (include the trailing space). Prefixes are applied at embedding time only and never appear in stored content or search snippets. Because the document prefix is baked into stored vectors, changing prefixes — like changing models — requires re-embedding existing content. The built-in MiniLM model is symmetric: leave both unset.
+
+## Switching Embedding Models
+
+Changing the embedding model, dimension, or task prefixes invalidates every stored vector — old and new embeddings live in different spaces and must not be compared. The switch is a config change plus one flagged restart:
+
+1. Update the embedder settings — e.g. for EmbeddingGemma via Ollama:
+   ```yaml
+   environment:
+     - MNEMOMATIC_EMBED_URL=http://ollama:11434/api/embeddings
+     - MNEMOMATIC_EMBED_MODEL=embeddinggemma
+     - MNEMOMATIC_EMBED_DIM=768
+     - "MNEMOMATIC_EMBED_QUERY_PREFIX=task: search result | query: "
+     - "MNEMOMATIC_EMBED_DOC_PREFIX=title: none | text: "
+     - MNEMOMATIC_REINDEX=1
+   ```
+2. Restart the server. Startup rebuilds the vector index at the new dimension and re-embeds every document, chunk, knowledge entry, and note with the new model before serving. Content and timestamps are untouched; progress and a final count are logged.
+3. **Remove `MNEMOMATIC_REINDEX`** and restart once more — while set, the (harmless but wasteful) re-embed runs on every boot.
+
+Items whose embedding fails during the run are logged and remain findable via fulltext search; re-run the reindex to retry them. Fulltext search is unaffected throughout.
 
 ## Schema Migrations
 

@@ -13,7 +13,7 @@ from pydantic import ValidationError
 
 from mnemomatic.auth import BearerAuthMiddleware
 from mnemomatic.compact import CompactToolsMiddleware
-from mnemomatic.db import CHUNK_OVERLAP, CHUNK_SIZE, CHUNK_THRESHOLD, Database, _chunk_text
+from mnemomatic.db import CHUNK_OVERLAP, CHUNK_SIZE, CHUNK_THRESHOLD, EMBEDDING_DIM, Database, _chunk_text
 from mnemomatic.models import Document, Knowledge, Note
 
 logger = logging.getLogger("mnemomatic")
@@ -36,6 +36,11 @@ MAX_LIST_LIMIT = 200
 # (like changing models) requires re-embedding existing content.
 EMBED_QUERY_PREFIX = os.environ.get("MNEMOMATIC_EMBED_QUERY_PREFIX", "")
 EMBED_DOC_PREFIX = os.environ.get("MNEMOMATIC_EMBED_DOC_PREFIX", "")
+
+# When set, startup rebuilds the vector index and re-embeds every stored item
+# with the current embedder/dim/prefixes, then serves normally. Remove the
+# flag after the run — it re-embeds on every boot while set.
+REINDEX = os.environ.get("MNEMOMATIC_REINDEX", "").strip().lower() in ("1", "true", "yes")
 
 # Tool annotation presets
 _ANN_READ_ONLY = ToolAnnotations(readOnlyHint=True, openWorldHint=False)
@@ -66,7 +71,7 @@ def _db() -> Database:
             # Double-check pattern: verify again inside lock
             if db is None:
                 os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
-                db = Database(DB_PATH)
+                db = Database(DB_PATH, allow_dim_change=REINDEX)
     return db
 
 
@@ -250,6 +255,65 @@ def _embed_document_body(title: str, content: str) -> tuple[list[float] | None, 
         chunks = [(c, e) for c, e in zip(texts, embeddings) if e is not None]
         return None, (chunks or None)
     return _embed_content(f"{title}\n{content}"), None
+
+
+def _run_reindex() -> None:
+    """Rebuild the vector index and re-embed every stored item.
+
+    Runs at startup when MNEMOMATIC_REINDEX is set — after a change of
+    embedding model, dimension, or task prefixes. Content tables are never
+    modified (timestamps included); only vectors and document chunks are
+    recomputed. Items whose embedding fails are logged and left FTS-only.
+    """
+    database = _db()
+    if _embedder() is None:
+        if database.dim_change_pending:
+            raise RuntimeError(
+                "MNEMOMATIC_REINDEX is set and the embedding dimension changed, but no "
+                "embedder is available — cannot rebuild the index. Configure an embedder "
+                "or restore the previous MNEMOMATIC_EMBED_DIM."
+            )
+        logger.error("MNEMOMATIC_REINDEX is set but no embedder is available — skipping reindex")
+        return
+
+    logger.warning(
+        "Reindex starting: rebuilding vector index at dim %d and re-embedding all content. "
+        "Remove MNEMOMATIC_REINDEX after this run — it re-embeds on every startup while set.",
+        EMBEDDING_DIM,
+    )
+    database.rebuild_vec_tables()
+
+    counts = {"documents": 0, "knowledge": 0, "notes": 0, "failed": 0}
+    for namespace in database.list_namespaces():
+        for doc in database.list_documents(namespace):
+            embedding, chunks = _embed_document_body(doc.title, doc.content)
+            database.replace_document_chunks(doc.id, chunks)
+            if embedding is not None:
+                database.set_embedding("document", doc.id, embedding)
+            if embedding is None and chunks is None:
+                counts["failed"] += 1
+                logger.error("Reindex: embedding failed for document %s (%r)", doc.id, doc.title)
+            else:
+                counts["documents"] += 1
+        for k in database.list_knowledge(namespace):
+            embedding = _embed_content(_knowledge_embed_text(k.subject, k.fact))
+            if embedding is not None and database.set_embedding("knowledge", k.id, embedding):
+                counts["knowledge"] += 1
+            else:
+                counts["failed"] += 1
+                logger.error("Reindex: embedding failed for knowledge %s (%r)", k.id, k.subject)
+        for note in database.list_notes(namespace):
+            embedding = _embed_content(_note_embed_text(note.title, note.content))
+            if embedding is not None and database.set_embedding("note", note.id, embedding):
+                counts["notes"] += 1
+            else:
+                counts["failed"] += 1
+                logger.error("Reindex: embedding failed for note %s (%r)", note.id, note.title)
+
+    logger.info(
+        "Reindex complete: %d documents, %d knowledge, %d notes re-embedded, %d failed",
+        counts["documents"], counts["knowledge"], counts["notes"], counts["failed"],
+    )
 
 
 # ── Tools ──
@@ -951,6 +1015,10 @@ def main():
     _db()
     logger.info("Initializing embedder...")
     _embedder()
+
+    # Opt-in full re-embed (model/dim/prefix changes) before serving traffic.
+    if REINDEX:
+        _run_reindex()
 
     # Always use unified ASGI app + Uvicorn code path
     # Authentication is optional based on API_KEY environment variable
