@@ -142,8 +142,17 @@ def _dict_factory(cursor: sqlite3.Cursor, row: tuple) -> dict:
 
 
 class Database:
-    def __init__(self, db_path: str | Path = ":memory:"):
+    def __init__(self, db_path: str | Path = ":memory:", allow_dim_change: bool = False):
+        """Args:
+            db_path: SQLite file path, or ":memory:".
+            allow_dim_change: when True, an EMBEDDING_DIM mismatch with the
+                stored dimension does not fail startup; instead
+                `dim_change_pending` is set and the caller is expected to run
+                rebuild_vec_tables() + re-embed (the MNEMOMATIC_REINDEX flow).
+        """
         self.db_path = str(db_path)
+        self.allow_dim_change = allow_dim_change
+        self.dim_change_pending = False
         self._local = threading.local()
         self._init_schema()
 
@@ -348,11 +357,18 @@ class Database:
         if version >= SCHEMA_VERSION:
             stored = conn.execute("SELECT value FROM schema_meta WHERE key = 'embed_dim'").fetchone()
             if stored and int(stored["value"]) != EMBEDDING_DIM:
+                if self.allow_dim_change:
+                    logger.warning(
+                        "Embedding dimension changing from %s to %d — vec tables will be "
+                        "rebuilt and all content re-embedded", stored["value"], EMBEDDING_DIM,
+                    )
+                    self.dim_change_pending = True
+                    return
                 raise RuntimeError(
                     f"Embedding dimension mismatch: database was created with dim {stored['value']} "
                     f"but MNEMOMATIC_EMBED_DIM={EMBEDDING_DIM}. Set MNEMOMATIC_EMBED_DIM={stored['value']} "
-                    f"to keep the existing index, or re-index by dropping the vec_* tables "
-                    f"(embeddings are recomputed on the next store of each item)."
+                    f"to keep the existing index, or set MNEMOMATIC_REINDEX=1 to rebuild the index and "
+                    f"re-embed all content at the new dimension on startup."
                 )
             return
 
@@ -374,10 +390,21 @@ class Database:
                     if rows:
                         found_dim = len(rows[0]["embedding"]) // 4
                         if found_dim != EMBEDDING_DIM:
+                            if self.allow_dim_change:
+                                # No point copying wrong-dim embeddings; the
+                                # reindex rebuild will replace these tables.
+                                conn.rollback()
+                                self.dim_change_pending = True
+                                logger.warning(
+                                    "Legacy embeddings have dim %d, configured %d — deferring "
+                                    "to reindex rebuild", found_dim, EMBEDDING_DIM,
+                                )
+                                return
                             raise RuntimeError(
                                 f"Cannot migrate {name}: stored embeddings have dim {found_dim} "
                                 f"but MNEMOMATIC_EMBED_DIM={EMBEDDING_DIM}. "
-                                f"Set MNEMOMATIC_EMBED_DIM={found_dim} and retry."
+                                f"Set MNEMOMATIC_EMBED_DIM={found_dim} and retry, or set "
+                                f"MNEMOMATIC_REINDEX=1 to re-embed everything at the new dimension."
                             )
                     conn.execute(f"DROP TABLE {name}")
                     logger.info("Migrating %s to partitioned schema (%d embeddings)", name, len(rows))
@@ -396,6 +423,49 @@ class Database:
         except Exception:
             conn.rollback()
             raise
+
+    def rebuild_vec_tables(self) -> None:
+        """Drop and recreate all vec0 tables empty, at the configured dimension.
+
+        The reindex flow: content tables are untouched; the caller re-embeds
+        every item afterwards. Also records the (possibly new) dimension and
+        schema version, and clears any pending dim change.
+        """
+        conn = self._get_conn()
+        conn.execute("BEGIN")
+        try:
+            for name in self._VEC_MIGRATION_SOURCES:
+                conn.execute(f"DROP TABLE IF EXISTS {name}")
+                self._create_vec_table(conn, name)
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('embed_dim', ?)",
+                (str(EMBEDDING_DIM),),
+            )
+            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        self.dim_change_pending = False
+        logger.info("Vector tables rebuilt empty at dim %d", EMBEDDING_DIM)
+
+    def set_embedding(self, item_type: str, item_id: str, embedding: list[float]) -> bool:
+        """Write an item's embedding without touching its content or timestamps.
+
+        Used by the reindex flow. Returns False when the item doesn't exist.
+        """
+        table = _ITEM_TYPE_TO_TABLE.get(item_type)
+        if table is None:
+            raise ValueError(f"Invalid type {item_type!r}: must be 'document', 'knowledge', or 'note'")
+        conn = self._get_conn()
+        row = conn.execute(
+            f"SELECT rowid, namespace FROM {table} WHERE id = ?", (item_id,)
+        ).fetchone()
+        if row is None:
+            return False
+        self._upsert_vec(conn, f"vec_{table}", row["rowid"], embedding, row["namespace"])
+        conn.commit()
+        return True
 
     # ── Generic CRUD helpers ──
 
