@@ -5,12 +5,15 @@ import os
 import socket
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger("mnemomatic")
 
 MODEL_PATH = os.environ.get("MNEMOMATIC_MODEL_PATH", "/app/model/model.onnx")
 TOKENIZER_PATH = os.environ.get("MNEMOMATIC_TOKENIZER_PATH", "/app/model/tokenizer.json")
 EMBED_TIMEOUT = int(os.environ.get("MNEMOMATIC_EMBED_TIMEOUT", "30"))
+# Concurrent requests used by HttpEmbedder.embed_batch (chunked documents).
+EMBED_CONCURRENCY = int(os.environ.get("MNEMOMATIC_EMBED_CONCURRENCY", "8"))
 
 
 class OnnxEmbedder:
@@ -58,6 +61,11 @@ class OnnxEmbedder:
     def mode(self) -> str:
         return "built-in ONNX"
 
+    # No embed_batch: benchmarked against real chunk workloads, a padded batch
+    # inference is neutral-to-slower than sequential embed() on CPU — ORT
+    # already parallelizes single runs across cores, and padding to the longest
+    # chunk wastes compute. The sequential fallback also keeps the lru_cache.
+
     def _embed(self, text: str) -> list[float]:
         np = self._np
         encoded = self.tokenizer.encode(text)
@@ -94,6 +102,30 @@ class HttpEmbedder:
     @property
     def mode(self) -> str:
         return "external HTTP"
+
+    def embed_batch(self, texts: list[str]) -> list[list[float] | None]:
+        """Embed many texts with concurrent requests.
+
+        The Ollama-compatible single-prompt endpoint has no batch API, so
+        chunked documents are embedded with up to EMBED_CONCURRENCY requests
+        in flight instead of one 30s-timeout round trip per chunk. Failed
+        items come back as None (order preserved) so the caller can drop just
+        those chunks, matching the per-chunk semantics of sequential embeds.
+        """
+        if not texts:
+            return []
+        results: list[list[float] | None] = [None] * len(texts)
+
+        def _one(i: int, text: str) -> None:
+            try:
+                results[i] = self.embed(text)
+            except Exception as e:
+                logger.error("Batch embedding failed for item %d/%d: %s", i + 1, len(texts), e)
+
+        with ThreadPoolExecutor(max_workers=min(EMBED_CONCURRENCY, len(texts))) as pool:
+            for i, text in enumerate(texts):
+                pool.submit(_one, i, text)
+        return results
 
     def _embed(self, text: str) -> list[float]:
         """Fetch embedding from remote HTTP endpoint.
