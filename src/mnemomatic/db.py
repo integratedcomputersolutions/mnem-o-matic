@@ -713,9 +713,18 @@ class Database:
 
     # ── Namespaces ──
 
-    def rename_namespace(self, old: str, new: str) -> dict[str, int]:
+    def rename_namespace(self, old: str, new: str) -> tuple[dict[str, int], dict[str, int]]:
+        """Move every item in `old` to `new`, merging into an existing target.
+
+        On a title/subject collision the moved item replaces the target's item,
+        mirroring the upsert semantics of the store_* operations. Returns
+        (moved counts, replaced counts) per table.
+        """
+        if old == new:
+            raise ValueError("old and new namespace are identical — nothing to rename")
         conn = self._get_conn()
         counts = {}
+        replaced = {}
         # vec0 forbids UPDATE on partition key columns, so the moved rows'
         # vectors are captured up front and rewritten under the new namespace.
         vec_rows = {
@@ -724,6 +733,18 @@ class Database:
         }
         try:
             for table in _TABLES:
+                key = _TABLE_TITLE_FIELD[table]
+                # The moved item wins a collision: drop the target's row (and
+                # its vector; document chunks cascade via FK + trigger) first.
+                losers = conn.execute(
+                    f"""DELETE FROM {table} WHERE namespace = ? AND {key} IN
+                        (SELECT {key} FROM {table} WHERE namespace = ?)
+                        RETURNING rowid""",
+                    (new, old),
+                ).fetchall()
+                replaced[table] = len(losers)
+                for loser in losers:
+                    conn.execute(f"DELETE FROM vec_{table} WHERE rowid = ?", (loser["rowid"],))
                 cur = conn.execute(
                     f"UPDATE {table} SET namespace = ? WHERE namespace = ?", (new, old)
                 )
@@ -736,12 +757,10 @@ class Database:
                         (row["rowid"], new, row["embedding"]),
                     )
             conn.commit()
-        except sqlite3.IntegrityError:
+        except Exception:
             conn.rollback()
-            raise ValueError(
-                f"Cannot rename '{old}' to '{new}': title/subject conflict with existing items in '{new}'"
-            )
-        return counts
+            raise
+        return counts, replaced
 
     def delete_namespace(self, namespace: str) -> dict[str, int]:
         conn = self._get_conn()
@@ -770,6 +789,19 @@ class Database:
             ORDER BY namespace
         """).fetchall()
         return [r["namespace"] for r in rows]
+
+    def namespace_counts(self) -> dict[str, dict[str, int]]:
+        """Per-namespace item counts for each content table, keyed by namespace.
+
+        One COUNT query per table — no row content is loaded. Namespaces come
+        back in sorted order (dicts preserve insertion order).
+        """
+        conn = self._get_conn()
+        counts: dict[str, dict[str, int]] = {}
+        for table in _TABLES:
+            for row in conn.execute(f"SELECT namespace, COUNT(*) AS n FROM {table} GROUP BY namespace"):
+                counts.setdefault(row["namespace"], dict.fromkeys(_TABLES, 0))[table] = row["n"]
+        return {ns: counts[ns] for ns in sorted(counts)}
 
     # ── Private helpers ──
 

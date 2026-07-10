@@ -81,8 +81,10 @@ rename_namespace(old_namespace="old-name", new_namespace="new-name")
 ```
 
 This also works as a merge — if `new_namespace` already exists, items from `old_namespace`
-are moved into it. The operation fails if there are title/subject conflicts between the two
-namespaces; resolve those first by deleting or renaming the conflicting items.
+are moved into it. On a title/subject conflict the moved item replaces the target's item
+(the same upsert semantics as the store tools); the response's `replaced` counts tell you
+how many target items were overwritten. If both versions matter, rename the colliding
+items first.
 
 Use `delete_namespace` to permanently remove all items in a namespace at once:
 

@@ -211,18 +211,19 @@ def build_routes(db_getter, token: str) -> list[Route]:
     def index(request: Request) -> Response:
         if not _authed(request, session_value):
             return RedirectResponse("/ui/login", status_code=303)
-        db = db_getter()
-        namespaces = db.list_namespaces()
-        if not namespaces:
+        # COUNT queries only — the old per-namespace list_*() calls loaded
+        # every row including full document content just to len() them.
+        counts = db_getter().namespace_counts()
+        if not counts:
             body = '<h1 class="h3 mb-3">Namespaces</h1><div class="alert alert-secondary">No data yet.</div>'
             return HTMLResponse(_page("Namespaces", body))
         rows = []
-        for ns in namespaces:
+        for ns, c in counts.items():
             rows.append(
                 f'<tr><td><a href="{_esc(_ns_href(ns))}">{_esc(ns)}</a></td>'
-                f'<td class="text-end">{len(db.list_documents(ns))}</td>'
-                f'<td class="text-end">{len(db.list_knowledge(ns))}</td>'
-                f'<td class="text-end">{len(db.list_notes(ns))}</td></tr>'
+                f'<td class="text-end">{c["documents"]}</td>'
+                f'<td class="text-end">{c["knowledge"]}</td>'
+                f'<td class="text-end">{c["notes"]}</td></tr>'
             )
         body = (
             '<h1 class="h3 mb-3">Namespaces</h1>'

@@ -781,22 +781,25 @@ def delete_namespace(namespace: str) -> dict:
 def rename_namespace(old_namespace: str, new_namespace: str) -> dict:
     """Rename a namespace across all documents, knowledge entries, and notes.
 
-    Moves every item in old_namespace to new_namespace atomically. Fails if
-    new_namespace already exists and has items with conflicting titles or subjects
-    — resolve conflicts first by deleting or renaming the colliding items.
+    Moves every item in old_namespace to new_namespace atomically. If
+    new_namespace already exists this acts as a merge: on a title/subject
+    collision the moved item replaces the target's item (the same upsert
+    semantics as the store tools). Check `replaced` in the response to see
+    how many target items were overwritten.
 
     Args:
         old_namespace: The namespace to rename.
-        new_namespace: The new name for the namespace.
+        new_namespace: The new name for the namespace. Must differ from old_namespace.
     """
     try:
-        counts = _db().rename_namespace(old_namespace, new_namespace)
+        counts, replaced = _db().rename_namespace(old_namespace, new_namespace)
     except ValueError as e:
         return {"error": str(e)}
     return {
         "old_namespace": old_namespace,
         "new_namespace": new_namespace,
         "renamed": counts,
+        "replaced": replaced,
         "total": sum(counts.values()),
     }
 
