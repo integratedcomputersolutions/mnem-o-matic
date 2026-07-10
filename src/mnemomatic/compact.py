@@ -16,6 +16,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 _COMPACT_DESCRIPTIONS: dict[str, str] = {
     "search":           "Search memory by keyword or concept. Modes: hybrid (default), fulltext, semantic.",
     "read":             "Fetch full content of an item by item_type (document/knowledge/note) and id.",
+    "list_items":       "List item summaries in a namespace, newest first. Paginate with limit/offset; response includes total.",
     "store_document":   "Save long-form content (specs, docs, code). Upsert by namespace+title.",
     "store_knowledge":  "Save a single atomic fact or decision. Upsert by namespace+subject.",
     "store_note":       "Save informal or rough content. Upsert by namespace+title.",
@@ -34,6 +35,7 @@ _COMPACT_DESCRIPTIONS: dict[str, str] = {
 _COMPACT_PARAMS: dict[str, dict[str, str]] = {
     "search":          {"mode": "hybrid|fulltext|semantic", "content_type": "all|documents|knowledge|notes", "namespace": "filter by namespace; omit for global search"},
     "read":            {"item_type": "document|knowledge|note"},
+    "list_items":      {"item_type": "document|knowledge|note"},
     "tag":             {"item_type": "document|knowledge|note"},
     "store_knowledge": {"confidence": "0.0-1.0"},
 }

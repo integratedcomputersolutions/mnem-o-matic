@@ -74,6 +74,16 @@ Namespaces scope content to a project or context. Use consistent names:
 
 When searching, omit `namespace` to search globally across all namespaces.
 
+To browse or inventory a namespace (rather than search by topic), use `list_items` — it
+returns paginated summaries, newest first:
+
+```
+list_items(item_type="document", namespace="myproject", limit=20, offset=0)
+```
+
+The response's `total` tells you when there are more pages (`offset + len(items) < total`).
+Summaries omit document/note bodies; `read` an item for its full content.
+
 Use `rename_namespace` to rename a namespace atomically across all content types:
 
 ```

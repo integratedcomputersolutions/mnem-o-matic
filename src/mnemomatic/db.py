@@ -46,6 +46,14 @@ _TABLE_RESOURCE_URI = {
     "notes": "mnemomatic://note/{id}",
 }
 
+# Summary columns returned by list_page — mirrors the list resources; never
+# includes document/note content so pages stay small.
+_LIST_SUMMARY_COLUMNS = {
+    "documents": ("id", "title", "mime_type", "tags", "updated_at"),
+    "knowledge": ("id", "subject", "fact", "confidence", "tags", "updated_at"),
+    "notes": ("id", "title", "source", "tags", "updated_at"),
+}
+
 
 def _chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[str]:
     """Split text into overlapping chunks, breaking at paragraph/sentence boundaries when possible.
@@ -790,6 +798,30 @@ class Database:
         """).fetchall()
         return [r["namespace"] for r in rows]
 
+    def list_page(self, item_type: str, namespace: str, limit: int, offset: int) -> tuple[list[dict], int]:
+        """One page of item summaries in a namespace, newest first.
+
+        Returns (items, total). Summaries carry the same fields as the list
+        resources — no document/note content, so a page stays small no matter
+        how large the underlying items are.
+        """
+        table = _ITEM_TYPE_TO_TABLE.get(item_type)
+        if table is None:
+            raise ValueError(f"Invalid type {item_type!r}: must be 'document', 'knowledge', or 'note'")
+        conn = self._get_conn()
+        total = conn.execute(
+            f"SELECT COUNT(*) AS n FROM {table} WHERE namespace = ?", (namespace,)
+        ).fetchone()["n"]
+        columns = ", ".join(_LIST_SUMMARY_COLUMNS[table])
+        rows = conn.execute(
+            f"SELECT {columns} FROM {table} WHERE namespace = ? "
+            f"ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+            (namespace, limit, offset),
+        ).fetchall()
+        for row in rows:
+            row["tags"] = _safe_json_loads(row["tags"], [], f"tags row {row['id']}")
+        return rows, total
+      
     def namespace_counts(self) -> dict[str, dict[str, int]]:
         """Per-namespace item counts for each content table, keyed by namespace.
 

@@ -496,6 +496,59 @@ class TestRenameNamespace(unittest.TestCase):
         self.assertEqual(self.db.namespace_counts(), {})
 
 
+# ── Paginated listing ──────────────────────────────────────────────────────────
+
+class TestListPage(unittest.TestCase):
+
+    def setUp(self):
+        self.db = Database(":memory:")
+        # 7 documents stored in order → "doc 6" is the most recently updated.
+        for i in range(7):
+            self.db.store_document(
+                Document(namespace="ns", title=f"doc {i}", content="body " * 100, tags=[f"t{i}"]),
+                None,
+            )
+
+    def tearDown(self):
+        self.db.close()
+
+    def test_page_window_and_total(self):
+        items, total = self.db.list_page("document", "ns", limit=3, offset=0)
+        self.assertEqual(total, 7)
+        self.assertEqual([i["title"] for i in items], ["doc 6", "doc 5", "doc 4"])
+        items, _ = self.db.list_page("document", "ns", limit=3, offset=3)
+        self.assertEqual([i["title"] for i in items], ["doc 3", "doc 2", "doc 1"])
+        items, _ = self.db.list_page("document", "ns", limit=3, offset=6)
+        self.assertEqual([i["title"] for i in items], ["doc 0"])
+
+    def test_offset_past_end_returns_empty_with_total(self):
+        items, total = self.db.list_page("document", "ns", limit=10, offset=100)
+        self.assertEqual(items, [])
+        self.assertEqual(total, 7)
+
+    def test_summaries_omit_content_and_parse_tags(self):
+        items, _ = self.db.list_page("document", "ns", limit=1, offset=0)
+        self.assertNotIn("content", items[0])
+        self.assertEqual(items[0]["tags"], ["t6"])
+        self.assertIn("mime_type", items[0])
+
+    def test_other_namespace_isolated(self):
+        self.assertEqual(self.db.list_page("document", "elsewhere", limit=5, offset=0), ([], 0))
+
+    def test_knowledge_and_note_summaries(self):
+        self.db.store_knowledge(Knowledge(namespace="ns", subject="s", fact="f", confidence=0.5), None)
+        self.db.store_note(Note(namespace="ns", title="n", content="c", source="voice"), None)
+        k_items, k_total = self.db.list_page("knowledge", "ns", limit=10, offset=0)
+        self.assertEqual((k_total, k_items[0]["subject"], k_items[0]["confidence"]), (1, "s", 0.5))
+        n_items, n_total = self.db.list_page("note", "ns", limit=10, offset=0)
+        self.assertEqual((n_total, n_items[0]["source"]), (1, "voice"))
+        self.assertNotIn("content", n_items[0])
+
+    def test_invalid_item_type_raises(self):
+        with self.assertRaises(ValueError):
+            self.db.list_page("widget", "ns", limit=5, offset=0)
+
+
 # ── Delete Namespace ────────────────────────────────────────────────────────────
 
 class TestDeleteNamespace(unittest.TestCase):
