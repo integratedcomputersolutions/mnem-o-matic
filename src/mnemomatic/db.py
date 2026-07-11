@@ -436,6 +436,7 @@ class Database:
         every item afterwards. Also records the (possibly new) dimension and
         schema version, and clears any pending dim change.
         """
+        logger.info("Rebuilding vector tables at dim %d...", EMBEDDING_DIM)
         conn = self._get_conn()
         conn.execute("BEGIN")
         try:
@@ -452,7 +453,7 @@ class Database:
             conn.rollback()
             raise
         self.dim_change_pending = False
-        logger.info("Vector tables rebuilt empty at dim %d", EMBEDDING_DIM)
+        logger.info("Vector tables rebuilt, re-embedding content...")
 
     def set_embedding(self, item_type: str, item_id: str, embedding: list[float]) -> bool:
         """Write an item's embedding without touching its content or timestamps.
