@@ -18,7 +18,7 @@ import mnemomatic.server as server
 from mnemomatic.db import SCHEMA_VERSION, Database
 from mnemomatic.models import Document, Knowledge, Note
 
-EMBEDDING_DIM = 384
+EMBEDDING_DIM = 768
 
 
 def _axis(i: int, dim: int = EMBEDDING_DIM) -> list[float]:

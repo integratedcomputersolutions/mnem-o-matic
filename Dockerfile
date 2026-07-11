@@ -13,47 +13,49 @@ RUN apt-get update && \
 COPY pyproject.toml README.md ./
 COPY src/ src/
 
-# ── Model download + quantization ─────────────────────────────────────────────
-# Isolated stage: downloads and quantizes the ONNX model, never copied to lite
+# ── Model download ─────────────────────────────────────────────────────────────
+# Isolated stage: downloads the ONNX embedding model, never copied to lite.
+#
+# EmbeddingGemma-300m, community ONNX export with the full sentence-transformers
+# stack (mean pooling, dense projection layers, normalization) baked into the
+# graph as a `sentence_embedding` output. The INT8-quantized variant is
+# published pre-made, so no quantization step is needed here. The graph file
+# references its weights by the fixed name `model_quantized.onnx_data`, which
+# must therefore keep that name next to model.onnx.
+#
+# Pinned to an immutable revision and verified against known SHA-256 digests so
+# a compromised or moved upstream file fails the build instead of shipping.
 
 FROM builder-base AS model-builder
 
-# Download the embedding model using fastembed (isolated — never copied to runtime)
-RUN pip install --no-cache-dir --no-compile --target=/tmp/dl fastembed
-ENV FASTEMBED_CACHE_PATH=/app/fastembed-cache
-RUN PYTHONPATH=/tmp/dl \
-    python3 -c "from fastembed import TextEmbedding; TextEmbedding('sentence-transformers/all-MiniLM-L6-v2')"
-
-# Extract only model.onnx + tokenizer.json from wherever fastembed cached them
 RUN python3 << 'PYTHON_EOF'
-import glob, os, shutil, hashlib
+import hashlib, os, urllib.request
 
-os.makedirs('/app/model', exist_ok=True)
-onnx = glob.glob('/app/fastembed-cache/**/*.onnx', recursive=True)
-tok  = glob.glob('/app/fastembed-cache/**/tokenizer.json', recursive=True)
-shutil.copy(onnx[0], '/app/model/model.onnx')
-shutil.copy(tok[0],  '/app/model/tokenizer.json')
+REPO = "onnx-community/embeddinggemma-300m-ONNX"
+REVISION = "5090578d9565bb06545b4552f76e6bc2c93e4a66"
+FILES = [
+    ("onnx/model_quantized.onnx", "model.onnx",
+     "172efde319fe1542dc41f31be6154910b05b78f7a861c265c4600eec906bd6d8"),
+    ("onnx/model_quantized.onnx_data", "model_quantized.onnx_data",
+     "705626e28e4c23c82ade34566b4197d97f534c12275fa406dfb71e9937d388c0"),
+    ("tokenizer.json", "tokenizer.json",
+     "4dda02faaf32bc91031dc8c88457ac272b00c1016cc679757d1c441b248b9c47"),
+]
 
-def sha256_file(path):
+os.makedirs("/app/model", exist_ok=True)
+for remote, local, expected in FILES:
+    url = f"https://huggingface.co/{REPO}/resolve/{REVISION}/{remote}"
+    dest = f"/app/model/{local}"
+    print(f"Downloading {url}")
+    urllib.request.urlretrieve(url, dest)
     h = hashlib.sha256()
-    with open(path, 'rb') as f:
-        while chunk := f.read(8192):
+    with open(dest, "rb") as f:
+        while chunk := f.read(1 << 20):
             h.update(chunk)
-    return h.hexdigest()
-
-onnx_hash = sha256_file('/app/model/model.onnx')
-tok_hash = sha256_file('/app/model/tokenizer.json')
-print(f'ONNX: {onnx[0]}')
-print(f'ONNX SHA256: {onnx_hash}')
-print(f'Tokenizer: {tok[0]}')
-print(f'Tokenizer SHA256: {tok_hash}')
+    if h.hexdigest() != expected:
+        raise SystemExit(f"SHA256 mismatch for {remote}: got {h.hexdigest()}, expected {expected}")
+    print(f"  OK {local}: {os.path.getsize(dest) / 1024 / 1024:.1f} MB, sha256 {expected}")
 PYTHON_EOF
-
-# Quantize the model from FP32 to INT8: ~4x smaller, ~2-3x faster inference on CPU
-# onnx package is only needed here at build time, never copied to the runtime image
-RUN pip install --no-cache-dir --no-compile --target=/tmp/quant onnx sympy && \
-    PYTHONPATH=/tmp/dl:/tmp/quant \
-    python3 -c "from onnxruntime.quantization import quantize_dynamic, QuantType; import os; orig=os.path.getsize('/app/model/model.onnx'); quantize_dynamic('/app/model/model.onnx','/app/model/model_int8.onnx',weight_type=QuantType.QUInt8); quant=os.path.getsize('/app/model/model_int8.onnx'); os.replace('/app/model/model_int8.onnx','/app/model/model.onnx'); print(f'Quantized: {orig/1024/1024:.1f}MB -> {quant/1024/1024:.1f}MB')"
 
 # ── Full builder ───────────────────────────────────────────────────────────────
 # Installs all deps including the ML stack (onnxruntime, numpy, tokenizers)

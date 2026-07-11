@@ -19,7 +19,7 @@ services:
       # - MNEMOMATIC_EMBED_URL=http://ollama:11434/v1/embeddings    # required for lite image (OpenAI-compatible: Ollama, llama.cpp, vLLM)
       # - MNEMOMATIC_EMBED_API=openai                               # or 'ollama' for the native /api/embeddings endpoint
       # - MNEMOMATIC_EMBED_MODEL=nomic-embed-text                   # model name for external embedder
-      # - MNEMOMATIC_EMBED_DIM=768                                  # embedding dimension (default: 384)
+      # - MNEMOMATIC_EMBED_DIM=768                                  # embedding dimension (default: 768, matches built-in EmbeddingGemma)
       # - MNEMOMATIC_CHUNK_THRESHOLD=2000                           # chars; docs longer than this are chunked (default: 2000)
       # - MNEMOMATIC_CHUNK_SIZE=1000                                # chars per chunk (default: 1000)
       # - MNEMOMATIC_CHUNK_OVERLAP=200                              # overlap between chunks in chars (default: 200)

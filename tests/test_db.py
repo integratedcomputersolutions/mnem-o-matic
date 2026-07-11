@@ -23,7 +23,7 @@ from mnemomatic.db import (
 )
 from mnemomatic.models import Document, Knowledge, Note
 
-EMBEDDING_DIM = 384
+EMBEDDING_DIM = 768
 
 
 def _fake_embedding(text: str) -> list[float]:

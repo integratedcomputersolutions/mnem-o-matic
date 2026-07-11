@@ -29,13 +29,17 @@ UI_TOKEN = os.environ.get("MNEMOMATIC_UI_TOKEN", "").strip()
 MAX_SEARCH_LIMIT = 100
 MAX_LIST_LIMIT = 200
 
-# Optional task prefixes for asymmetric embedding models (e.g. EmbeddingGemma
-# wants "task: search result | query: " on queries and "title: none | text: "
-# on stored content). Empty by default — symmetric models like the built-in
-# MiniLM need none. Prefixes are baked into stored vectors, so changing them
-# (like changing models) requires re-embedding existing content.
-EMBED_QUERY_PREFIX = os.environ.get("MNEMOMATIC_EMBED_QUERY_PREFIX", "")
-EMBED_DOC_PREFIX = os.environ.get("MNEMOMATIC_EMBED_DOC_PREFIX", "")
+# Task prefixes for asymmetric embedding models. The built-in EmbeddingGemma
+# model is trained with these prompts, so they apply by default when embedding
+# locally; external endpoints (MNEMOMATIC_EMBED_URL) default to no prefix since
+# their model is unknown. Explicit env vars always win — set them to "" for a
+# symmetric model behind a custom MNEMOMATIC_MODEL_PATH. Prefixes are baked
+# into stored vectors, so changing them (like changing models) requires
+# re-embedding existing content.
+_DEFAULT_QUERY_PREFIX = "" if EMBED_URL else "task: search result | query: "
+_DEFAULT_DOC_PREFIX = "" if EMBED_URL else "title: none | text: "
+EMBED_QUERY_PREFIX = os.environ.get("MNEMOMATIC_EMBED_QUERY_PREFIX", _DEFAULT_QUERY_PREFIX)
+EMBED_DOC_PREFIX = os.environ.get("MNEMOMATIC_EMBED_DOC_PREFIX", _DEFAULT_DOC_PREFIX)
 
 # When set, startup rebuilds the vector index and re-embeds every stored item
 # with the current embedder/dim/prefixes, then serves normally. Remove the

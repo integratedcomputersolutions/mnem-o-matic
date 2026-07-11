@@ -9,7 +9,7 @@
 
 | Profile           | Image size | Embeddings                          | Semantic search |
 | ----------------- | ---------- | ----------------------------------- | --------------- |
-| `full` (default)  | ~316 MB    | Built-in ONNX model (CPU)           | Yes             |
+| `full` (default)  | ~650 MB    | Built-in EmbeddingGemma-300m ONNX (CPU) | Yes         |
 | `lite` + Ollama   | ~120 MB    | External via `MNEMOMATIC_EMBED_URL` | Yes             |
 | `lite` (FTS-only) | ~120 MB    | None                                | No              |
 
@@ -158,7 +158,7 @@ docker compose up --build
 
 The server is accessible at `https://your-server-hostname/mcp`.
 
-The first build takes a few minutes — it downloads and quantizes the embedding model. Subsequent builds use the cached layer.
+The first build takes a few minutes — it downloads the embedding model (~330 MB, checksum-verified). Subsequent builds use the cached layer.
 
 ### Lite image with Ollama
 
@@ -211,16 +211,17 @@ Environment variables (set in `docker-compose.yml` or passed to Docker):
 | `MNEMOMATIC_EMBED_API`      | `openai`                    | Endpoint wire format: `openai` (llama.cpp, vLLM, LM Studio, Ollama `/v1/embeddings`) or `ollama` (native `/api/embeddings`) |
 | `MNEMOMATIC_EMBED_MODEL`    | *(empty)*                   | Model name passed to the external embedder               |
 | `MNEMOMATIC_EMBED_CONCURRENCY` | `8`                      | Parallel requests to the external embedder when embedding chunked documents |
-| `MNEMOMATIC_EMBED_DIM`      | `384`                       | Embedding dimension — must match the model's output      |
-| `MNEMOMATIC_EMBED_QUERY_PREFIX` | *(empty)*               | Task prefix prepended to search queries before embedding (asymmetric models) |
-| `MNEMOMATIC_EMBED_DOC_PREFIX` | *(empty)*                 | Task prefix prepended to stored content before embedding (asymmetric models) |
+| `MNEMOMATIC_EMBED_DIM`      | `768`                       | Embedding dimension — must match the model's output (768 = built-in EmbeddingGemma) |
+| `MNEMOMATIC_EMBED_QUERY_PREFIX` | *(see note)*            | Task prefix prepended to search queries before embedding. Defaults to EmbeddingGemma's `task: search result \| query: ` when using the built-in model, empty when `MNEMOMATIC_EMBED_URL` is set. |
+| `MNEMOMATIC_EMBED_DOC_PREFIX` | *(see note)*              | Task prefix prepended to stored content before embedding. Defaults to EmbeddingGemma's `title: none \| text: ` when using the built-in model, empty when `MNEMOMATIC_EMBED_URL` is set. |
 | `MNEMOMATIC_REINDEX`        | *(unset)*                   | Set to `1` for one startup to rebuild the vector index and re-embed all content (after changing model/dim/prefixes). Remove afterwards. |
 | `MNEMOMATIC_MODEL_PATH`     | `/app/model/model.onnx`     | Path to the ONNX model file (full image only)            |
 | `MNEMOMATIC_TOKENIZER_PATH` | `/app/model/tokenizer.json` | Path to the tokenizer file (full image only)             |
+| `MNEMOMATIC_MODEL_MAX_TOKENS` | `2048`                    | Token truncation limit for the built-in model (2048 = EmbeddingGemma's context; use 512 for MiniLM-class models behind a custom `MNEMOMATIC_MODEL_PATH`) |
 
 > **Changing `MNEMOMATIC_EMBED_DIM`:** the embedding dimension is baked into the database's vector tables at creation. The server records it and refuses to start on a mismatch rather than corrupting the index — unless `MNEMOMATIC_REINDEX=1` is set, in which case it rebuilds the index at the new dimension (see below).
 
-> **Asymmetric embedding models:** some models are trained with task prefixes that differ between queries and stored content — e.g. EmbeddingGemma expects `task: search result | query: ` on queries and `title: none | text: ` on documents. Set `MNEMOMATIC_EMBED_QUERY_PREFIX` and `MNEMOMATIC_EMBED_DOC_PREFIX` accordingly (include the trailing space). Prefixes are applied at embedding time only and never appear in stored content or search snippets. Because the document prefix is baked into stored vectors, changing prefixes — like changing models — requires re-embedding existing content. The built-in MiniLM model is symmetric: leave both unset.
+> **Asymmetric embedding models:** some models are trained with task prefixes that differ between queries and stored content — e.g. EmbeddingGemma expects `task: search result | query: ` on queries and `title: none | text: ` on documents. The built-in model *is* EmbeddingGemma, so these prompts apply automatically when embedding locally; when `MNEMOMATIC_EMBED_URL` points at an external endpoint, both prefixes default to empty and must be set explicitly for asymmetric models (include the trailing space). Prefixes are applied at embedding time only and never appear in stored content or search snippets. Because the document prefix is baked into stored vectors, changing prefixes — like changing models — requires re-embedding existing content. For a symmetric model behind a custom `MNEMOMATIC_MODEL_PATH`, set both prefixes to the empty string explicitly.
 
 ## Switching Embedding Models
 
@@ -242,6 +243,10 @@ Changing the embedding model, dimension, or task prefixes invalidates every stor
 3. **Remove `MNEMOMATIC_REINDEX`** and restart once more — while set, the (harmless but wasteful) re-embed runs on every boot.
 
 Items whose embedding fails during the run are logged and remain findable via fulltext search; re-run the reindex to retry them. Fulltext search is unaffected throughout.
+
+### Upgrading a database created with the MiniLM-era image
+
+Images built before the switch to EmbeddingGemma bundled `all-MiniLM-L6-v2` (384 dimensions). An existing database created with one of them will make the new image fail fast at startup with a dimension mismatch. The fix is the same reindex flow: set `MNEMOMATIC_REINDEX=1`, restart once (the index is rebuilt at 768 dimensions and all content re-embedded with EmbeddingGemma), then remove the flag. Content, timestamps, and fulltext search are untouched.
 
 ## Schema Migrations
 
