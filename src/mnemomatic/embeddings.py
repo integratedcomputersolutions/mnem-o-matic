@@ -8,14 +8,18 @@ import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
+from mnemomatic import model_config
+
 logger = logging.getLogger("mnemomatic")
 
 MODEL_PATH = os.environ.get("MNEMOMATIC_MODEL_PATH", "/app/model/model.onnx")
 TOKENIZER_PATH = os.environ.get("MNEMOMATIC_TOKENIZER_PATH", "/app/model/tokenizer.json")
-# Token truncation limit for the built-in model. EmbeddingGemma accepts 2048;
-# override when pointing MNEMOMATIC_MODEL_PATH at a model with a shorter
-# context (e.g. 512 for MiniLM-class models).
-MODEL_MAX_TOKENS = int(os.environ.get("MNEMOMATIC_MODEL_MAX_TOKENS", "2048"))
+# Token truncation limit for the built-in model. Defaults to the bundled
+# model's context from model_config.json (2048 for EmbeddingGemma, 512 for
+# MiniLM/e5), falling back to 512 when no config exists.
+MODEL_MAX_TOKENS = int(os.environ.get(
+    "MNEMOMATIC_MODEL_MAX_TOKENS", model_config.CONFIG.get("max_tokens", 512)
+))
 EMBED_TIMEOUT = int(os.environ.get("MNEMOMATIC_EMBED_TIMEOUT", "30"))
 # Concurrent requests used by HttpEmbedder.embed_batch (chunked documents).
 EMBED_CONCURRENCY = int(os.environ.get("MNEMOMATIC_EMBED_CONCURRENCY", "8"))
@@ -49,11 +53,11 @@ class OnnxEmbedder:
 
     Supports two graph shapes:
 
-    - Sentence-transformers exports (the bundled EmbeddingGemma) declare a
-      ``sentence_embedding`` output with pooling, projection layers, and
+    - Sentence-transformers exports (the EmbeddingGemma build option) declare
+      a ``sentence_embedding`` output with pooling, projection layers, and
       normalization baked into the graph — it is used as-is.
-    - Plain transformer exports (e.g. MiniLM via MNEMOMATIC_MODEL_PATH) only
-      produce token embeddings; those are mean-pooled and normalized here.
+    - Plain transformer exports (MiniLM, multilingual-e5) only produce token
+      embeddings; those are mean-pooled and normalized here.
     """
 
     def __init__(self):
@@ -101,7 +105,8 @@ class OnnxEmbedder:
 
     @property
     def mode(self) -> str:
-        return "built-in ONNX"
+        name = model_config.CONFIG.get("model")
+        return f"built-in ONNX ({name})" if name else "built-in ONNX"
 
     # No embed_batch: benchmarked against real chunk workloads, a padded batch
     # inference is neutral-to-slower than sequential embed() on CPU — ORT

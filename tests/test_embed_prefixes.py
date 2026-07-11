@@ -2,9 +2,10 @@
 
 MNEMOMATIC_EMBED_QUERY_PREFIX / MNEMOMATIC_EMBED_DOC_PREFIX are prepended to
 text at embedding time only: queries get the query prefix, stored content gets
-the document prefix, and stored text/snippets never contain either. The
-built-in EmbeddingGemma model gets its task prompts by default; external
-endpoints (MNEMOMATIC_EMBED_URL) default to empty prefixes.
+the document prefix, and stored text/snippets never contain either. Defaults
+come from the bundled model's model_config.json (asymmetric models like
+EmbeddingGemma record their task prompts there); without a config file — as in
+this test environment — and for external endpoints, defaults are empty.
 """
 
 import sys
@@ -105,19 +106,13 @@ class TestDocumentPrefix(PrefixTestBase):
 
 
 class TestPrefixDefaults(unittest.TestCase):
-    def test_builtin_model_defaults_to_gemma_task_prompts(self):
-        # No MNEMOMATIC_EMBED_URL in the test environment → the built-in
-        # EmbeddingGemma defaults apply.
-        self.assertEqual(server.EMBED_QUERY_PREFIX, "task: search result | query: ")
-        self.assertEqual(server.EMBED_DOC_PREFIX, "title: none | text: ")
-
-    def test_explicit_empty_prefixes_leave_text_unchanged(self):
+    def test_no_model_config_means_empty_prefixes(self):
+        # No model_config.json in the test environment → symmetric defaults,
+        # byte-identical embedding input.
+        self.assertEqual(server.EMBED_QUERY_PREFIX, "")
+        self.assertEqual(server.EMBED_DOC_PREFIX, "")
         recorded = []
-        with (
-            patch.object(server, "EMBED_QUERY_PREFIX", ""),
-            patch.object(server, "EMBED_DOC_PREFIX", ""),
-            patch.object(server, "_safe_embed", side_effect=lambda t: recorded.append(t) or EMBEDDING),
-        ):
+        with patch.object(server, "_safe_embed", side_effect=lambda t: recorded.append(t) or EMBEDDING):
             server._embed_query("hello")
             server._embed_content("world")
         self.assertEqual(recorded, ["hello", "world"])

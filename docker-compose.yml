@@ -7,6 +7,9 @@ services:
     build:
       context: .
       target: full          # use 'lite' for the smaller image (requires MNEMOMATIC_EMBED_URL)
+      # args:
+      #   EMBED_MODEL: embeddinggemma  # built-in model: minilm (default) | multilingual-e5-small | embeddinggemma
+      #                                # switching models on an existing database needs one MNEMOMATIC_REINDEX=1 restart
     # No ports exposed directly — all traffic goes through Caddy
     # (or uncomment below for direct access: ports: ["${PORT:-8686}:8000"])
     volumes:
@@ -19,8 +22,8 @@ services:
       # - MNEMOMATIC_EMBED_URL=http://ollama:11434/v1/embeddings    # required for lite image (OpenAI-compatible: Ollama, llama.cpp, vLLM)
       # - MNEMOMATIC_EMBED_API=openai                               # or 'ollama' for the native /api/embeddings endpoint
       # - MNEMOMATIC_EMBED_MODEL=nomic-embed-text                   # model name for external embedder
-      # - MNEMOMATIC_EMBED_DIM=768                                  # embedding dimension (default: 768, matches built-in EmbeddingGemma)
-      # - MNEMOMATIC_REINDEX=1                                      # one-time: rebuild the vector index and re-embed all content at startup (after changing model/dim/prefixes, e.g. upgrading a 384-dim MiniLM-era database). Remove after the run — it re-embeds on every boot while set
+      # - MNEMOMATIC_EMBED_DIM=768                                  # embedding dimension (default: the bundled model's; 384 without one)
+      # - MNEMOMATIC_REINDEX=1                                      # one-time: rebuild the vector index and re-embed all content at startup (after changing model/dim/prefixes). Remove after the run — it re-embeds on every boot while set
       # - MNEMOMATIC_CHUNK_THRESHOLD=2000                           # chars; docs longer than this are chunked (default: 2000)
       # - MNEMOMATIC_CHUNK_SIZE=1000                                # chars per chunk (default: 1000)
       # - MNEMOMATIC_CHUNK_OVERLAP=200                              # overlap between chunks in chars (default: 200)

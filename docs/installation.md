@@ -9,11 +9,11 @@
 
 | Profile           | Image size | Embeddings                          | Semantic search |
 | ----------------- | ---------- | ----------------------------------- | --------------- |
-| `full` (default)  | ~650 MB    | Built-in EmbeddingGemma-300m ONNX (CPU) | Yes         |
+| `full` (default)  | ~320–650 MB | Built-in ONNX model (CPU), selectable at build time | Yes |
 | `lite` + Ollama   | ~120 MB    | External via `MNEMOMATIC_EMBED_URL` | Yes             |
 | `lite` (FTS-only) | ~120 MB    | None                                | No              |
 
-Choose the profile that fits your setup. The `full` image is self-contained and works out of the box. The `lite` image is significantly smaller and delegates embedding to an Ollama instance (or any compatible API), or runs keyword-only search if no embedder is configured.
+Choose the profile that fits your setup. The `full` image is self-contained and works out of the box; its bundled embedding model is chosen with the `EMBED_MODEL` build argument (see [Choosing the built-in embedding model](#choosing-the-built-in-embedding-model)). The `lite` image is significantly smaller and delegates embedding to an Ollama instance (or any compatible API), or runs keyword-only search if no embedder is configured.
 
 ## TLS Setup (LAN deployments)
 
@@ -158,7 +158,34 @@ docker compose up --build
 
 The server is accessible at `https://your-server-hostname/mcp`.
 
-The first build takes a few minutes — it downloads the embedding model (~330 MB, checksum-verified). Subsequent builds use the cached layer.
+The first build takes a few minutes — it downloads the embedding model (checksum-verified; ~90–330 MB depending on `EMBED_MODEL`). Subsequent builds use the cached layer.
+
+### Choosing the built-in embedding model
+
+The `full` image bundles one of three embedding models, selected with the `EMBED_MODEL` build argument:
+
+| `EMBED_MODEL` | Dimensions | Languages | Speed (CPU) | Model size | Notes |
+| ------------- | ---------- | --------- | ----------- | ---------- | ----- |
+| `minilm` (default) | 384 | English | ~20 ms/embed | ~23 MB | `all-MiniLM-L6-v2` — fastest and smallest; compatible with databases created by earlier releases |
+| `multilingual-e5-small` | 384 | ~100 | ~40 ms/embed | ~115 MB | Solid multilingual retrieval at near-MiniLM speed |
+| `embeddinggemma` | 768 | 100+ | ~200 ms/embed | ~330 MB | EmbeddingGemma-300m — best retrieval quality, 2048-token context; weights under the [Gemma Terms of Use](https://ai.google.dev/gemma/terms) |
+
+```bash
+# Plain docker build
+docker build --target full --build-arg EMBED_MODEL=embeddinggemma -t mnemomatic .
+```
+
+Or in `docker-compose.yml`:
+
+```yaml
+    build:
+      context: .
+      target: full
+      args:
+        EMBED_MODEL: embeddinggemma
+```
+
+The build bakes the model weights plus a `model_config.json` (dimension, token limit, task prefixes) into the image, and the server reads its defaults from that file — no runtime environment changes are needed when picking a different model. **Changing the model for an existing database requires one `MNEMOMATIC_REINDEX=1` restart** (see [Switching Embedding Models](#switching-embedding-models)); until then the server refuses to start on a dimension mismatch rather than corrupting the index.
 
 ### Lite image with Ollama
 
@@ -211,21 +238,34 @@ Environment variables (set in `docker-compose.yml` or passed to Docker):
 | `MNEMOMATIC_EMBED_API`      | `openai`                    | Endpoint wire format: `openai` (llama.cpp, vLLM, LM Studio, Ollama `/v1/embeddings`) or `ollama` (native `/api/embeddings`) |
 | `MNEMOMATIC_EMBED_MODEL`    | *(empty)*                   | Model name passed to the external embedder               |
 | `MNEMOMATIC_EMBED_CONCURRENCY` | `8`                      | Parallel requests to the external embedder when embedding chunked documents |
-| `MNEMOMATIC_EMBED_DIM`      | `768`                       | Embedding dimension — must match the model's output (768 = built-in EmbeddingGemma) |
-| `MNEMOMATIC_EMBED_QUERY_PREFIX` | *(see note)*            | Task prefix prepended to search queries before embedding. Defaults to EmbeddingGemma's `task: search result \| query: ` when using the built-in model, empty when `MNEMOMATIC_EMBED_URL` is set. |
-| `MNEMOMATIC_EMBED_DOC_PREFIX` | *(see note)*              | Task prefix prepended to stored content before embedding. Defaults to EmbeddingGemma's `title: none \| text: ` when using the built-in model, empty when `MNEMOMATIC_EMBED_URL` is set. |
+| `MNEMOMATIC_EMBED_DIM`      | *(bundled model's; else 384)* | Embedding dimension — must match the model's output. Defaults to the bundled model's dimension from `model_config.json`; 384 without a config file. |
+| `MNEMOMATIC_EMBED_QUERY_PREFIX` | *(bundled model's; else empty)* | Task prefix prepended to search queries before embedding (asymmetric models). Defaults from `model_config.json`; empty when `MNEMOMATIC_EMBED_URL` is set. |
+| `MNEMOMATIC_EMBED_DOC_PREFIX` | *(bundled model's; else empty)* | Task prefix prepended to stored content before embedding (asymmetric models). Defaults from `model_config.json`; empty when `MNEMOMATIC_EMBED_URL` is set. |
 | `MNEMOMATIC_REINDEX`        | *(unset)*                   | Set to `1` for one startup to rebuild the vector index and re-embed all content (after changing model/dim/prefixes). Remove afterwards. |
 | `MNEMOMATIC_MODEL_PATH`     | `/app/model/model.onnx`     | Path to the ONNX model file (full image only)            |
 | `MNEMOMATIC_TOKENIZER_PATH` | `/app/model/tokenizer.json` | Path to the tokenizer file (full image only)             |
-| `MNEMOMATIC_MODEL_MAX_TOKENS` | `2048`                    | Token truncation limit for the built-in model (2048 = EmbeddingGemma's context; use 512 for MiniLM-class models behind a custom `MNEMOMATIC_MODEL_PATH`) |
+| `MNEMOMATIC_MODEL_CONFIG_PATH` | `/app/model/model_config.json` | Path to the bundled model's metadata file, written by the Docker build |
+| `MNEMOMATIC_MODEL_MAX_TOKENS` | *(bundled model's; else 512)* | Token truncation limit for the built-in model (2048 for `embeddinggemma`, 512 for the others) |
 
 > **Changing `MNEMOMATIC_EMBED_DIM`:** the embedding dimension is baked into the database's vector tables at creation. The server records it and refuses to start on a mismatch rather than corrupting the index — unless `MNEMOMATIC_REINDEX=1` is set, in which case it rebuilds the index at the new dimension (see below).
 
-> **Asymmetric embedding models:** some models are trained with task prefixes that differ between queries and stored content — e.g. EmbeddingGemma expects `task: search result | query: ` on queries and `title: none | text: ` on documents. The built-in model *is* EmbeddingGemma, so these prompts apply automatically when embedding locally; when `MNEMOMATIC_EMBED_URL` points at an external endpoint, both prefixes default to empty and must be set explicitly for asymmetric models (include the trailing space). Prefixes are applied at embedding time only and never appear in stored content or search snippets. Because the document prefix is baked into stored vectors, changing prefixes — like changing models — requires re-embedding existing content. For a symmetric model behind a custom `MNEMOMATIC_MODEL_PATH`, set both prefixes to the empty string explicitly.
+> **Asymmetric embedding models:** some models are trained with task prefixes that differ between queries and stored content — e.g. EmbeddingGemma expects `task: search result | query: ` on queries and `title: none | text: ` on documents, and multilingual-e5 expects `query: ` / `passage: `. For the built-in model the correct prompts are recorded in `model_config.json` at build time and apply automatically. When `MNEMOMATIC_EMBED_URL` points at an external endpoint, both prefixes default to empty and must be set explicitly for asymmetric models (include the trailing space). Prefixes are applied at embedding time only and never appear in stored content or search snippets. Because the document prefix is baked into stored vectors, changing prefixes — like changing models — requires re-embedding existing content.
 
 ## Switching Embedding Models
 
-Changing the embedding model, dimension, or task prefixes invalidates every stored vector — old and new embeddings live in different spaces and must not be compared. The switch is a config change plus one flagged restart:
+Changing the embedding model, dimension, or task prefixes invalidates every stored vector — old and new embeddings live in different spaces and must not be compared. The switch is a config change plus one flagged restart.
+
+**Switching between built-in models** — rebuild with a different `EMBED_MODEL` build argument and set `MNEMOMATIC_REINDEX=1` for the first start:
+
+```bash
+docker compose build --build-arg EMBED_MODEL=embeddinggemma
+# set MNEMOMATIC_REINDEX=1 in docker-compose.yml, then:
+docker compose up -d
+```
+
+The bundled `model_config.json` carries the new dimension and prefixes, so no other settings change.
+
+**Switching to an external embedder:**
 
 1. Update the embedder settings — e.g. for EmbeddingGemma served by llama.cpp
    (`llama-server -m embeddinggemma-300M-Q8_0.gguf --embeddings --pooling mean`)
@@ -244,9 +284,7 @@ Changing the embedding model, dimension, or task prefixes invalidates every stor
 
 Items whose embedding fails during the run are logged and remain findable via fulltext search; re-run the reindex to retry them. Fulltext search is unaffected throughout.
 
-### Upgrading a database created with the MiniLM-era image
-
-Images built before the switch to EmbeddingGemma bundled `all-MiniLM-L6-v2` (384 dimensions). An existing database created with one of them will make the new image fail fast at startup with a dimension mismatch. The fix is the same reindex flow: set `MNEMOMATIC_REINDEX=1`, restart once (the index is rebuilt at 768 dimensions and all content re-embedded with EmbeddingGemma), then remove the flag. Content, timestamps, and fulltext search are untouched.
+> **Compatibility note:** the default `minilm` build uses the same model and quantization pipeline as earlier releases, so databases created by previous images keep working without a reindex. Only an actual model change triggers the flow above.
 
 ## Schema Migrations
 

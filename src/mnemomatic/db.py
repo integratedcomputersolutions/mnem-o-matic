@@ -9,14 +9,16 @@ from pathlib import Path
 
 import sqlite_vec
 
+from mnemomatic import model_config
 from mnemomatic.models import Document, Knowledge, Note, SearchResult
 
 logger = logging.getLogger("mnemomatic")
 
-# Default matches the built-in EmbeddingGemma model (768). Databases created
-# with the previous built-in MiniLM model (384) need MNEMOMATIC_REINDEX=1 once
+# Defaults to the bundled model's dimension (model_config.json, written by the
+# Docker build for the EMBED_MODEL chosen), falling back to 384 (MiniLM-class)
+# when no config exists. Changing dimension requires MNEMOMATIC_REINDEX=1 once
 # to rebuild the index — the server fails fast on the mismatch otherwise.
-EMBEDDING_DIM = int(os.environ.get("MNEMOMATIC_EMBED_DIM", "768"))
+EMBEDDING_DIM = int(os.environ.get("MNEMOMATIC_EMBED_DIM", model_config.CONFIG.get("dim", 384)))
 BUSY_TIMEOUT_MS = 5000
 
 # Bumped whenever the on-disk schema changes shape. Stored in PRAGMA
