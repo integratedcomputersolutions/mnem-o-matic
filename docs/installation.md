@@ -9,11 +9,11 @@
 
 | Profile           | Image size | Embeddings                          | Semantic search |
 | ----------------- | ---------- | ----------------------------------- | --------------- |
-| `full` (default)  | ~316 MB    | Built-in ONNX model (CPU)           | Yes             |
+| `full` (default)  | ~320–650 MB | Built-in ONNX model (CPU), selectable at build time | Yes |
 | `lite` + Ollama   | ~120 MB    | External via `MNEMOMATIC_EMBED_URL` | Yes             |
 | `lite` (FTS-only) | ~120 MB    | None                                | No              |
 
-Choose the profile that fits your setup. The `full` image is self-contained and works out of the box. The `lite` image is significantly smaller and delegates embedding to an Ollama instance (or any compatible API), or runs keyword-only search if no embedder is configured.
+Choose the profile that fits your setup. The `full` image is self-contained and works out of the box; its bundled embedding model is chosen with the `EMBED_MODEL` build argument (see [Choosing the built-in embedding model](#choosing-the-built-in-embedding-model)). The `lite` image is significantly smaller and delegates embedding to an Ollama instance (or any compatible API), or runs keyword-only search if no embedder is configured.
 
 ## TLS Setup (LAN deployments)
 
@@ -158,7 +158,44 @@ docker compose up --build
 
 The server is accessible at `https://your-server-hostname/mcp`.
 
-The first build takes a few minutes — it downloads and quantizes the embedding model. Subsequent builds use the cached layer.
+The first build takes a few minutes — it downloads the embedding model (checksum-verified; ~90–330 MB depending on `EMBED_MODEL`). Subsequent builds use the cached layer.
+
+### Choosing the built-in embedding model
+
+The `full` image bundles one of three embedding models, selected with the `EMBED_MODEL` build argument:
+
+| `EMBED_MODEL` | Dimensions | Languages | Query embed (CPU) | Model size | RAM (running) | Notes |
+| ------------- | ---------- | --------- | ----------------- | ---------- | ------------- | ----- |
+| `minilm` (default) | 384 | English | ~10–15 ms | ~23 MB | ~240 MB | `all-MiniLM-L6-v2` — fastest and smallest; compatible with databases created by earlier releases |
+| `gte-multilingual-base` | 768 | ~70 | ~12 ms | ~325 MB | ~880 MB | Strong multilingual retrieval at near-MiniLM query speed; 8192-token context; no task prefixes |
+| `embeddinggemma` | 768 | 100+ | ~160–225 ms | ~330 MB | ~1.2 GB | EmbeddingGemma-300m — best retrieval quality, 2048-token context; weights under the [Gemma Terms of Use](https://ai.google.dev/gemma/terms) |
+
+RAM figures are steady-state container usage measured on the same production deployment (they include the server itself plus SQLite's page cache and memory-mapped database file, not just the model). The INT8 weights are compact on disk, but `onnxruntime` expands parts of the larger models at load time, so their resident memory runs well above the model file size.
+
+#### Which one should I pick?
+
+The models were compared on the same real-world corpus (~90 items of technical notes and documents) on a modest x86 server, measuring end-to-end MCP search latency and ranking quality on probe queries:
+
+- **`minilm` — English content, smallest image.** Semantic search completes in ~30 ms end to end. On English technical content it ranked the correct result first with solid margins in every probe. Its limits: English only, and as a symmetric 2021-era model it is the weakest of the three at paraphrase-style queries where the query shares no vocabulary with the stored text.
+- **`gte-multilingual-base` — multilingual content without the latency cost.** Queries embed in ~12 ms — as fast as MiniLM — because most of its parameters sit in the vocabulary matrix, which costs little for short inputs (longer chunks take ~150 ms each at store time). Cross-lingual retrieval is strong: in probes, an Italian query separated the correct English answer from a distractor *better* than the equivalent English query did (0.71 vs 0.32). No task prefixes needed. Its trade-off is image size (~325 MB, Gemma-class). *(`multilingual-e5-small` was evaluated for this slot and dropped: it underperformed MiniLM on English content and its compressed score range made rankings unreliable.)*
+- **`embeddinggemma` — best retrieval quality, paraphrase-robust.** The quality winner: it separates relevant from irrelevant results by an order of magnitude larger margins and reliably resolves zero-word-overlap queries ("how do I get back into my account?" → password-reset content) that smaller models rank flat or miss. The cost is CPU time: ~200 ms per query embedding (imperceptible in agent workflows) and ~0.5–1 s per chunk when storing large documents — a 20-chunk document takes ~10–20 s to store. Pick it unless storage throughput or very weak hardware is a concern.
+
+```bash
+# Plain docker build
+docker build --target full --build-arg EMBED_MODEL=embeddinggemma -t mnemomatic .
+```
+
+Or in `docker-compose.yml`:
+
+```yaml
+    build:
+      context: .
+      target: full
+      args:
+        EMBED_MODEL: embeddinggemma
+```
+
+The build bakes the model weights plus a `model_config.json` (dimension, token limit, task prefixes) into the image, and the server reads its defaults from that file — no runtime environment changes are needed when picking a different model. **Changing the model for an existing database requires one `MNEMOMATIC_REINDEX=1` restart** (see [Switching Embedding Models](#switching-embedding-models)); until then the server refuses to start on a dimension mismatch rather than corrupting the index.
 
 ### Lite image with Ollama
 
@@ -211,20 +248,34 @@ Environment variables (set in `docker-compose.yml` or passed to Docker):
 | `MNEMOMATIC_EMBED_API`      | `openai`                    | Endpoint wire format: `openai` (llama.cpp, vLLM, LM Studio, Ollama `/v1/embeddings`) or `ollama` (native `/api/embeddings`) |
 | `MNEMOMATIC_EMBED_MODEL`    | *(empty)*                   | Model name passed to the external embedder               |
 | `MNEMOMATIC_EMBED_CONCURRENCY` | `8`                      | Parallel requests to the external embedder when embedding chunked documents |
-| `MNEMOMATIC_EMBED_DIM`      | `384`                       | Embedding dimension — must match the model's output      |
-| `MNEMOMATIC_EMBED_QUERY_PREFIX` | *(empty)*               | Task prefix prepended to search queries before embedding (asymmetric models) |
-| `MNEMOMATIC_EMBED_DOC_PREFIX` | *(empty)*                 | Task prefix prepended to stored content before embedding (asymmetric models) |
+| `MNEMOMATIC_EMBED_DIM`      | *(bundled model's; else 384)* | Embedding dimension — must match the model's output. Defaults to the bundled model's dimension from `model_config.json`; 384 without a config file. |
+| `MNEMOMATIC_EMBED_QUERY_PREFIX` | *(bundled model's; else empty)* | Task prefix prepended to search queries before embedding (asymmetric models). Defaults from `model_config.json`; empty when `MNEMOMATIC_EMBED_URL` is set. |
+| `MNEMOMATIC_EMBED_DOC_PREFIX` | *(bundled model's; else empty)* | Task prefix prepended to stored content before embedding (asymmetric models). Defaults from `model_config.json`; empty when `MNEMOMATIC_EMBED_URL` is set. |
 | `MNEMOMATIC_REINDEX`        | *(unset)*                   | Set to `1` for one startup to rebuild the vector index and re-embed all content (after changing model/dim/prefixes). Remove afterwards. |
 | `MNEMOMATIC_MODEL_PATH`     | `/app/model/model.onnx`     | Path to the ONNX model file (full image only)            |
 | `MNEMOMATIC_TOKENIZER_PATH` | `/app/model/tokenizer.json` | Path to the tokenizer file (full image only)             |
+| `MNEMOMATIC_MODEL_CONFIG_PATH` | `/app/model/model_config.json` | Path to the bundled model's metadata file, written by the Docker build |
+| `MNEMOMATIC_MODEL_MAX_TOKENS` | *(bundled model's; else 512)* | Token truncation limit for the built-in model (2048 for `embeddinggemma`, 512 for the others) |
 
 > **Changing `MNEMOMATIC_EMBED_DIM`:** the embedding dimension is baked into the database's vector tables at creation. The server records it and refuses to start on a mismatch rather than corrupting the index — unless `MNEMOMATIC_REINDEX=1` is set, in which case it rebuilds the index at the new dimension (see below).
 
-> **Asymmetric embedding models:** some models are trained with task prefixes that differ between queries and stored content — e.g. EmbeddingGemma expects `task: search result | query: ` on queries and `title: none | text: ` on documents. Set `MNEMOMATIC_EMBED_QUERY_PREFIX` and `MNEMOMATIC_EMBED_DOC_PREFIX` accordingly (include the trailing space). Prefixes are applied at embedding time only and never appear in stored content or search snippets. Because the document prefix is baked into stored vectors, changing prefixes — like changing models — requires re-embedding existing content. The built-in MiniLM model is symmetric: leave both unset.
+> **Asymmetric embedding models:** some models are trained with task prefixes that differ between queries and stored content — e.g. EmbeddingGemma expects `task: search result | query: ` on queries and `title: none | text: ` on documents, and multilingual-e5 expects `query: ` / `passage: `. For the built-in model the correct prompts are recorded in `model_config.json` at build time and apply automatically. When `MNEMOMATIC_EMBED_URL` points at an external endpoint, both prefixes default to empty and must be set explicitly for asymmetric models (include the trailing space). Prefixes are applied at embedding time only and never appear in stored content or search snippets. Because the document prefix is baked into stored vectors, changing prefixes — like changing models — requires re-embedding existing content.
 
 ## Switching Embedding Models
 
-Changing the embedding model, dimension, or task prefixes invalidates every stored vector — old and new embeddings live in different spaces and must not be compared. The switch is a config change plus one flagged restart:
+Changing the embedding model, dimension, or task prefixes invalidates every stored vector — old and new embeddings live in different spaces and must not be compared. The switch is a config change plus one flagged restart.
+
+**Switching between built-in models** — rebuild with a different `EMBED_MODEL` build argument and set `MNEMOMATIC_REINDEX=1` for the first start:
+
+```bash
+docker compose build --build-arg EMBED_MODEL=embeddinggemma
+# set MNEMOMATIC_REINDEX=1 in docker-compose.yml, then:
+docker compose up -d
+```
+
+The bundled `model_config.json` carries the new dimension and prefixes, so no other settings change.
+
+**Switching to an external embedder:**
 
 1. Update the embedder settings — e.g. for EmbeddingGemma served by llama.cpp
    (`llama-server -m embeddinggemma-300M-Q8_0.gguf --embeddings --pooling mean`)
@@ -242,6 +293,8 @@ Changing the embedding model, dimension, or task prefixes invalidates every stor
 3. **Remove `MNEMOMATIC_REINDEX`** and restart once more — while set, the (harmless but wasteful) re-embed runs on every boot.
 
 Items whose embedding fails during the run are logged and remain findable via fulltext search; re-run the reindex to retry them. Fulltext search is unaffected throughout.
+
+> **Compatibility note:** the default `minilm` build uses the same model and quantization pipeline as earlier releases, so databases created by previous images keep working without a reindex. Only an actual model change triggers the flow above.
 
 ## Schema Migrations
 

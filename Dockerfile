@@ -1,4 +1,18 @@
 # syntax=docker/dockerfile:1
+
+# Built-in embedding model for the full image. One of:
+#   minilm                — all-MiniLM-L6-v2 (default): 384 dims, English,
+#                           fastest (~10-15 ms/embed), tiny (~23 MB INT8)
+#   gte-multilingual-base — 768 dims, ~70 languages, near-MiniLM query speed
+#                           (~12 ms/embed), 8192-token context, ~325 MB
+#   embeddinggemma        — EmbeddingGemma-300m: 768 dims, best retrieval
+#                           quality, multilingual, ~200 ms/embed, ~330 MB
+# Selecting a model bakes its weights and a model_config.json (dimension, task
+# prefixes, token limit) into the image — no runtime configuration needed.
+# Switching models on an existing database requires one MNEMOMATIC_REINDEX=1
+# restart (see docs/installation.md, "Switching Embedding Models").
+ARG EMBED_MODEL=minilm
+
 # ── Builder base ──────────────────────────────────────────────────────────────
 # Shared setup: system tools and source code only
 
@@ -13,47 +27,119 @@ RUN apt-get update && \
 COPY pyproject.toml README.md ./
 COPY src/ src/
 
-# ── Model download + quantization ─────────────────────────────────────────────
-# Isolated stage: downloads and quantizes the ONNX model, never copied to lite
+# ── Model download ─────────────────────────────────────────────────────────────
+# Isolated stage: downloads the ONNX embedding model selected by EMBED_MODEL,
+# never copied to lite. Alongside the weights it writes model_config.json
+# (model name, embedding dimension, token limit, task prefixes), which the
+# server reads for its defaults — so the build arg is the only knob.
+#
+# Every download is pinned to an immutable revision and verified against a
+# known SHA-256 digest so a compromised or moved upstream file fails the build
+# instead of shipping.
+#
+# minilm is downloaded as FP32 and quantized to INT8 here at build time — the
+# same pipeline previous releases used, keeping its vectors compatible with
+# databases embedded by those releases. The other models publish INT8 variants
+# pre-made. EmbeddingGemma's graph references its weights by the fixed name
+# `model_quantized.onnx_data`, which must keep that name next to model.onnx;
+# its export also bakes the full sentence-transformers stack (mean pooling,
+# dense projection layers, normalization) into the graph as a
+# `sentence_embedding` output.
 
 FROM builder-base AS model-builder
 
-# Download the embedding model using fastembed (isolated — never copied to runtime)
-RUN pip install --no-cache-dir --no-compile --target=/tmp/dl fastembed
-ENV FASTEMBED_CACHE_PATH=/app/fastembed-cache
-RUN PYTHONPATH=/tmp/dl \
-    python3 -c "from fastembed import TextEmbedding; TextEmbedding('sentence-transformers/all-MiniLM-L6-v2')"
+ARG EMBED_MODEL
 
-# Extract only model.onnx + tokenizer.json from wherever fastembed cached them
+# Quantization toolchain, only needed for the minilm FP32→INT8 conversion
+RUN if [ "$EMBED_MODEL" = "minilm" ]; then \
+        pip install --no-cache-dir --no-compile --target=/tmp/quant onnx onnxruntime sympy; \
+    fi
+
 RUN python3 << 'PYTHON_EOF'
-import glob, os, shutil, hashlib
+import hashlib, json, os, urllib.request
 
-os.makedirs('/app/model', exist_ok=True)
-onnx = glob.glob('/app/fastembed-cache/**/*.onnx', recursive=True)
-tok  = glob.glob('/app/fastembed-cache/**/tokenizer.json', recursive=True)
-shutil.copy(onnx[0], '/app/model/model.onnx')
-shutil.copy(tok[0],  '/app/model/tokenizer.json')
+MODELS = {
+    "minilm": {
+        "repo": "Qdrant/all-MiniLM-L6-v2-onnx",
+        "revision": "5f1b8cd78bc4fb444dd171e59b18f3a3af89a079",
+        "files": [
+            ("model.onnx", "model.onnx",
+             "bbd7b466f6d58e646fdc2bd5fd67b2f5e93c0b687011bd4548c420f7bd46f0c5"),
+            ("tokenizer.json", "tokenizer.json",
+             "da0e79933b9ed51798a3ae27893d3c5fa4a201126cef75586296df9b4d2c62a0"),
+        ],
+        "quantize": True,
+        "config": {"model": "all-MiniLM-L6-v2", "dim": 384, "max_tokens": 512,
+                   "query_prefix": "", "doc_prefix": ""},
+    },
+    "gte-multilingual-base": {
+        "repo": "onnx-community/gte-multilingual-base",
+        "revision": "2edbf5e672aab465f9ed4c154a8b61791c082c69",
+        "files": [
+            ("onnx/model_quantized.onnx", "model.onnx",
+             "ab2bd164ebd8ca9003dc49a981b611e849b5d326f504c8873ba76e07fa6c0082"),
+            ("tokenizer.json", "tokenizer.json",
+             "3a56def25aa40facc030ea8b0b87f3688e4b3c39eb8b45d5702b3a1300fe2a20"),
+        ],
+        "quantize": False,
+        "config": {"model": "gte-multilingual-base", "dim": 768, "max_tokens": 8192,
+                   "query_prefix": "", "doc_prefix": ""},
+    },
+    "embeddinggemma": {
+        "repo": "onnx-community/embeddinggemma-300m-ONNX",
+        "revision": "5090578d9565bb06545b4552f76e6bc2c93e4a66",
+        "files": [
+            ("onnx/model_quantized.onnx", "model.onnx",
+             "172efde319fe1542dc41f31be6154910b05b78f7a861c265c4600eec906bd6d8"),
+            ("onnx/model_quantized.onnx_data", "model_quantized.onnx_data",
+             "705626e28e4c23c82ade34566b4197d97f534c12275fa406dfb71e9937d388c0"),
+            ("tokenizer.json", "tokenizer.json",
+             "4dda02faaf32bc91031dc8c88457ac272b00c1016cc679757d1c441b248b9c47"),
+        ],
+        "quantize": False,
+        "config": {"model": "embeddinggemma-300m", "dim": 768, "max_tokens": 2048,
+                   "query_prefix": "task: search result | query: ",
+                   "doc_prefix": "title: none | text: "},
+    },
+}
 
-def sha256_file(path):
+choice = os.environ.get("EMBED_MODEL", "")
+if choice not in MODELS:
+    raise SystemExit(
+        f"Unknown EMBED_MODEL {choice!r} — expected one of: {', '.join(MODELS)}"
+    )
+model = MODELS[choice]
+
+os.makedirs("/app/model", exist_ok=True)
+for remote, local, expected in model["files"]:
+    url = f"https://huggingface.co/{model['repo']}/resolve/{model['revision']}/{remote}"
+    dest = f"/app/model/{local}"
+    print(f"Downloading {url}")
+    urllib.request.urlretrieve(url, dest)
     h = hashlib.sha256()
-    with open(path, 'rb') as f:
-        while chunk := f.read(8192):
+    with open(dest, "rb") as f:
+        while chunk := f.read(1 << 20):
             h.update(chunk)
-    return h.hexdigest()
+    if h.hexdigest() != expected:
+        raise SystemExit(f"SHA256 mismatch for {remote}: got {h.hexdigest()}, expected {expected}")
+    print(f"  OK {local}: {os.path.getsize(dest) / 1024 / 1024:.1f} MB, sha256 {expected}")
 
-onnx_hash = sha256_file('/app/model/model.onnx')
-tok_hash = sha256_file('/app/model/tokenizer.json')
-print(f'ONNX: {onnx[0]}')
-print(f'ONNX SHA256: {onnx_hash}')
-print(f'Tokenizer: {tok[0]}')
-print(f'Tokenizer SHA256: {tok_hash}')
+with open("/app/model/model_config.json", "w") as f:
+    json.dump(model["config"], f, indent=2)
+print(f"Wrote model_config.json: {model['config']}")
 PYTHON_EOF
 
-# Quantize the model from FP32 to INT8: ~4x smaller, ~2-3x faster inference on CPU
-# onnx package is only needed here at build time, never copied to the runtime image
-RUN pip install --no-cache-dir --no-compile --target=/tmp/quant onnx sympy && \
-    PYTHONPATH=/tmp/dl:/tmp/quant \
-    python3 -c "from onnxruntime.quantization import quantize_dynamic, QuantType; import os; orig=os.path.getsize('/app/model/model.onnx'); quantize_dynamic('/app/model/model.onnx','/app/model/model_int8.onnx',weight_type=QuantType.QUInt8); quant=os.path.getsize('/app/model/model_int8.onnx'); os.replace('/app/model/model_int8.onnx','/app/model/model.onnx'); print(f'Quantized: {orig/1024/1024:.1f}MB -> {quant/1024/1024:.1f}MB')"
+# FP32 → INT8 for minilm (~4x smaller, 2-3x faster on CPU). The quantization
+# toolchain lives in /tmp and is never copied to the runtime image.
+RUN if [ "$EMBED_MODEL" = "minilm" ]; then \
+        PYTHONPATH=/tmp/quant python3 -c "\
+from onnxruntime.quantization import quantize_dynamic, QuantType; import os; \
+orig = os.path.getsize('/app/model/model.onnx'); \
+quantize_dynamic('/app/model/model.onnx', '/app/model/model_int8.onnx', weight_type=QuantType.QUInt8); \
+quant = os.path.getsize('/app/model/model_int8.onnx'); \
+os.replace('/app/model/model_int8.onnx', '/app/model/model.onnx'); \
+print(f'Quantized: {orig/1024/1024:.1f}MB -> {quant/1024/1024:.1f}MB')"; \
+    fi
 
 # ── Full builder ───────────────────────────────────────────────────────────────
 # Installs all deps including the ML stack (onnxruntime, numpy, tokenizers)

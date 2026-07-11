@@ -3,7 +3,9 @@
 MNEMOMATIC_EMBED_QUERY_PREFIX / MNEMOMATIC_EMBED_DOC_PREFIX are prepended to
 text at embedding time only: queries get the query prefix, stored content gets
 the document prefix, and stored text/snippets never contain either. Defaults
-are empty, so symmetric models see byte-identical behavior.
+come from the bundled model's model_config.json (asymmetric models like
+EmbeddingGemma record their task prompts there); without a config file — as in
+this test environment — and for external endpoints, defaults are empty.
 """
 
 import sys
@@ -103,8 +105,12 @@ class TestDocumentPrefix(PrefixTestBase):
         self.assertEqual(len(chunks), len(batch_calls[0]))
 
 
-class TestDefaultsAreNoOp(unittest.TestCase):
-    def test_empty_prefixes_leave_text_unchanged(self):
+class TestPrefixDefaults(unittest.TestCase):
+    def test_no_model_config_means_empty_prefixes(self):
+        # No model_config.json in the test environment → symmetric defaults,
+        # byte-identical embedding input.
+        self.assertEqual(server.EMBED_QUERY_PREFIX, "")
+        self.assertEqual(server.EMBED_DOC_PREFIX, "")
         recorded = []
         with patch.object(server, "_safe_embed", side_effect=lambda t: recorded.append(t) or EMBEDDING):
             server._embed_query("hello")

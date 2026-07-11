@@ -18,16 +18,24 @@ FTS5 is SQLite's built-in full-text search engine. It handles keyword and phrase
 
 Mnem-O-matic supports two embedding backends:
 
-**Built-in (full image)** — The `full` Docker image bundles `all-MiniLM-L6-v2` as an INT8-quantized ONNX model that runs locally on CPU. No external services required. Inference via `onnxruntime` and tokenization via the Rust-backed `tokenizers` library — no PyTorch or full ML framework needed.
+**Built-in (full image)** — The `full` Docker image bundles an INT8-quantized ONNX embedding model that runs locally on CPU. No external services required. Inference via `onnxruntime` and tokenization via the Rust-backed `tokenizers` library — no PyTorch or full ML framework needed. The model is chosen at build time with the `EMBED_MODEL` build argument:
 
-The Docker build downloads Qdrant's ONNX export of `all-MiniLM-L6-v2`, then **quantizes it from FP32 to INT8** before copying it into the runtime image (~80 MB → ~20 MB, 2–3× faster inference). The `onnx` package used for quantization is installed only in the build stage and never copied to the runtime image.
+- **`minilm` (default)** — `all-MiniLM-L6-v2`: 384 dims, English, ~10–15 ms per embed, ~23 MB on disk / ~240 MB RAM. Downloaded as FP32 and quantized to INT8 at build time — the same pipeline earlier releases used, so existing databases stay compatible. The smallest image and the safe default for English-only content.
+- **`gte-multilingual-base`** — 768 dims, ~70 languages, 8192-token context, ~325 MB on disk / ~880 MB RAM, Apache-2.0. Queries embed in ~12 ms — near-MiniLM speed, since most of its parameters are vocabulary embeddings that cost little for short inputs — while longer chunks take ~150 ms. Strong cross-lingual retrieval (a query in one language finds content stored in another) with no task prefixes.
+- **`embeddinggemma`** — [EmbeddingGemma-300m](https://ai.google.dev/gemma/docs/embeddinggemma): 768 dims, 100+ languages, 2048-token context, ~330 MB on disk / ~1.2 GB RAM, and decisively the best retrieval quality — an order of magnitude larger relevant-vs-irrelevant score margins, and it resolves zero-word-overlap paraphrase queries the smaller models miss. The cost: ~160–225 ms for a short query and up to ~1 s per 1000-character chunk. Weights under the [Gemma Terms of Use](https://ai.google.dev/gemma/terms).
 
-**External (lite image)** — The `lite` image ships without the ML stack (~120 MB vs ~316 MB). Point `MNEMOMATIC_EMBED_URL` at an embedding endpoint and the server calls out for embeddings. Two wire formats are supported via `MNEMOMATIC_EMBED_API`: **`openai`** (the default — llama.cpp's `llama-server`, vLLM, LM Studio, Ollama's `/v1/embeddings`, and hosted APIs) and **`ollama`** (the native `/api/embeddings` endpoint). Setting `MNEMOMATIC_EMBED_URL` takes priority over the built-in model, so the `full` image can also delegate to an external embedder. If no URL is configured and no local model is present, the server runs in FTS-only mode — fulltext search works, semantic and hybrid search are unavailable.
+(Latency figures measured end to end on a modest x86 server; see [Choosing the built-in embedding model](installation.md#choosing-the-built-in-embedding-model) for per-model guidance.)
+
+Alongside the weights, the build writes a `model_config.json` recording the model's dimension, token limit, and task prefixes; the server reads its defaults from it, so the build argument is the only knob. All downloads are pinned to immutable revisions and verified against SHA-256 digests — a moved or tampered upstream file fails the build instead of shipping.
+
+The embedder handles two ONNX graph shapes. Sentence-transformers exports like EmbeddingGemma's bake the full pooling stack (mean pooling, dense projection layers, normalization) into the graph as a `sentence_embedding` output, which is used directly — pooling token embeddings by hand would skip the projection layers and produce garbage vectors. Plain transformer exports (MiniLM, multilingual-e5) only produce token embeddings, which are mean-pooled and L2-normalized in Python.
+
+**External (lite image)** — The `lite` image ships without the ML stack and bundled model (~120 MB vs ~320–650 MB depending on `EMBED_MODEL`). Point `MNEMOMATIC_EMBED_URL` at an embedding endpoint and the server calls out for embeddings. Two wire formats are supported via `MNEMOMATIC_EMBED_API`: **`openai`** (the default — llama.cpp's `llama-server`, vLLM, LM Studio, Ollama's `/v1/embeddings`, and hosted APIs) and **`ollama`** (the native `/api/embeddings` endpoint). Setting `MNEMOMATIC_EMBED_URL` takes priority over the built-in model, so the `full` image can also delegate to an external embedder. If no URL is configured and no local model is present, the server runs in FTS-only mode — fulltext search works, semantic and hybrid search are unavailable.
 
 The external path is deliberately model-agnostic:
 
 - **Normalization** — every embedding returned by an external endpoint is L2-normalized before storage or search. The score math (L2 distance → cosine similarity) is only correct for unit vectors, and for non-unit vectors even the *ranking* would be wrong; normalizing makes any model safe, including Matryoshka-truncated dimensions.
-- **Task prefixes** — asymmetric models (e.g. EmbeddingGemma) are trained with different prompts for queries and stored content. `MNEMOMATIC_EMBED_QUERY_PREFIX` / `MNEMOMATIC_EMBED_DOC_PREFIX` apply these at embedding time only; stored text, snippets, and fulltext search never see them.
+- **Task prefixes** — asymmetric models (like EmbeddingGemma and multilingual-e5) are trained with different prompts for queries and stored content. `MNEMOMATIC_EMBED_QUERY_PREFIX` / `MNEMOMATIC_EMBED_DOC_PREFIX` apply these at embedding time only; stored text, snippets, and fulltext search never see them. The built-in model's prompts come from `model_config.json` automatically; external endpoints default to no prefix since their model is unknown.
 - **Concurrent chunk embedding** — a chunked document embeds its chunks with up to `MNEMOMATIC_EMBED_CONCURRENCY` (default 8) requests in flight, rather than one sequential round trip per chunk. (The built-in ONNX model intentionally embeds sequentially: benchmarks showed padded batch inference is neutral-to-slower on CPU, where onnxruntime already parallelizes single runs across cores.)
 - **Reindexing** — switching model, dimension, or prefixes invalidates all stored vectors. `MNEMOMATIC_REINDEX=1` rebuilds the vector index and re-embeds every item at startup, making the whole swap a config change plus one flagged restart (see [Switching Embedding Models](installation.md#switching-embedding-models)).
 
@@ -57,7 +65,7 @@ SQLite in WAL mode comfortably handles the concurrency level of a personal Mnem-
 
 For both the built-in ONNX model and the external HTTP embedder, identical text inputs are cached in memory (LRU, up to 256 entries) — re-storing the same content via upsert skips recomputation or a network round-trip entirely.
 
-When using the `full` image, the ONNX model is also pre-warmed at server startup so the first request doesn't pay the model load cost (~1–2s).
+When using the `full` image, the ONNX model is also pre-warmed at server startup so the first request doesn't pay the model load cost (a few seconds).
 
 ### SQLite tuning
 

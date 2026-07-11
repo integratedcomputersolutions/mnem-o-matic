@@ -197,13 +197,14 @@ class SearchDispatchTest(unittest.TestCase):
 
     def test_fts_escapes_query_while_embedding_uses_raw(self):
         # A query containing an FTS operator must reach FTS quoted, but the
-        # embedder must receive the original, unescaped query.
+        # embedder must receive the original, unescaped query (plus the
+        # configured query prefix — never the FTS escaping).
         safe = MagicMock(return_value=EMBEDDING)
         with patch.object(server, "_db", return_value=self.fake_db), \
              patch.object(server, "_embedder", return_value=SENTINEL_EMBEDDER), \
              patch.object(server, "_safe_embed", safe):
             server.search(query="a AND b", mode="hybrid")
-        safe.assert_called_once_with("a AND b")          # raw query embedded
+        safe.assert_called_once_with(server.EMBED_QUERY_PREFIX + "a AND b")
         backend, fts_arg, embedding, _table, _ns, _limit = self.fake_db.calls[0]
         self.assertEqual(backend, "hybrid")
         self.assertEqual(fts_arg, '"a AND b"')           # FTS arg escaped

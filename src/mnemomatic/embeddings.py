@@ -8,10 +8,18 @@ import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
+from mnemomatic import model_config
+
 logger = logging.getLogger("mnemomatic")
 
 MODEL_PATH = os.environ.get("MNEMOMATIC_MODEL_PATH", "/app/model/model.onnx")
 TOKENIZER_PATH = os.environ.get("MNEMOMATIC_TOKENIZER_PATH", "/app/model/tokenizer.json")
+# Token truncation limit for the built-in model. Defaults to the bundled
+# model's context from model_config.json (2048 for EmbeddingGemma, 512 for
+# MiniLM/e5), falling back to 512 when no config exists.
+MODEL_MAX_TOKENS = int(os.environ.get(
+    "MNEMOMATIC_MODEL_MAX_TOKENS", model_config.CONFIG.get("max_tokens", 512)
+))
 EMBED_TIMEOUT = int(os.environ.get("MNEMOMATIC_EMBED_TIMEOUT", "30"))
 # Concurrent requests used by HttpEmbedder.embed_batch (chunked documents).
 EMBED_CONCURRENCY = int(os.environ.get("MNEMOMATIC_EMBED_CONCURRENCY", "8"))
@@ -41,7 +49,16 @@ def _l2_normalize(vec: list[float]) -> list[float]:
 
 
 class OnnxEmbedder:
-    """Local ONNX embedding model (requires onnxruntime, tokenizers, numpy)."""
+    """Local ONNX embedding model (requires onnxruntime, tokenizers, numpy).
+
+    Supports two graph shapes:
+
+    - Sentence-transformers exports (the EmbeddingGemma build option) declare
+      a ``sentence_embedding`` output with pooling, projection layers, and
+      normalization baked into the graph — it is used as-is.
+    - Plain transformer exports (MiniLM, multilingual-e5) only produce token
+      embeddings; those are mean-pooled and normalized here.
+    """
 
     def __init__(self):
         # Lazy imports so this module can be imported without the ML stack installed
@@ -77,13 +94,19 @@ class OnnxEmbedder:
                 f"Failed to load tokenizer from {TOKENIZER_PATH}: {type(e).__name__}: {e}"
             )
 
-        self.tokenizer.enable_truncation(max_length=512)
+        self.tokenizer.enable_truncation(max_length=MODEL_MAX_TOKENS)
         self._input_names = {inp.name for inp in self.session.get_inputs()}
+        output_names = [out.name for out in self.session.get_outputs()]
+        # A sentence_embedding output means pooling + any projection layers are
+        # part of the graph; pooling token embeddings ourselves would silently
+        # skip those layers and produce garbage vectors.
+        self._sentence_output = "sentence_embedding" if "sentence_embedding" in output_names else None
         self.embed = functools.lru_cache(maxsize=256)(self._embed)
 
     @property
     def mode(self) -> str:
-        return "built-in ONNX"
+        name = model_config.CONFIG.get("model")
+        return f"built-in ONNX ({name})" if name else "built-in ONNX"
 
     # No embed_batch: benchmarked against real chunk workloads, a padded batch
     # inference is neutral-to-slower than sequential embed() on CPU — ORT
@@ -100,11 +123,16 @@ class OnnxEmbedder:
         if "token_type_ids" in self._input_names:
             feed["token_type_ids"] = np.zeros_like(input_ids)
 
-        token_embeddings = self.session.run(None, feed)[0].astype(np.float32)  # (1, seq, dim)
-        mask = attention_mask[..., np.newaxis].astype(np.float32)
-        mean_pooled = (token_embeddings * mask).sum(1) / mask.sum(1).clip(min=1e-9)
-        norm = np.linalg.norm(mean_pooled, axis=1, keepdims=True).clip(min=1e-9)
-        return (mean_pooled / norm)[0].tolist()
+        if self._sentence_output is not None:
+            pooled = self.session.run([self._sentence_output], feed)[0].astype(np.float32)  # (1, dim)
+        else:
+            token_embeddings = self.session.run(None, feed)[0].astype(np.float32)  # (1, seq, dim)
+            mask = attention_mask[..., np.newaxis].astype(np.float32)
+            pooled = (token_embeddings * mask).sum(1) / mask.sum(1).clip(min=1e-9)
+        # Normalize both paths: quantized sentence_embedding outputs can drift
+        # slightly off unit length, and the score math needs unit vectors.
+        norm = np.linalg.norm(pooled, axis=1, keepdims=True).clip(min=1e-9)
+        return (pooled / norm)[0].tolist()
 
 
 class HttpEmbedder:

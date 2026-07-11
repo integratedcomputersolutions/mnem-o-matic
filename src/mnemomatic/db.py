@@ -9,11 +9,16 @@ from pathlib import Path
 
 import sqlite_vec
 
+from mnemomatic import model_config
 from mnemomatic.models import Document, Knowledge, Note, SearchResult
 
 logger = logging.getLogger("mnemomatic")
 
-EMBEDDING_DIM = int(os.environ.get("MNEMOMATIC_EMBED_DIM", "384"))
+# Defaults to the bundled model's dimension (model_config.json, written by the
+# Docker build for the EMBED_MODEL chosen), falling back to 384 (MiniLM-class)
+# when no config exists. Changing dimension requires MNEMOMATIC_REINDEX=1 once
+# to rebuild the index — the server fails fast on the mismatch otherwise.
+EMBEDDING_DIM = int(os.environ.get("MNEMOMATIC_EMBED_DIM", model_config.CONFIG.get("dim", 384)))
 BUSY_TIMEOUT_MS = 5000
 
 # Bumped whenever the on-disk schema changes shape. Stored in PRAGMA
@@ -431,6 +436,7 @@ class Database:
         every item afterwards. Also records the (possibly new) dimension and
         schema version, and clears any pending dim change.
         """
+        logger.info("Rebuilding vector tables at dim %d...", EMBEDDING_DIM)
         conn = self._get_conn()
         conn.execute("BEGIN")
         try:
@@ -447,7 +453,7 @@ class Database:
             conn.rollback()
             raise
         self.dim_change_pending = False
-        logger.info("Vector tables rebuilt empty at dim %d", EMBEDDING_DIM)
+        logger.info("Vector tables rebuilt, re-embedding content for %d dims", EMBEDDING_DIM)
 
     def set_embedding(self, item_type: str, item_id: str, embedding: list[float]) -> bool:
         """Write an item's embedding without touching its content or timestamps.

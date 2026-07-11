@@ -11,6 +11,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from pydantic import ValidationError
 
+from mnemomatic import model_config
 from mnemomatic.auth import BearerAuthMiddleware
 from mnemomatic.compact import CompactToolsMiddleware
 from mnemomatic.db import CHUNK_OVERLAP, CHUNK_SIZE, CHUNK_THRESHOLD, EMBEDDING_DIM, Database, _chunk_text
@@ -29,13 +30,17 @@ UI_TOKEN = os.environ.get("MNEMOMATIC_UI_TOKEN", "").strip()
 MAX_SEARCH_LIMIT = 100
 MAX_LIST_LIMIT = 200
 
-# Optional task prefixes for asymmetric embedding models (e.g. EmbeddingGemma
-# wants "task: search result | query: " on queries and "title: none | text: "
-# on stored content). Empty by default — symmetric models like the built-in
-# MiniLM need none. Prefixes are baked into stored vectors, so changing them
-# (like changing models) requires re-embedding existing content.
-EMBED_QUERY_PREFIX = os.environ.get("MNEMOMATIC_EMBED_QUERY_PREFIX", "")
-EMBED_DOC_PREFIX = os.environ.get("MNEMOMATIC_EMBED_DOC_PREFIX", "")
+# Task prefixes for asymmetric embedding models. When the bundled model is
+# trained with task prompts (e.g. EmbeddingGemma, multilingual-e5), the Docker
+# build records them in model_config.json and they apply by default when
+# embedding locally. External endpoints (MNEMOMATIC_EMBED_URL) default to no
+# prefix since their model is unknown. Explicit env vars always win. Prefixes
+# are baked into stored vectors, so changing them (like changing models)
+# requires re-embedding existing content.
+_DEFAULT_QUERY_PREFIX = "" if EMBED_URL else model_config.CONFIG.get("query_prefix", "")
+_DEFAULT_DOC_PREFIX = "" if EMBED_URL else model_config.CONFIG.get("doc_prefix", "")
+EMBED_QUERY_PREFIX = os.environ.get("MNEMOMATIC_EMBED_QUERY_PREFIX", _DEFAULT_QUERY_PREFIX)
+EMBED_DOC_PREFIX = os.environ.get("MNEMOMATIC_EMBED_DOC_PREFIX", _DEFAULT_DOC_PREFIX)
 
 # When set, startup rebuilds the vector index and re-embeds every stored item
 # with the current embedder/dim/prefixes, then serves normally. Remove the
@@ -95,7 +100,7 @@ def _resolve_embedder():
         try:
             from mnemomatic.embeddings import OnnxEmbedder
             embedder = OnnxEmbedder()
-            logger.info("Embedder: built-in ONNX model (%s)", model_path)
+            logger.info("Embedder: %s (%s)", embedder.mode, model_path)
             _validate_embedding_dimension(embedder)
             return embedder
         except ImportError:
