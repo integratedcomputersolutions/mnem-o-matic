@@ -2,8 +2,9 @@
 
 # Built-in embedding model for the full image. One of:
 #   minilm                — all-MiniLM-L6-v2 (default): 384 dims, English,
-#                           fastest (~20 ms/embed), tiny (~23 MB INT8)
-#   multilingual-e5-small — 384 dims, ~100 languages, ~40 ms/embed, ~115 MB
+#                           fastest (~10-15 ms/embed), tiny (~23 MB INT8)
+#   gte-multilingual-base — 768 dims, ~70 languages, near-MiniLM query speed
+#                           (~12 ms/embed), 8192-token context, ~325 MB
 #   embeddinggemma        — EmbeddingGemma-300m: 768 dims, best retrieval
 #                           quality, multilingual, ~200 ms/embed, ~330 MB
 # Selecting a model bakes its weights and a model_config.json (dimension, task
@@ -71,18 +72,18 @@ MODELS = {
         "config": {"model": "all-MiniLM-L6-v2", "dim": 384, "max_tokens": 512,
                    "query_prefix": "", "doc_prefix": ""},
     },
-    "multilingual-e5-small": {
-        "repo": "Xenova/multilingual-e5-small",
-        "revision": "761b726dd34fb83930e26aab4e9ac3899aa1fa78",
+    "gte-multilingual-base": {
+        "repo": "onnx-community/gte-multilingual-base",
+        "revision": "2edbf5e672aab465f9ed4c154a8b61791c082c69",
         "files": [
             ("onnx/model_quantized.onnx", "model.onnx",
-             "f80102d3f2a1229f387d3c81909990d8945513e347b0eab049f7de3c6f98c193"),
+             "ab2bd164ebd8ca9003dc49a981b611e849b5d326f504c8873ba76e07fa6c0082"),
             ("tokenizer.json", "tokenizer.json",
-             "0b44a9d7b51c3c62626640cda0e2c2f70fdacdc25bbbd68038369d14ebdf4c39"),
+             "3a56def25aa40facc030ea8b0b87f3688e4b3c39eb8b45d5702b3a1300fe2a20"),
         ],
         "quantize": False,
-        "config": {"model": "multilingual-e5-small", "dim": 384, "max_tokens": 512,
-                   "query_prefix": "query: ", "doc_prefix": "passage: "},
+        "config": {"model": "gte-multilingual-base", "dim": 768, "max_tokens": 8192,
+                   "query_prefix": "", "doc_prefix": ""},
     },
     "embeddinggemma": {
         "repo": "onnx-community/embeddinggemma-300m-ONNX",
