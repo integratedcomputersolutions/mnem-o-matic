@@ -6,11 +6,13 @@ Python has the most mature official MCP SDK ([modelcontextprotocol/python-sdk](h
 
 ## SQLite + FTS5 + sqlite-vec
 
-SQLite was chosen for transportability — the entire database is a single file. No server process, no connection strings, no migrations infrastructure. Copy the file to back it up, move it to another machine, or sync it between devices.
+SQLite was chosen for transportability — the entire database is a single file. No server process, no connection strings. Copy the file to back it up, move it to another machine, or sync it between devices.
 
-FTS5 is SQLite's built-in full-text search engine. It handles keyword and phrase matching with no external dependencies.
+The schema is versioned via `PRAGMA user_version`: on startup, databases from older versions are migrated forward automatically in a single transaction (see [Schema Migrations](installation.md#schema-migrations)). The database also records the embedding dimension it was created with, and the server fails fast on a mismatch instead of corrupting the index.
 
-[sqlite-vec](https://github.com/asg017/sqlite-vec) adds vector search to SQLite. This enables semantic search — finding results by meaning rather than exact word matches. A search for "authentication" will find entries about "JWT login tokens" even though the words don't overlap.
+FTS5 is SQLite's built-in full-text search engine. It handles keyword and phrase matching with no external dependencies. User queries are escaped defensively: anything that isn't plain words is quoted into a literal phrase, so FTS5 operator syntax (`AND`, `NEAR`, `:` column filters, stray `?`) can never break a search.
+
+[sqlite-vec](https://github.com/asg017/sqlite-vec) adds vector search to SQLite. This enables semantic search — finding results by meaning rather than exact word matches. A search for "authentication" will find entries about "JWT login tokens" even though the words don't overlap. The vec0 tables declare the item's namespace as a **partition key**, so namespace-filtered searches run the nearest-neighbor scan inside that namespace's partition — a small namespace always yields its own best matches instead of being drowned out by larger ones.
 
 ## Embeddings — built-in or external
 
@@ -20,7 +22,14 @@ Mnem-O-matic supports two embedding backends:
 
 The Docker build downloads Qdrant's ONNX export of `all-MiniLM-L6-v2`, then **quantizes it from FP32 to INT8** before copying it into the runtime image (~80 MB → ~20 MB, 2–3× faster inference). The `onnx` package used for quantization is installed only in the build stage and never copied to the runtime image.
 
-**External (lite image)** — The `lite` image ships without the ML stack (~120 MB vs ~316 MB). Point it at any Ollama-compatible embedding endpoint via `MNEMOMATIC_EMBED_URL` and it will call out for embeddings. If no URL is configured, the server runs in FTS-only mode — fulltext search works, semantic and hybrid search are unavailable.
+**External (lite image)** — The `lite` image ships without the ML stack (~120 MB vs ~316 MB). Point `MNEMOMATIC_EMBED_URL` at an embedding endpoint and the server calls out for embeddings. Two wire formats are supported via `MNEMOMATIC_EMBED_API`: **`openai`** (the default — llama.cpp's `llama-server`, vLLM, LM Studio, Ollama's `/v1/embeddings`, and hosted APIs) and **`ollama`** (the native `/api/embeddings` endpoint). Setting `MNEMOMATIC_EMBED_URL` takes priority over the built-in model, so the `full` image can also delegate to an external embedder. If no URL is configured and no local model is present, the server runs in FTS-only mode — fulltext search works, semantic and hybrid search are unavailable.
+
+The external path is deliberately model-agnostic:
+
+- **Normalization** — every embedding returned by an external endpoint is L2-normalized before storage or search. The score math (L2 distance → cosine similarity) is only correct for unit vectors, and for non-unit vectors even the *ranking* would be wrong; normalizing makes any model safe, including Matryoshka-truncated dimensions.
+- **Task prefixes** — asymmetric models (e.g. EmbeddingGemma) are trained with different prompts for queries and stored content. `MNEMOMATIC_EMBED_QUERY_PREFIX` / `MNEMOMATIC_EMBED_DOC_PREFIX` apply these at embedding time only; stored text, snippets, and fulltext search never see them.
+- **Concurrent chunk embedding** — a chunked document embeds its chunks with up to `MNEMOMATIC_EMBED_CONCURRENCY` (default 8) requests in flight, rather than one sequential round trip per chunk. (The built-in ONNX model intentionally embeds sequentially: benchmarks showed padded batch inference is neutral-to-slower on CPU, where onnxruntime already parallelizes single runs across cores.)
+- **Reindexing** — switching model, dimension, or prefixes invalidates all stored vectors. `MNEMOMATIC_REINDEX=1` rebuilds the vector index and re-embeds every item at startup, making the whole swap a config change plus one flagged restart (see [Switching Embedding Models](installation.md#switching-embedding-models)).
 
 ## Streamable HTTP Transport
 

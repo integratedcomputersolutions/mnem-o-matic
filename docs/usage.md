@@ -88,6 +88,7 @@ For LAN deployments with TLS, the API key is **required** — it is the only per
 | 401 | Malformed Authorization header | Token is missing or header is incomplete |
 | 401 | Invalid Authorization header (empty token) | Token is present but empty |
 | 403 | Invalid API key | Token was sent but does not match `MNEMOMATIC_API_KEY` |
+| 429 | Too many failed authentication attempts | Repeated invalid keys from the same client triggered a temporary lockout; retry after the `Retry-After` header. Missing/malformed headers don't count toward the lockout. |
 
 All error responses include a `details` field explaining the exact issue.
 
