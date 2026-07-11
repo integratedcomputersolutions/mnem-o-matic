@@ -81,7 +81,7 @@ def _resolve_embedder():
         try:
             from mnemomatic.embeddings import HttpEmbedder
             embedder = HttpEmbedder(EMBED_URL, EMBED_MODEL)
-            logger.info("Embedder: external HTTP endpoint %s (model=%r)", EMBED_URL, EMBED_MODEL)
+            logger.info("Embedder: %s endpoint %s (model=%r)", embedder.mode, EMBED_URL, EMBED_MODEL)
             _validate_embedding_dimension(embedder)
             return embedder
         except ValueError as e:
