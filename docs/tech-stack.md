@@ -20,9 +20,11 @@ Mnem-O-matic supports two embedding backends:
 
 **Built-in (full image)** — The `full` Docker image bundles an INT8-quantized ONNX embedding model that runs locally on CPU. No external services required. Inference via `onnxruntime` and tokenization via the Rust-backed `tokenizers` library — no PyTorch or full ML framework needed. The model is chosen at build time with the `EMBED_MODEL` build argument:
 
-- **`minilm` (default)** — `all-MiniLM-L6-v2`: 384 dims, English, ~20 ms per embed, ~23 MB. Downloaded as FP32 and quantized to INT8 at build time — the same pipeline earlier releases used, so existing databases stay compatible.
-- **`multilingual-e5-small`** — 384 dims, ~100 languages, ~40 ms per embed, ~115 MB. Asymmetric (`query: ` / `passage: ` prefixes).
-- **`embeddinggemma`** — [EmbeddingGemma-300m](https://ai.google.dev/gemma/docs/embeddinggemma): 768 dims, 100+ languages, 2048-token context, best retrieval quality — at ~200 ms for a short query and up to ~1 s per 1000-character chunk, an order of magnitude slower than the MiniLM tier. Weights under the [Gemma Terms of Use](https://ai.google.dev/gemma/terms).
+- **`minilm` (default)** — `all-MiniLM-L6-v2`: 384 dims, English, ~10–15 ms per embed, ~23 MB. Downloaded as FP32 and quantized to INT8 at build time — the same pipeline earlier releases used, so existing databases stay compatible. The best quality-per-millisecond for English-only content: in side-by-side probes on a real English corpus it out-ranked `multilingual-e5-small`.
+- **`multilingual-e5-small`** — 384 dims, ~100 languages, ~5–10 ms per embed, ~115 MB. Asymmetric (`query: ` / `passage: ` prefixes). Cross-lingual retrieval works (query in one language, content in another), but the multilingual capacity comes out of English quality, and its similarity scores compress into a narrow band — pair it with `hybrid` search mode.
+- **`embeddinggemma`** — [EmbeddingGemma-300m](https://ai.google.dev/gemma/docs/embeddinggemma): 768 dims, 100+ languages, 2048-token context, and decisively the best retrieval quality — an order of magnitude larger relevant-vs-irrelevant score margins, and it resolves zero-word-overlap paraphrase queries the smaller models miss. The cost: ~160–225 ms for a short query and up to ~1 s per 1000-character chunk, an order of magnitude slower than the MiniLM tier. Weights under the [Gemma Terms of Use](https://ai.google.dev/gemma/terms).
+
+(Latency figures measured end to end on a modest x86 server; see [Choosing the built-in embedding model](installation.md#choosing-the-built-in-embedding-model) for per-model guidance.)
 
 Alongside the weights, the build writes a `model_config.json` recording the model's dimension, token limit, and task prefixes; the server reads its defaults from it, so the build argument is the only knob. All downloads are pinned to immutable revisions and verified against SHA-256 digests — a moved or tampered upstream file fails the build instead of shipping.
 

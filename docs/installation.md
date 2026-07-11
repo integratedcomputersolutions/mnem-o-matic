@@ -164,11 +164,19 @@ The first build takes a few minutes — it downloads the embedding model (checks
 
 The `full` image bundles one of three embedding models, selected with the `EMBED_MODEL` build argument:
 
-| `EMBED_MODEL` | Dimensions | Languages | Speed (CPU) | Model size | Notes |
-| ------------- | ---------- | --------- | ----------- | ---------- | ----- |
-| `minilm` (default) | 384 | English | ~20 ms/embed | ~23 MB | `all-MiniLM-L6-v2` — fastest and smallest; compatible with databases created by earlier releases |
-| `multilingual-e5-small` | 384 | ~100 | ~40 ms/embed | ~115 MB | Solid multilingual retrieval at near-MiniLM speed |
-| `embeddinggemma` | 768 | 100+ | ~200 ms/embed | ~330 MB | EmbeddingGemma-300m — best retrieval quality, 2048-token context; weights under the [Gemma Terms of Use](https://ai.google.dev/gemma/terms) |
+| `EMBED_MODEL` | Dimensions | Languages | Query embed (CPU) | Model size | Notes |
+| ------------- | ---------- | --------- | ----------------- | ---------- | ----- |
+| `minilm` (default) | 384 | English | ~10–15 ms | ~23 MB | `all-MiniLM-L6-v2` — fastest and smallest; compatible with databases created by earlier releases |
+| `multilingual-e5-small` | 384 | ~100 | ~5–10 ms | ~115 MB | Multilingual retrieval at MiniLM-class speed |
+| `embeddinggemma` | 768 | 100+ | ~160–225 ms | ~330 MB | EmbeddingGemma-300m — best retrieval quality, 2048-token context; weights under the [Gemma Terms of Use](https://ai.google.dev/gemma/terms) |
+
+#### Which one should I pick?
+
+The three models were compared on the same real-world corpus (~90 items of technical notes and documents) on a modest x86 server, measuring end-to-end MCP search latency and ranking quality on probe queries:
+
+- **`minilm` — English content, speed matters.** Semantic search completes in ~30 ms end to end. On English technical content it ranked the correct result first with solid margins in every probe — including one that `multilingual-e5-small` missed. Its limits: English only, and as a symmetric 2021-era model it is the weakest of the three at paraphrase-style queries where the query shares no vocabulary with the stored text.
+- **`multilingual-e5-small` — mixed-language content on modest hardware.** The only fast option if your notes or queries span languages (cross-lingual retrieval works: a query in one language finds content stored in another). Two caveats measured in practice: on *pure-English* content it underperforms MiniLM — its capacity is spread across ~100 languages — and its similarity scores compress into a narrow band (~0.80–0.85), so ranking margins are thin and near-misses are common. Prefer `hybrid` search mode with this model so keyword matching can compensate.
+- **`embeddinggemma` — best retrieval quality, multilingual, paraphrase-robust.** The clear quality winner: it separates relevant from irrelevant results by an order of magnitude larger margins and reliably resolves zero-word-overlap queries ("how do I get back into my account?" → password-reset content) that the smaller models rank flat or miss. The cost is CPU time: ~200 ms per query embedding (imperceptible in agent workflows) and ~0.5–1 s per chunk when storing large documents — a 20-chunk document takes ~10–20 s to store. Pick it unless storage throughput or very weak hardware is a concern.
 
 ```bash
 # Plain docker build
