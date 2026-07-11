@@ -15,6 +15,9 @@ TOKENIZER_PATH = os.environ.get("MNEMOMATIC_TOKENIZER_PATH", "/app/model/tokeniz
 EMBED_TIMEOUT = int(os.environ.get("MNEMOMATIC_EMBED_TIMEOUT", "30"))
 # Concurrent requests used by HttpEmbedder.embed_batch (chunked documents).
 EMBED_CONCURRENCY = int(os.environ.get("MNEMOMATIC_EMBED_CONCURRENCY", "8"))
+# Wire format of the embedding endpoint: "openai" (llama.cpp, vLLM, LM Studio,
+# Ollama's /v1/embeddings, hosted APIs) or "ollama" (native /api/embeddings).
+EMBED_API = os.environ.get("MNEMOMATIC_EMBED_API", "openai").strip().lower()
 
 
 def _l2_normalize(vec: list[float]) -> list[float]:
@@ -105,33 +108,53 @@ class OnnxEmbedder:
 
 
 class HttpEmbedder:
-    """Ollama-compatible HTTP embedding endpoint.
+    """HTTP embedding endpoint in one of two wire formats (MNEMOMATIC_EMBED_API):
 
-    Expects a POST endpoint that accepts {"model": "...", "prompt": "..."}
-    and returns {"embedding": [...]}.
-
-    Compatible with Ollama's /api/embeddings endpoint.
+    - "openai" (default): POST {"model", "input"} → {"data": [{"embedding": [...]}]}.
+      Served by llama.cpp's llama-server, vLLM, LM Studio, Ollama's
+      /v1/embeddings, and hosted APIs.
+    - "ollama": POST {"model", "prompt"} → {"embedding": [...]}.
+      Ollama's native /api/embeddings endpoint.
     """
 
-    def __init__(self, url: str, model: str = ""):
+    def __init__(self, url: str, model: str = "", api: str | None = None):
         if not url:
             raise ValueError("MNEMOMATIC_EMBED_URL must be set and non-empty")
+        self.api = (api or EMBED_API)
+        if self.api not in ("openai", "ollama"):
+            raise ValueError(
+                f"MNEMOMATIC_EMBED_API must be 'openai' or 'ollama', got {self.api!r}"
+            )
         self.url = url
         self.model = model
         self.embed = functools.lru_cache(maxsize=256)(self._embed)
 
+        # A URL that clearly belongs to the other flavor is almost certainly a
+        # misconfiguration — say so up front instead of failing per request.
+        if self.api == "openai" and "/api/embeddings" in url:
+            logger.warning(
+                "MNEMOMATIC_EMBED_API=openai but the URL looks like Ollama's native "
+                "endpoint (%s). Set MNEMOMATIC_EMBED_API=ollama, or point the URL at "
+                "the OpenAI-compatible /v1/embeddings.", url,
+            )
+        elif self.api == "ollama" and "/v1/embeddings" in url:
+            logger.warning(
+                "MNEMOMATIC_EMBED_API=ollama but the URL looks OpenAI-compatible (%s). "
+                "Set MNEMOMATIC_EMBED_API=openai, or point the URL at /api/embeddings.", url,
+            )
+
     @property
     def mode(self) -> str:
-        return "external HTTP"
+        return f"external HTTP ({self.api})"
 
     def embed_batch(self, texts: list[str]) -> list[list[float] | None]:
         """Embed many texts with concurrent requests.
 
-        The Ollama-compatible single-prompt endpoint has no batch API, so
-        chunked documents are embedded with up to EMBED_CONCURRENCY requests
-        in flight instead of one 30s-timeout round trip per chunk. Failed
-        items come back as None (order preserved) so the caller can drop just
-        those chunks, matching the per-chunk semantics of sequential embeds.
+        One text per request (uniform across both wire formats), with up to
+        EMBED_CONCURRENCY requests in flight instead of one 30s-timeout round
+        trip per chunk. Failed items come back as None (order preserved) so
+        the caller can drop just those chunks, matching the per-chunk
+        semantics of sequential embeds.
         """
         if not texts:
             return []
@@ -155,7 +178,11 @@ class HttpEmbedder:
             RuntimeError: If the embedding service is unreachable, returns invalid data,
                          or responds with an error.
         """
-        payload = json.dumps({"model": self.model, "prompt": text}).encode()
+        if self.api == "openai":
+            body = {"model": self.model, "input": text}
+        else:
+            body = {"model": self.model, "prompt": text}
+        payload = json.dumps(body).encode()
         req = urllib.request.Request(
             self.url,
             data=payload,
@@ -208,17 +235,21 @@ class HttpEmbedder:
         # Extract embedding; normalize so downstream cosine scoring holds for
         # any external model (raises for zero/non-numeric vectors).
         try:
-            embedding = data["embedding"]
+            if self.api == "openai":
+                embedding = data["data"][0]["embedding"]
+            else:
+                embedding = data["embedding"]
             if not isinstance(embedding, list):
                 raise TypeError(f"embedding field is {type(embedding).__name__}, expected list")
             return _l2_normalize(embedding)
-        except KeyError:
+        except (KeyError, IndexError):
+            expected = "data[0].embedding" if self.api == "openai" else "embedding"
+            got = list(data.keys()) if isinstance(data, dict) else type(data).__name__
             logger.error(
-                "Embedding service response missing 'embedding' field. Got: %s",
-                list(data.keys()),
+                "Embedding service response missing '%s' field. Got: %s", expected, got,
             )
             raise RuntimeError(
-                f"Embedding service response missing 'embedding' field. Got: {list(data.keys())}"
+                f"Embedding service response missing '{expected}' field. Got: {got}"
             )
         except (TypeError, ValueError) as e:
             logger.error("Embedding value is invalid: %s", e)

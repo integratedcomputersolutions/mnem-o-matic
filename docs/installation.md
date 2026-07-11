@@ -119,10 +119,12 @@ services:
       - ./data:/data
     environment:
       - MNEMOMATIC_API_KEY=your-secret-key
-      - MNEMOMATIC_EMBED_URL=http://host.docker.internal:11434/api/embeddings
+      - MNEMOMATIC_EMBED_URL=http://host.docker.internal:11434/v1/embeddings
       - MNEMOMATIC_EMBED_MODEL=nomic-embed-text
       - MNEMOMATIC_EMBED_DIM=768
 ```
+
+Any OpenAI-compatible embedding endpoint works the same way — Ollama's `/v1/embeddings` (shown above), llama.cpp's `llama-server --embeddings`, vLLM, or LM Studio. For Ollama's native `/api/embeddings` endpoint, add `MNEMOMATIC_EMBED_API=ollama`.
 
 ### Available image tags
 
@@ -169,7 +171,7 @@ services:
       context: .
       target: lite
     environment:
-      - MNEMOMATIC_EMBED_URL=http://host.docker.internal:11434/api/embeddings
+      - MNEMOMATIC_EMBED_URL=http://host.docker.internal:11434/v1/embeddings
       - MNEMOMATIC_EMBED_MODEL=nomic-embed-text
       - MNEMOMATIC_EMBED_DIM=768
 ```
@@ -205,7 +207,8 @@ Environment variables (set in `docker-compose.yml` or passed to Docker):
 | `MNEMOMATIC_PORT`           | `8000`                      | Server port (inside container)                           |
 | `MNEMOMATIC_API_KEY`        | *(unset)*                   | API key for Bearer token auth. Auth disabled when unset. |
 | `MNEMOMATIC_UI_TOKEN`       | *(unset)*                   | Shared secret for the read-only web viewer at `/ui`. Viewer disabled when unset. |
-| `MNEMOMATIC_EMBED_URL`      | *(unset)*                   | Ollama-compatible embedding endpoint (lite image)        |
+| `MNEMOMATIC_EMBED_URL`      | *(unset)*                   | External embedding endpoint (takes priority over the built-in model) |
+| `MNEMOMATIC_EMBED_API`      | `openai`                    | Endpoint wire format: `openai` (llama.cpp, vLLM, LM Studio, Ollama `/v1/embeddings`) or `ollama` (native `/api/embeddings`) |
 | `MNEMOMATIC_EMBED_MODEL`    | *(empty)*                   | Model name passed to the external embedder               |
 | `MNEMOMATIC_EMBED_CONCURRENCY` | `8`                      | Parallel requests to the external embedder when embedding chunked documents |
 | `MNEMOMATIC_EMBED_DIM`      | `384`                       | Embedding dimension — must match the model's output      |
@@ -223,10 +226,12 @@ Environment variables (set in `docker-compose.yml` or passed to Docker):
 
 Changing the embedding model, dimension, or task prefixes invalidates every stored vector — old and new embeddings live in different spaces and must not be compared. The switch is a config change plus one flagged restart:
 
-1. Update the embedder settings — e.g. for EmbeddingGemma via Ollama:
+1. Update the embedder settings — e.g. for EmbeddingGemma served by llama.cpp
+   (`llama-server -m embeddinggemma-300M-Q8_0.gguf --embeddings --pooling mean`)
+   or Ollama:
    ```yaml
    environment:
-     - MNEMOMATIC_EMBED_URL=http://ollama:11434/api/embeddings
+     - MNEMOMATIC_EMBED_URL=http://your-embed-host:8181/v1/embeddings
      - MNEMOMATIC_EMBED_MODEL=embeddinggemma
      - MNEMOMATIC_EMBED_DIM=768
      - "MNEMOMATIC_EMBED_QUERY_PREFIX=task: search result | query: "

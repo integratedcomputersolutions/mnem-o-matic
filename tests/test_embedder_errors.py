@@ -28,8 +28,8 @@ class TestHttpEmbedderErrors(unittest.TestCase):
     """Test HttpEmbedder error handling."""
 
     def setUp(self):
-        """Create embedder instance."""
-        self.embedder = HttpEmbedder("http://localhost:11434/api/embeddings", model="test-model")
+        """Create embedder instance (Ollama wire format — the mocks below are Ollama-shaped)."""
+        self.embedder = HttpEmbedder("http://localhost:11434/api/embeddings", model="test-model", api="ollama")
 
     def test_http_embedder_network_unreachable(self):
         """Network error (URLError) should be caught and re-raised as RuntimeError."""
@@ -180,7 +180,7 @@ class TestHttpEmbedderErrors(unittest.TestCase):
             mock_resp.__exit__.return_value = None
             mock_urlopen.return_value = mock_resp
 
-            embedder = HttpEmbedder("http://localhost:11434/api/embeddings", model="test")
+            embedder = HttpEmbedder("http://localhost:11434/api/embeddings", model="test", api="ollama")
 
             result1 = embedder.embed("test text")
             result2 = embedder.embed("test text")
@@ -277,7 +277,7 @@ class TestHttpEmbedderBatch(unittest.TestCase):
     per-item failure semantics."""
 
     def setUp(self):
-        self.embedder = HttpEmbedder("http://localhost:11434/api/embeddings", model="m")
+        self.embedder = HttpEmbedder("http://localhost:11434/api/embeddings", model="m", api="ollama")
 
     def test_batch_preserves_order(self):
         texts = ["a", "bb", "ccc", "dddd"]
@@ -322,6 +322,72 @@ class TestHttpEmbedderBatch(unittest.TestCase):
             elapsed = time.perf_counter() - start
         self.assertTrue(all(r is not None for r in results))
         self.assertLess(elapsed, 0.5, f"batch took {elapsed:.2f}s — requests ran sequentially?")
+
+
+class TestOpenAIWireFormat(unittest.TestCase):
+    """The default (openai) wire format: request body, response parsing, errors."""
+
+    def setUp(self):
+        self.embedder = HttpEmbedder("http://dante:8181/v1/embeddings", model="embeddinggemma")
+
+    def _respond(self, payload):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps(payload).encode()
+        mock_resp.__enter__.return_value = mock_resp
+        mock_resp.__exit__.return_value = None
+        return mock_resp
+
+    def test_default_api_is_openai(self):
+        self.assertEqual(self.embedder.api, "openai")
+        self.assertEqual(self.embedder.mode, "external HTTP (openai)")
+
+    def test_request_body_uses_input_field(self):
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_urlopen.return_value = self._respond({"data": [{"embedding": [0.6, 0.8]}]})
+            self.embedder.embed("hello")
+        sent = json.loads(mock_urlopen.call_args[0][0].data)
+        self.assertEqual(sent, {"model": "embeddinggemma", "input": "hello"})
+
+    def test_response_parsed_and_normalized(self):
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_urlopen.return_value = self._respond(
+                {"object": "list", "data": [{"object": "embedding", "index": 0, "embedding": [3.0, 4.0]}]}
+            )
+            result = self.embedder.embed("hello")
+        self.assertAlmostEqual(result[0], 0.6, places=9)
+        self.assertAlmostEqual(result[1], 0.8, places=9)
+
+    def test_missing_data_field_raises(self):
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_urlopen.return_value = self._respond({"embedding": [0.6, 0.8]})  # ollama shape
+            with self.assertRaises(RuntimeError) as cm:
+                self.embedder.embed("hello")
+        self.assertIn("data[0].embedding", str(cm.exception))
+
+    def test_empty_data_list_raises(self):
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_urlopen.return_value = self._respond({"data": []})
+            with self.assertRaises(RuntimeError) as cm:
+                self.embedder.embed("hello")
+        self.assertIn("data[0].embedding", str(cm.exception))
+
+    def test_invalid_api_value_rejected(self):
+        with self.assertRaises(ValueError) as cm:
+            HttpEmbedder("http://x/v1/embeddings", api="grpc")
+        self.assertIn("MNEMOMATIC_EMBED_API", str(cm.exception))
+
+    def test_flavor_url_mismatch_warns(self):
+        with self.assertLogs("mnemomatic", level="WARNING") as cm:
+            HttpEmbedder("http://ollama:11434/api/embeddings", api="openai")
+        self.assertIn("MNEMOMATIC_EMBED_API=ollama", cm.output[0])
+        with self.assertLogs("mnemomatic", level="WARNING") as cm:
+            HttpEmbedder("http://dante:8181/v1/embeddings", api="ollama")
+        self.assertIn("MNEMOMATIC_EMBED_API=openai", cm.output[0])
+
+    def test_matching_flavor_does_not_warn(self):
+        with self.assertNoLogs("mnemomatic", level="WARNING"):
+            HttpEmbedder("http://dante:8181/v1/embeddings", api="openai")
+            HttpEmbedder("http://ollama:11434/api/embeddings", api="ollama")
 
 
 class TestSafeEmbedBatch(unittest.TestCase):
