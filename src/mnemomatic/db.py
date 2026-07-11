@@ -453,7 +453,7 @@ class Database:
             conn.rollback()
             raise
         self.dim_change_pending = False
-        logger.info("Vector tables rebuilt, re-embedding content...")
+        logger.info("Vector tables rebuilt, re-embedding content for %d dims", EMBEDDING_DIM)
 
     def set_embedding(self, item_type: str, item_id: str, embedding: list[float]) -> bool:
         """Write an item's embedding without touching its content or timestamps.
