@@ -164,11 +164,13 @@ The first build takes a few minutes — it downloads the embedding model (checks
 
 The `full` image bundles one of three embedding models, selected with the `EMBED_MODEL` build argument:
 
-| `EMBED_MODEL` | Dimensions | Languages | Query embed (CPU) | Model size | Notes |
-| ------------- | ---------- | --------- | ----------------- | ---------- | ----- |
-| `minilm` (default) | 384 | English | ~10–15 ms | ~23 MB | `all-MiniLM-L6-v2` — fastest and smallest; compatible with databases created by earlier releases |
-| `gte-multilingual-base` | 768 | ~70 | ~12 ms | ~325 MB | Strong multilingual retrieval at near-MiniLM query speed; 8192-token context; no task prefixes |
-| `embeddinggemma` | 768 | 100+ | ~160–225 ms | ~330 MB | EmbeddingGemma-300m — best retrieval quality, 2048-token context; weights under the [Gemma Terms of Use](https://ai.google.dev/gemma/terms) |
+| `EMBED_MODEL` | Dimensions | Languages | Query embed (CPU) | Model size | RAM (running) | Notes |
+| ------------- | ---------- | --------- | ----------------- | ---------- | ------------- | ----- |
+| `minilm` (default) | 384 | English | ~10–15 ms | ~23 MB | ~240 MB | `all-MiniLM-L6-v2` — fastest and smallest; compatible with databases created by earlier releases |
+| `gte-multilingual-base` | 768 | ~70 | ~12 ms | ~325 MB | ~880 MB | Strong multilingual retrieval at near-MiniLM query speed; 8192-token context; no task prefixes |
+| `embeddinggemma` | 768 | 100+ | ~160–225 ms | ~330 MB | ~1.2 GB | EmbeddingGemma-300m — best retrieval quality, 2048-token context; weights under the [Gemma Terms of Use](https://ai.google.dev/gemma/terms) |
+
+RAM figures are steady-state container usage measured on the same production deployment (they include the server itself plus SQLite's page cache and memory-mapped database file, not just the model). The INT8 weights are compact on disk, but `onnxruntime` expands parts of the larger models at load time, so their resident memory runs well above the model file size.
 
 #### Which one should I pick?
 

@@ -8,9 +8,9 @@ services:
       context: .
       target: full          # use 'lite' for the smaller image (requires MNEMOMATIC_EMBED_URL)
       # args:                                 # built-in embedding model — uncomment ONE:
-      #   EMBED_MODEL: minilm                 # (default) all-MiniLM-L6-v2 — 384 dims, English, ~10-15 ms/embed, ~23 MB
-      #   EMBED_MODEL: gte-multilingual-base  # 768 dims, ~70 languages, ~12 ms/query embed, 8192-token context, ~325 MB
-      #   EMBED_MODEL: embeddinggemma         # 768 dims, best retrieval quality, ~200 ms/embed, ~330 MB
+      #   EMBED_MODEL: minilm                 # (default) all-MiniLM-L6-v2 — 384 dims, English, ~10-15 ms/embed, ~240 MB RAM
+      #   EMBED_MODEL: gte-multilingual-base  # 768 dims, ~70 languages, ~12 ms/query embed, 8192-token context, ~880 MB RAM
+      #   EMBED_MODEL: embeddinggemma         # 768 dims, best retrieval quality, ~200 ms/embed, ~1.2 GB RAM
       #                                       # switching models on an existing database needs one MNEMOMATIC_REINDEX=1 restart
     # No ports exposed directly — all traffic goes through Caddy
     # (or uncomment below for direct access: ports: ["${PORT:-8686}:8000"])
