@@ -28,6 +28,10 @@ Mnem-O-matic fixes this by providing a shared, persistent memory that any LLM ca
 
 All types support namespaces (per-project or global), tags, and metadata. Everything is searchable via full-text and semantic search. Large documents are automatically split into chunks at store time, so search returns the most relevant passage rather than the entire file — giving agents focused context without burning their context window.
 
+## Embedding Model
+
+Semantic search runs on a local embedding model bundled into the Docker image — nothing leaves your machine. Three models are selectable at build time via the `EMBED_MODEL` build argument: **MiniLM** (the default) is the smallest and fastest but also the most limited — English only, and the weakest at paraphrased queries; **gte-multilingual-base** adds strong multilingual retrieval at near-MiniLM query speed; **EmbeddingGemma** has the best retrieval quality of the three — it resolves paraphrased queries that share no words with the stored content — at a higher CPU and memory cost. You can also bypass the built-in model and point `MNEMOMATIC_EMBED_URL` at any OpenAI-compatible embedding endpoint. See [choosing the built-in embedding model](docs/installation.md#choosing-the-built-in-embedding-model) for the full comparison.
+
 ## Agent Skill
 
 A sample agent skill file is included at `skills/mnemomatic/SKILL.md`. It teaches an agent how to use Mnem-O-matic effectively — when to search, which search mode to pick, what content type to store, and how to retrieve full content after a search.
