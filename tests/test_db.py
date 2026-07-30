@@ -19,7 +19,7 @@ import sqlite_vec
 import mnemomatic.db
 from mnemomatic.db import (
     Database, SCHEMA_VERSION, _chunk_text, _serialize_embedding,
-    _DOCUMENT_FIELDS, _KNOWLEDGE_FIELDS, _NOTE_FIELDS,
+    _TABLE_UPDATE_FIELDS,
 )
 from mnemomatic.models import Document, Knowledge, Note
 
@@ -122,10 +122,10 @@ class TestDocumentCRUD(unittest.TestCase):
         self.assertEqual(len(self.db.list_documents("other")), 0)
 
     def test_allowlist_constants(self):
-        self.assertIn("title", _DOCUMENT_FIELDS)
-        self.assertIn("content", _DOCUMENT_FIELDS)
-        self.assertNotIn("namespace", _DOCUMENT_FIELDS)
-        self.assertNotIn("id", _DOCUMENT_FIELDS)
+        self.assertIn("title", _TABLE_UPDATE_FIELDS["documents"])
+        self.assertIn("content", _TABLE_UPDATE_FIELDS["documents"])
+        self.assertNotIn("namespace", _TABLE_UPDATE_FIELDS["documents"])
+        self.assertNotIn("id", _TABLE_UPDATE_FIELDS["documents"])
 
 
 # ── Knowledge ──────────────────────────────────────────────────────────────────
@@ -204,10 +204,10 @@ class TestKnowledgeCRUD(unittest.TestCase):
         self.assertEqual(len(self.db.list_knowledge("other")), 0)
 
     def test_allowlist_constants(self):
-        self.assertIn("fact", _KNOWLEDGE_FIELDS)
-        self.assertIn("confidence", _KNOWLEDGE_FIELDS)
-        self.assertNotIn("namespace", _KNOWLEDGE_FIELDS)
-        self.assertNotIn("id", _KNOWLEDGE_FIELDS)
+        self.assertIn("fact", _TABLE_UPDATE_FIELDS["knowledge"])
+        self.assertIn("confidence", _TABLE_UPDATE_FIELDS["knowledge"])
+        self.assertNotIn("namespace", _TABLE_UPDATE_FIELDS["knowledge"])
+        self.assertNotIn("id", _TABLE_UPDATE_FIELDS["knowledge"])
 
 
 # ── Notes ──────────────────────────────────────────────────────────────────────
@@ -285,10 +285,10 @@ class TestNoteCRUD(unittest.TestCase):
         self.assertEqual(len(self.db.list_notes("other")), 0)
 
     def test_allowlist_constants(self):
-        self.assertIn("content", _NOTE_FIELDS)
-        self.assertIn("source", _NOTE_FIELDS)
-        self.assertNotIn("namespace", _NOTE_FIELDS)
-        self.assertNotIn("id", _NOTE_FIELDS)
+        self.assertIn("content", _TABLE_UPDATE_FIELDS["notes"])
+        self.assertIn("source", _TABLE_UPDATE_FIELDS["notes"])
+        self.assertNotIn("namespace", _TABLE_UPDATE_FIELDS["notes"])
+        self.assertNotIn("id", _TABLE_UPDATE_FIELDS["notes"])
 
 
 # ── Tags ───────────────────────────────────────────────────────────────────────

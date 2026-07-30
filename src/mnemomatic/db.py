@@ -30,12 +30,25 @@ CHUNK_THRESHOLD = int(os.environ.get("MNEMOMATIC_CHUNK_THRESHOLD", "2000"))
 CHUNK_SIZE = int(os.environ.get("MNEMOMATIC_CHUNK_SIZE", "1000"))
 CHUNK_OVERLAP = int(os.environ.get("MNEMOMATIC_CHUNK_OVERLAP", "200"))
 
-_DOCUMENT_FIELDS = frozenset({"title", "content", "mime_type", "tags", "metadata"})
-_KNOWLEDGE_FIELDS = frozenset({"subject", "fact", "confidence", "source", "tags", "metadata"})
-_NOTE_FIELDS = frozenset({"title", "content", "source", "tags", "metadata"})
-
 # The three content tables, in display order. Each has a parallel vec_<table>.
 _TABLES = ("documents", "knowledge", "notes")
+
+# Per-table shape: the pydantic model, the full column list (mirroring the
+# model's fields), and the fields update_* may change.
+_TABLE_MODEL = {"documents": Document, "knowledge": Knowledge, "notes": Note}
+_TABLE_COLUMNS = {
+    "documents": ("id", "namespace", "title", "content", "mime_type",
+                  "tags", "metadata", "created_at", "updated_at"),
+    "knowledge": ("id", "namespace", "subject", "fact", "confidence", "source",
+                  "tags", "metadata", "created_at", "updated_at"),
+    "notes": ("id", "namespace", "title", "content", "source",
+              "tags", "metadata", "created_at", "updated_at"),
+}
+_TABLE_UPDATE_FIELDS = {
+    "documents": frozenset({"title", "content", "mime_type", "tags", "metadata"}),
+    "knowledge": frozenset({"subject", "fact", "confidence", "source", "tags", "metadata"}),
+    "notes": frozenset({"title", "content", "source", "tags", "metadata"}),
+}
 
 # Maps singular item_type strings (used by update_tags) to table names
 _ITEM_TYPE_TO_TABLE = {"document": "documents", "knowledge": "knowledge", "note": "notes"}
@@ -144,6 +157,33 @@ def _safe_json_loads(s: str, default, context: str = ""):
 
 def _dict_factory(cursor: sqlite3.Cursor, row: tuple) -> dict:
     return {col[0]: row[i] for i, col in enumerate(cursor.description)}
+
+
+def _row_to_model(model_cls, row: dict):
+    """Hydrate a content-table row into its pydantic model.
+
+    Ignores extra row keys (e.g. rowid from RETURNING clauses); parses the
+    JSON and timestamp columns that SQLite stores as text.
+    """
+    data = {k: v for k, v in row.items() if k in model_cls.model_fields}
+    data["tags"] = _safe_json_loads(row["tags"], [], f"tags row {row['id']}")
+    data["metadata"] = _safe_json_loads(row["metadata"], {}, f"metadata row {row['id']}")
+    data["created_at"] = datetime.fromisoformat(row["created_at"])
+    data["updated_at"] = datetime.fromisoformat(row["updated_at"])
+    return model_cls(**data)
+
+
+def _item_column_values(item, columns) -> list:
+    """The model's values for `columns`, serialized the way the tables store them."""
+    values = []
+    for col in columns:
+        v = getattr(item, col)
+        if col in ("tags", "metadata"):
+            v = json.dumps(v)
+        elif col in ("created_at", "updated_at"):
+            v = v.isoformat()
+        values.append(v)
+    return values
 
 
 class Database:
@@ -475,20 +515,69 @@ class Database:
 
     # ── Generic CRUD helpers ──
 
-    def _get_item(self, table: str, converter, item_id: str):
+    def _store_item(self, table: str, item, embedding: list[float] | None,
+                    chunks: list[tuple[str, list[float]]] | None = None):
+        """Upsert an item keyed by (namespace, title/subject).
+
+        Returns (stored item, created). Documents additionally get their chunk
+        rows replaced — even when chunks is None, which clears stale chunks on
+        an update.
+        """
+        conn = self._get_conn()
+        key = _TABLE_TITLE_FIELD[table]
+        columns = _TABLE_COLUMNS[table]
+        existing = conn.execute(
+            f"SELECT id, rowid, created_at FROM {table} WHERE namespace = ? AND {key} = ?",
+            (item.namespace, getattr(item, key)),
+        ).fetchone()
+
+        if existing:
+            stored = item.model_copy(update={
+                "id": existing["id"],
+                "created_at": datetime.fromisoformat(existing["created_at"]),
+                "updated_at": datetime.now(timezone.utc),
+            })
+            update_cols = [c for c in columns if c not in ("id", "namespace", key, "created_at")]
+            conn.execute(
+                f"UPDATE {table} SET {', '.join(f'{c} = ?' for c in update_cols)} WHERE id = ?",
+                (*_item_column_values(stored, update_cols), existing["id"]),
+            )
+            if embedding is not None:
+                self._upsert_vec(conn, f"vec_{table}", existing["rowid"], embedding, item.namespace)
+            if table == "documents":
+                self._replace_document_chunks(conn, existing["id"], chunks, namespace=item.namespace)
+            conn.commit()
+            return stored, False
+
+        rowid = conn.execute(
+            f"INSERT INTO {table} ({', '.join(columns)}) "
+            f"VALUES ({', '.join('?' * len(columns))}) RETURNING rowid",
+            _item_column_values(item, columns),
+        ).fetchone()["rowid"]
+        if embedding is not None:
+            conn.execute(
+                f"INSERT INTO vec_{table} (rowid, namespace, embedding) VALUES (?, ?, ?)",
+                (rowid, item.namespace, _serialize_embedding(embedding)),
+            )
+        if table == "documents":
+            self._replace_document_chunks(conn, item.id, chunks, namespace=item.namespace)
+        conn.commit()
+        return item, True
+
+    def _get_item(self, table: str, item_id: str):
         row = self._get_conn().execute(
             f"SELECT * FROM {table} WHERE id = ?", (item_id,)
         ).fetchone()
-        return converter(row) if row else None
+        return _row_to_model(_TABLE_MODEL[table], row) if row else None
 
-    def _delete_item(self, table: str, vec_table: str, item_id: str) -> bool:
+    def _delete_item(self, table: str, item_id: str) -> bool:
         conn = self._get_conn()
         row = conn.execute(
             f"DELETE FROM {table} WHERE id = ? RETURNING rowid", (item_id,)
         ).fetchone()
         if not row:
             return False
-        conn.execute(f"DELETE FROM {vec_table} WHERE rowid = ?", (row["rowid"],))
+        conn.execute(f"DELETE FROM vec_{table} WHERE rowid = ?", (row["rowid"],))
         conn.commit()
         return True
 
@@ -510,14 +599,14 @@ class Database:
                 (rowid, namespace, _serialize_embedding(embedding)),
             )
 
-    def _list_items(self, table: str, converter, namespace: str) -> list:
+    def _list_items(self, table: str, namespace: str) -> list:
         rows = self._get_conn().execute(
             f"SELECT * FROM {table} WHERE namespace = ? ORDER BY updated_at DESC", (namespace,)
         ).fetchall()
-        return [converter(r) for r in rows]
+        return [_row_to_model(_TABLE_MODEL[table], r) for r in rows]
 
-    def _update_item(self, table: str, vec_table: str, allowed_fields: frozenset, converter, item_id: str, embedding: list[float] | None, **fields):
-        invalid = set(fields) - allowed_fields
+    def _update_item(self, table: str, item_id: str, embedding: list[float] | None, **fields):
+        invalid = set(fields) - _TABLE_UPDATE_FIELDS[table]
         if invalid:
             raise ValueError(f"Invalid {table} fields: {invalid}")
         conn = self._get_conn()
@@ -536,68 +625,26 @@ class Database:
         if not row:
             return None
         if embedding is not None:
-            self._upsert_vec(conn, vec_table, row["rowid"], embedding, row["namespace"])
+            self._upsert_vec(conn, f"vec_{table}", row["rowid"], embedding, row["namespace"])
         conn.commit()
-        return converter(row)
+        return _row_to_model(_TABLE_MODEL[table], row)
 
     # ── Documents CRUD ──
 
     def store_document(self, doc: Document, embedding: list[float] | None, chunks: list[tuple[str, list[float]]] | None = None) -> tuple[Document, bool]:
-        conn = self._get_conn()
-        existing = conn.execute(
-            "SELECT id, rowid, created_at FROM documents WHERE namespace = ? AND title = ?",
-            (doc.namespace, doc.title),
-        ).fetchone()
-        if existing:
-            now = datetime.now(timezone.utc).isoformat()
-            conn.execute(
-                """UPDATE documents SET content = ?, mime_type = ?, tags = ?, metadata = ?, updated_at = ?
-                   WHERE id = ?""",
-                (doc.content, doc.mime_type, json.dumps(doc.tags), json.dumps(doc.metadata), now, existing["id"]),
-            )
-            if embedding is not None:
-                self._upsert_vec(conn, "vec_documents", existing["rowid"], embedding, doc.namespace)
-            self._replace_document_chunks(conn, existing["id"], chunks, namespace=doc.namespace)
-            conn.commit()
-            return Document(
-                id=existing["id"],
-                namespace=doc.namespace,
-                title=doc.title,
-                content=doc.content,
-                mime_type=doc.mime_type,
-                tags=doc.tags,
-                metadata=doc.metadata,
-                created_at=datetime.fromisoformat(existing["created_at"]),
-                updated_at=datetime.fromisoformat(now),
-            ), False
-
-        rowid = conn.execute(
-            """INSERT INTO documents (id, namespace, title, content, mime_type, tags, metadata, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING rowid""",
-            (doc.id, doc.namespace, doc.title, doc.content, doc.mime_type,
-             json.dumps(doc.tags), json.dumps(doc.metadata),
-             doc.created_at.isoformat(), doc.updated_at.isoformat()),
-        ).fetchone()["rowid"]
-        if embedding is not None:
-            conn.execute(
-                "INSERT INTO vec_documents (rowid, namespace, embedding) VALUES (?, ?, ?)",
-                (rowid, doc.namespace, _serialize_embedding(embedding)),
-            )
-        self._replace_document_chunks(conn, doc.id, chunks, namespace=doc.namespace)
-        conn.commit()
-        return doc, True
+        return self._store_item("documents", doc, embedding, chunks)
 
     def get_document(self, doc_id: str) -> Document | None:
-        return self._get_item("documents", self._row_to_document, doc_id)
+        return self._get_item("documents", doc_id)
 
     def update_document(self, doc_id: str, embedding: list[float] | None = None, **fields) -> Document | None:
-        return self._update_item("documents", "vec_documents", _DOCUMENT_FIELDS, self._row_to_document, doc_id, embedding, **fields)
+        return self._update_item("documents", doc_id, embedding, **fields)
 
     def delete_document(self, doc_id: str) -> bool:
-        return self._delete_item("documents", "vec_documents", doc_id)
+        return self._delete_item("documents", doc_id)
 
     def list_documents(self, namespace: str) -> list[Document]:
-        return self._list_items("documents", self._row_to_document, namespace)
+        return self._list_items("documents", namespace)
 
     def replace_document_chunks(self, doc_id: str, chunks: list[tuple[str, list[float]]] | None) -> None:
         """Replace all chunks for a document. Deletes existing chunks, then inserts new ones if provided."""
@@ -608,117 +655,36 @@ class Database:
     # ── Knowledge CRUD ──
 
     def store_knowledge(self, k: Knowledge, embedding: list[float] | None) -> tuple[Knowledge, bool]:
-        conn = self._get_conn()
-        existing = conn.execute(
-            "SELECT id, rowid, created_at FROM knowledge WHERE namespace = ? AND subject = ?",
-            (k.namespace, k.subject),
-        ).fetchone()
-        if existing:
-            now = datetime.now(timezone.utc).isoformat()
-            conn.execute(
-                """UPDATE knowledge SET fact = ?, confidence = ?, source = ?, tags = ?, metadata = ?, updated_at = ?
-                   WHERE id = ?""",
-                (k.fact, k.confidence, k.source, json.dumps(k.tags), json.dumps(k.metadata), now, existing["id"]),
-            )
-            if embedding is not None:
-                self._upsert_vec(conn, "vec_knowledge", existing["rowid"], embedding, k.namespace)
-            conn.commit()
-            return Knowledge(
-                id=existing["id"],
-                namespace=k.namespace,
-                subject=k.subject,
-                fact=k.fact,
-                confidence=k.confidence,
-                source=k.source,
-                tags=k.tags,
-                metadata=k.metadata,
-                created_at=datetime.fromisoformat(existing["created_at"]),
-                updated_at=datetime.fromisoformat(now),
-            ), False
-
-        rowid = conn.execute(
-            """INSERT INTO knowledge (id, namespace, subject, fact, confidence, source, tags, metadata, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING rowid""",
-            (k.id, k.namespace, k.subject, k.fact, k.confidence, k.source,
-             json.dumps(k.tags), json.dumps(k.metadata),
-             k.created_at.isoformat(), k.updated_at.isoformat()),
-        ).fetchone()["rowid"]
-        if embedding is not None:
-            conn.execute(
-                "INSERT INTO vec_knowledge (rowid, namespace, embedding) VALUES (?, ?, ?)",
-                (rowid, k.namespace, _serialize_embedding(embedding)),
-            )
-        conn.commit()
-        return k, True
+        return self._store_item("knowledge", k, embedding)
 
     def get_knowledge(self, k_id: str) -> Knowledge | None:
-        return self._get_item("knowledge", self._row_to_knowledge, k_id)
+        return self._get_item("knowledge", k_id)
 
     def update_knowledge(self, k_id: str, embedding: list[float] | None = None, **fields) -> Knowledge | None:
-        return self._update_item("knowledge", "vec_knowledge", _KNOWLEDGE_FIELDS, self._row_to_knowledge, k_id, embedding, **fields)
+        return self._update_item("knowledge", k_id, embedding, **fields)
 
     def delete_knowledge(self, k_id: str) -> bool:
-        return self._delete_item("knowledge", "vec_knowledge", k_id)
+        return self._delete_item("knowledge", k_id)
 
     def list_knowledge(self, namespace: str) -> list[Knowledge]:
-        return self._list_items("knowledge", self._row_to_knowledge, namespace)
+        return self._list_items("knowledge", namespace)
 
     # ── Notes CRUD ──
 
     def store_note(self, note: Note, embedding: list[float] | None) -> tuple[Note, bool]:
-        conn = self._get_conn()
-        existing = conn.execute(
-            "SELECT id, rowid, created_at FROM notes WHERE namespace = ? AND title = ?",
-            (note.namespace, note.title),
-        ).fetchone()
-        if existing:
-            now = datetime.now(timezone.utc).isoformat()
-            conn.execute(
-                """UPDATE notes SET content = ?, source = ?, tags = ?, metadata = ?, updated_at = ?
-                   WHERE id = ?""",
-                (note.content, note.source, json.dumps(note.tags), json.dumps(note.metadata), now, existing["id"]),
-            )
-            if embedding is not None:
-                self._upsert_vec(conn, "vec_notes", existing["rowid"], embedding, note.namespace)
-            conn.commit()
-            return Note(
-                id=existing["id"],
-                namespace=note.namespace,
-                title=note.title,
-                content=note.content,
-                source=note.source,
-                tags=note.tags,
-                metadata=note.metadata,
-                created_at=datetime.fromisoformat(existing["created_at"]),
-                updated_at=datetime.fromisoformat(now),
-            ), False
-
-        rowid = conn.execute(
-            """INSERT INTO notes (id, namespace, title, content, source, tags, metadata, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING rowid""",
-            (note.id, note.namespace, note.title, note.content, note.source,
-             json.dumps(note.tags), json.dumps(note.metadata),
-             note.created_at.isoformat(), note.updated_at.isoformat()),
-        ).fetchone()["rowid"]
-        if embedding is not None:
-            conn.execute(
-                "INSERT INTO vec_notes (rowid, namespace, embedding) VALUES (?, ?, ?)",
-                (rowid, note.namespace, _serialize_embedding(embedding)),
-            )
-        conn.commit()
-        return note, True
+        return self._store_item("notes", note, embedding)
 
     def get_note(self, note_id: str) -> Note | None:
-        return self._get_item("notes", self._row_to_note, note_id)
+        return self._get_item("notes", note_id)
 
     def update_note(self, note_id: str, embedding: list[float] | None = None, **fields) -> Note | None:
-        return self._update_item("notes", "vec_notes", _NOTE_FIELDS, self._row_to_note, note_id, embedding, **fields)
+        return self._update_item("notes", note_id, embedding, **fields)
 
     def delete_note(self, note_id: str) -> bool:
-        return self._delete_item("notes", "vec_notes", note_id)
+        return self._delete_item("notes", note_id)
 
     def list_notes(self, namespace: str) -> list[Note]:
-        return self._list_items("notes", self._row_to_note, namespace)
+        return self._list_items("notes", namespace)
 
     # ── Tags ──
 
@@ -897,7 +863,7 @@ class Database:
         for row in rows:
             row["tags"] = _safe_json_loads(row["tags"], [], f"tags row {row['id']}")
         return rows, total
-      
+
     def namespace_counts(self) -> dict[str, dict[str, int]]:
         """Per-namespace item counts for each content table, keyed by namespace.
 
@@ -974,26 +940,6 @@ class Database:
             results.append(_row_to_search_result(table, row, score))
         return results
 
-    def _row_to_document(self, row: dict) -> Document:
-        return Document(
-            id=row["id"], namespace=row["namespace"], title=row["title"],
-            content=row["content"], mime_type=row["mime_type"],
-            tags=_safe_json_loads(row["tags"], [], f"tags row {row['id']}"),
-            metadata=_safe_json_loads(row["metadata"], {}, f"metadata row {row['id']}"),
-            created_at=datetime.fromisoformat(row["created_at"]),
-            updated_at=datetime.fromisoformat(row["updated_at"]),
-        )
-
-    def _row_to_note(self, row: dict) -> Note:
-        return Note(
-            id=row["id"], namespace=row["namespace"], title=row["title"],
-            content=row["content"], source=row["source"],
-            tags=_safe_json_loads(row["tags"], [], f"tags row {row['id']}"),
-            metadata=_safe_json_loads(row["metadata"], {}, f"metadata row {row['id']}"),
-            created_at=datetime.fromisoformat(row["created_at"]),
-            updated_at=datetime.fromisoformat(row["updated_at"]),
-        )
-
     def _replace_document_chunks(self, conn: sqlite3.Connection, doc_id: str, chunks: list[tuple[str, list[float]]] | None, namespace: str | None = None) -> None:
         """Delete existing chunks for a document and optionally insert new ones. Does not commit.
 
@@ -1068,16 +1014,6 @@ class Database:
                 partial=True,
             ))
         return results
-
-    def _row_to_knowledge(self, row: dict) -> Knowledge:
-        return Knowledge(
-            id=row["id"], namespace=row["namespace"], subject=row["subject"],
-            fact=row["fact"], confidence=row["confidence"], source=row["source"],
-            tags=_safe_json_loads(row["tags"], [], f"tags row {row['id']}"),
-            metadata=_safe_json_loads(row["metadata"], {}, f"metadata row {row['id']}"),
-            created_at=datetime.fromisoformat(row["created_at"]),
-            updated_at=datetime.fromisoformat(row["updated_at"]),
-        )
 
     def close(self):
         conn = getattr(self._local, "conn", None)

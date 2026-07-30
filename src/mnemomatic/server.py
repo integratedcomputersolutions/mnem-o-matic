@@ -466,21 +466,21 @@ def _note_update_embedding(id: str, existing: Note, fields: dict) -> list[float]
 _UPDATE_CONFIG = {
     "document": {
         "model": Document,
-        "getter": lambda db, id: db.get_document(id),
+        "getter": Database.get_document,
         "updater": lambda db, id, emb, fields: db.update_document(id, embedding=emb, **fields),
         "embed": _document_update_embedding,
         "key": "title",
     },
     "knowledge": {
         "model": Knowledge,
-        "getter": lambda db, id: db.get_knowledge(id),
+        "getter": Database.get_knowledge,
         "updater": lambda db, id, emb, fields: db.update_knowledge(id, embedding=emb, **fields),
         "embed": _knowledge_update_embedding,
         "key": "subject",
     },
     "note": {
         "model": Note,
-        "getter": lambda db, id: db.get_note(id),
+        "getter": Database.get_note,
         "updater": lambda db, id, emb, fields: db.update_note(id, embedding=emb, **fields),
         "embed": _note_update_embedding,
         "key": "title",
@@ -811,9 +811,9 @@ def search(
 
 
 _READ_GETTERS = {
-    "document": lambda db, id: db.get_document(id),
-    "knowledge": lambda db, id: db.get_knowledge(id),
-    "note": lambda db, id: db.get_note(id),
+    "document": Database.get_document,
+    "knowledge": Database.get_knowledge,
+    "note": Database.get_note,
 }
 
 
