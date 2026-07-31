@@ -7,6 +7,9 @@
 #                           (~12 ms/embed), 8192-token context, ~325 MB
 #   embeddinggemma        — EmbeddingGemma-300m: 768 dims, best retrieval
 #                           quality, multilingual, ~200 ms/embed, ~330 MB
+#   amaretto-embed-148m   — sliced EmbeddingGemma distillation: 768 dims,
+#                           8 Latin-script languages + code, near-Gemma quality
+#                           at ~130 ms/embed and ~297 MB (weight-only INT8)
 # Selecting a model bakes its weights and a model_config.json (dimension, task
 # prefixes, token limit) into the image — no runtime configuration needed.
 # Switching models on an existing database requires one MNEMOMATIC_REINDEX=1
@@ -98,6 +101,24 @@ MODELS = {
         ],
         "quantize": False,
         "config": {"model": "embeddinggemma-300m", "dim": 768, "max_tokens": 2048,
+                   "query_prefix": "task: search result | query: ",
+                   "doc_prefix": "title: none | text: "},
+    },
+    # Weight-only INT8 (MatMulNBits): activations stay FP32, so fidelity holds
+    # at long inputs (cos vs torch >= 0.999 through 2048 tokens) and the weights
+    # stay quantized in RAM. The op is com.microsoft domain — fine for the
+    # bundled onnxruntime, not portable to other ONNX runtimes.
+    "amaretto-embed-148m": {
+        "repo": "AmarettoLabs/amaretto-embed-148m-ONNX",
+        "revision": "f27ee11523834d96eb43e293afb878bf943701bf",  # v1.1.0
+        "files": [
+            ("model_int8.onnx", "model.onnx",
+             "8bf1cc9663913c7fc7c3d3787fc42869d5a120ebeef297c3e663f4bf5a5221ef"),
+            ("tokenizer.json", "tokenizer.json",
+             "557d686df474db4ed5612819752c7b1e9996e697170f9ae74577ee616cb4179c"),
+        ],
+        "quantize": False,
+        "config": {"model": "amaretto-embed-148m", "dim": 768, "max_tokens": 2048,
                    "query_prefix": "task: search result | query: ",
                    "doc_prefix": "title: none | text: "},
     },
