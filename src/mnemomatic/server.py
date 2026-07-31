@@ -905,6 +905,55 @@ def health() -> str:
     })
 
 
+# Hugging Face model cards for the models the Docker build can bake in, keyed
+# by the exact names it writes to model_config.json. Links point at the source
+# model card (weights provenance, benchmarks, license), not the ONNX mirror
+# the image downloads from. Unknown/external models simply get no link.
+_HF_MODEL_PAGES = {
+    "all-MiniLM-L6-v2": "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2",
+    "gte-multilingual-base": "https://huggingface.co/Alibaba-NLP/gte-multilingual-base",
+    "embeddinggemma-300m": "https://huggingface.co/google/embeddinggemma-300m",
+    "amaretto-embed-148m": "https://huggingface.co/AmarettoLabs/amaretto-embed-148m",
+}
+
+
+def _settings_info() -> dict:
+    """Configuration snapshot for the web viewer's settings page.
+
+    Reads EMBEDDING_DIM through the db module so it reflects the value the
+    running Database actually used (tests patch it there).
+    """
+    from mnemomatic import db as db_module
+    from mnemomatic.embeddings import EMBED_API, MODEL_MAX_TOKENS
+
+    embedder = _embedder()
+    try:
+        server_version = version("mnemomatic-server")
+    except PackageNotFoundError:
+        server_version = "unknown"
+
+    model_name = model_config.CONFIG.get("model") or EMBED_MODEL or None
+    info = {
+        "version": server_version,
+        "mode": embedder.mode if embedder is not None else "FTS-only (no embedder)",
+        "model": model_name,
+        "model_url": _HF_MODEL_PAGES.get(model_name),
+        "dim_configured": db_module.EMBEDDING_DIM,
+        "dim_database": _db().stored_embed_dim(),
+        "query_prefix": EMBED_QUERY_PREFIX,
+        "doc_prefix": EMBED_DOC_PREFIX,
+        "chunk_threshold": CHUNK_THRESHOLD,
+        "chunk_size": CHUNK_SIZE,
+        "chunk_overlap": CHUNK_OVERLAP,
+    }
+    if EMBED_URL:
+        info["endpoint_url"] = EMBED_URL
+        info["wire_api"] = EMBED_API
+    else:
+        info["max_tokens"] = MODEL_MAX_TOKENS
+    return info
+
+
 @mcp.tool(annotations=_ANN_DELETE)
 def delete_namespace(namespace: str) -> dict:
     """Permanently delete all items in a namespace.
@@ -1034,7 +1083,7 @@ def main():
     # Disabled unless MNEMOMATIC_UI_TOKEN is set, so it never exposes data by default.
     if UI_TOKEN:
         from mnemomatic.webui import register_webui
-        register_webui(app, _db, UI_TOKEN)
+        register_webui(app, _db, UI_TOKEN, settings_info=_settings_info)
         logger.info("Web viewer enabled at /ui")
     else:
         logger.info("Web viewer disabled (set MNEMOMATIC_UI_TOKEN to enable)")
