@@ -130,6 +130,8 @@ services:
 
 Then open `https://your-host/ui` (or `http://your-host:8000/ui` for direct access), enter the token once, and browse by namespace.
 
+A **Settings** page (`/ui/settings`, linked from the navbar) shows the configuration the server is running with — first section covers the embedding model: mode (built-in / external endpoint / FTS-only), model name (linked to its Hugging Face card for the built-in models), embedding dimension — with a warning when the server's dimension disagrees with the one the vector index was built at — token truncation limit or endpoint URL, task prefixes, and the document chunking settings.
+
 Notes:
 - There are **no user accounts** — access is a single shared secret, separate from `MNEMOMATIC_API_KEY` (the viewer is exempt from MCP Bearer auth and uses its own gate; the exemption only exists while the viewer is enabled).
 - The session cookie is HttpOnly and stores a value **derived** from the token with a per-process key — never the token itself. It is marked `Secure` when the connection is HTTPS (directly or via a proxy that sets `X-Forwarded-Proto`). Restarting the server invalidates existing sessions, so viewers re-enter the token.

@@ -495,6 +495,14 @@ class Database:
         self.dim_change_pending = False
         logger.info("Vector tables rebuilt, re-embedding content for %d dims", EMBEDDING_DIM)
 
+    def stored_embed_dim(self) -> int | None:
+        """The dimension the vector index was built with, or None for a
+        database created before schema_meta existed (pre-versioning)."""
+        row = self._get_conn().execute(
+            "SELECT value FROM schema_meta WHERE key = 'embed_dim'"
+        ).fetchone()
+        return int(row["value"]) if row else None
+
     def set_embedding(self, item_type: str, item_id: str, embedding: list[float]) -> bool:
         """Write an item's embedding without touching its content or timestamps.
 

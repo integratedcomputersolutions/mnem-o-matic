@@ -22,6 +22,23 @@ from mnemomatic.webui import COOKIE_NAME, register_webui
 
 TOKEN = "s3cret-token"
 
+# What server._settings_info() produces for a built-in model; tests mutate a
+# copy of this to exercise the mismatch alert and placeholder paths.
+MODEL_INFO = {
+    "version": "0.0.0-test",
+    "mode": "built-in ONNX (test-model)",
+    "model": "test-model",
+    "model_url": "https://huggingface.co/test-org/test-model",
+    "dim_configured": 384,
+    "dim_database": 384,
+    "max_tokens": 512,
+    "query_prefix": "q: ",
+    "doc_prefix": "",
+    "chunk_threshold": 2000,
+    "chunk_size": 1000,
+    "chunk_overlap": 200,
+}
+
 
 def _seed(db: Database) -> dict:
     """Populate one of each item type; return their ids."""
@@ -47,8 +64,9 @@ class WebUITestBase(unittest.TestCase):
         self._tmp.close()
         self.db = Database(self._tmp.name)
         self.ids = _seed(self.db)
+        self.settings_info = dict(MODEL_INFO)
         app = Starlette()
-        register_webui(app, lambda: self.db, TOKEN)
+        register_webui(app, lambda: self.db, TOKEN, settings_info=lambda: self.settings_info)
         self.client = TestClient(app, follow_redirects=False)
 
     def tearDown(self):
@@ -134,6 +152,11 @@ class TestGate(WebUITestBase):
         self.assertEqual(resp.status_code, 303)
         self.assertEqual(resp.headers["location"], "/ui/login")
 
+    def test_settings_view_requires_auth(self):
+        resp = self.client.get("/ui/settings")
+        self.assertEqual(resp.status_code, 303)
+        self.assertEqual(resp.headers["location"], "/ui/login")
+
 
 class TestViews(WebUITestBase):
     def setUp(self):
@@ -197,6 +220,65 @@ class TestViews(WebUITestBase):
             resp = self.client.get(path)
             self.assertEqual(resp.status_code, 200)
             self.assertNotIn("<script>alert(1)</script>", resp.text, f"unescaped namespace in {path}")
+
+    def test_settings_page_renders_configuration(self):
+        resp = self.client.get("/ui/settings")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("built-in ONNX (test-model)", resp.text)
+        self.assertIn("test-model", resp.text)
+        self.assertIn("512 tokens", resp.text)
+        # Query prefix is shown quoted so the trailing space is visible; an
+        # empty doc prefix renders as a placeholder, not an empty string.
+        self.assertIn("&quot;q: &quot;", resp.text)
+        self.assertIn("(none)", resp.text)
+        self.assertNotIn("alert-warning", resp.text)
+
+    def test_settings_page_links_model_to_hf(self):
+        resp = self.client.get("/ui/settings")
+        self.assertIn(
+            '<a href="https://huggingface.co/test-org/test-model" target="_blank" '
+            'rel="noopener">test-model</a>',
+            resp.text,
+        )
+
+    def test_settings_page_unknown_model_has_no_link(self):
+        self.settings_info["model_url"] = None
+        resp = self.client.get("/ui/settings")
+        self.assertIn("test-model", resp.text)
+        self.assertNotIn("huggingface.co", resp.text)
+
+    def test_settings_page_flags_dimension_mismatch(self):
+        self.settings_info["dim_database"] = 768
+        resp = self.client.get("/ui/settings")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("alert-warning", resp.text)
+        self.assertIn("MNEMOMATIC_REINDEX=1", resp.text)
+
+    def test_settings_page_shows_external_endpoint(self):
+        self.settings_info.pop("max_tokens")
+        self.settings_info["endpoint_url"] = "http://embed-host:8181/v1/embeddings"
+        self.settings_info["wire_api"] = "openai"
+        resp = self.client.get("/ui/settings")
+        self.assertIn("http://embed-host:8181/v1/embeddings", resp.text)
+        self.assertIn("openai", resp.text)
+        self.assertNotIn("Token truncation limit", resp.text)
+
+    def test_settings_page_without_provider_renders_placeholders(self):
+        # A viewer registered without settings_info (old call signature) must not error.
+        app = Starlette()
+        register_webui(app, lambda: self.db, TOKEN)
+        client = TestClient(app, follow_redirects=False)
+        client.post("/ui/login", data={"token": TOKEN})
+        resp = client.get("/ui/settings")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("Embedding mode", resp.text)
+
+    def test_navbar_links_settings_page(self):
+        resp = self.client.get("/ui")
+        self.assertIn('href="/ui/settings"', resp.text)
+        # The login page (unauthenticated chrome) must not advertise it.
+        self.client.cookies.clear()
+        self.assertNotIn('href="/ui/settings"', self.client.get("/ui/login").text)
 
     def test_namespace_links_url_encoded(self):
         # Namespaces may contain URL-special characters; links must encode them
