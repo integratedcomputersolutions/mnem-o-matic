@@ -139,6 +139,40 @@ Notes:
 - The viewer is served on the same host/port as the MCP endpoint. Because that port is typically bound to `0.0.0.0`, the shared secret is what keeps it private — choose a strong token, or additionally restrict the port at the network level (VPN, reverse proxy, firewall).
 - When `MNEMOMATIC_UI_TOKEN` is unset, `/ui` is not registered at all.
 
+## Export
+
+`GET /export` downloads the entire store (or one namespace with `?namespace=...`) as a **human-readable zip archive** — for backups, or for porting content into another system:
+
+```
+mnemomatic-export-2026-08-02.zip
+├── export-info.json          # manifest: format version, date, counts, namespace map
+└── <namespace>/
+    ├── documents/
+    │   ├── <title>.md        # the document content, byte-faithful — nothing injected
+    │   └── metadata.json     # filename → exact title, id, tags, timestamps, metadata
+    ├── knowledge/            # one .md per entry containing the fact
+    └── notes/
+```
+
+File names are sanitized titles (collisions get an id suffix); the exact originals are always in the `metadata.json` sidecars, and the manifest maps folder names back to exact namespace names. Document extensions follow the mime type (`.md`, `.txt`, `.json`). Embeddings, chunks, and full-text indexes are **not** exported — they are derived data, and excluding them keeps the archive independent of the embedding model.
+
+Three ways to trigger it:
+
+```bash
+# curl (the endpoint honors the same Bearer auth as MCP)
+curl -H "Authorization: Bearer $KEY" -OJ https://your-host/export
+
+# CLI — writes atomically (never leaves a truncated zip over a previous backup)
+mnemomatic-cli export -o /backups/          # directory: server-suggested, date-based name
+mnemomatic-cli export -o memory.zip         # exact file path
+mnemomatic-cli export -o -                  # raw zip to stdout, for piping
+mnemomatic-cli export -n myproject          # single namespace
+
+# Web viewer: Settings → Export → "Download export"
+```
+
+The date-based default filename means a daily cron job gets one file per day, and re-running the same day safely replaces that day's file (the CLI downloads to `<name>.part` and renames only on success).
+
 ## CLI Interface
 
 `mnemomatic-cli` provides shell access to a running Mnem-O-matic server for agents and users without MCP support.
@@ -237,6 +271,11 @@ mnemomatic-cli namespace list
 mnemomatic-cli namespace rename old-project new-project
 mnemomatic-cli namespace delete old-project           # prompts for confirmation
 mnemomatic-cli namespace delete old-project --yes     # skip prompt (scripts/agents)
+
+# Export (see the Export section)
+mnemomatic-cli export -o /backups/                    # all namespaces, into a directory
+mnemomatic-cli export -n myproject -o project.zip     # one namespace, exact filename
+mnemomatic-cli export -o - | gpg -e -r me@example.com > backup.zip.gpg   # stream to stdout
 ```
 
 All output is JSON. Use `--pretty` for indented output:

@@ -161,7 +161,7 @@ def _login_page(error: str = "") -> str:
     return _page("Login", body, show_logout=False)
 
 
-def build_routes(db_getter, token: str, settings_info=None) -> list[Route]:
+def build_routes(db_getter, token: str, settings_info=None, make_export=None) -> list[Route]:
     """Build the viewer's Starlette routes, closing over the db accessor and token.
 
     Args:
@@ -170,6 +170,9 @@ def build_routes(db_getter, token: str, settings_info=None) -> list[Route]:
         settings_info: optional zero-arg callable returning the configuration
             dict rendered on /ui/settings (see server._settings_info). When
             None the page renders with placeholders.
+        make_export: optional callable (namespace | None) -> (zip bytes,
+            filename) powering the settings page's export download (see
+            server._make_export). When None the section and route are absent.
     """
     # The cookie carries this derived value, never the token itself. The HMAC
     # key is random per process, so cookies stop working across restarts and a
@@ -340,8 +343,18 @@ def build_routes(db_getter, token: str, settings_info=None) -> list[Route]:
             )
             return f'<table class="table table-sm"><tbody>{body_rows}</tbody></table>'
 
-        # Sectioned so future settings (import/export, retention, ...) can be
-        # appended as further h2 blocks.
+        export_html = ""
+        if make_export is not None:
+            export_html = (
+                '<h2 class="h5 mt-4">Export</h2>'
+                '<p class="text-muted mb-2">Download all namespaces as a zip of markdown '
+                "files with metadata sidecars — human-readable, and independent of the "
+                "embedding model.</p>"
+                '<a class="btn btn-sm btn-primary" href="/ui/export">Download export</a>'
+            )
+
+        # Sectioned so future settings (retention, ...) can be appended as
+        # further h2 blocks.
         body = (
             _breadcrumb(("Namespaces", "/ui"), ("Settings", None))
             + '<h1 class="h3 mb-1">Settings</h1>'
@@ -351,8 +364,24 @@ def build_routes(db_getter, token: str, settings_info=None) -> list[Route]:
             + table(embed_rows)
             + '<h2 class="h5 mt-4">Document chunking</h2>'
             + table(chunk_rows)
+            + export_html
         )
         return HTMLResponse(_page("Settings", body))
+
+    def export_download(request: Request) -> Response:
+        if not _authed(request, session_value):
+            return RedirectResponse("/ui/login", status_code=303)
+        if make_export is None:
+            return HTMLResponse(
+                _page("Not found", '<div class="alert alert-warning">Export is not available.</div>'),
+                status_code=404,
+            )
+        data, filename = make_export(None)
+        return Response(
+            data,
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
 
     def item_view(request: Request) -> Response:
         if not _authed(request, session_value):
@@ -426,6 +455,7 @@ def build_routes(db_getter, token: str, settings_info=None) -> list[Route]:
         Route("/ui/login", login_submit, methods=["POST"]),
         Route("/ui/logout", logout, methods=["POST"]),
         Route("/ui/settings", settings_view, methods=["GET"]),
+        Route("/ui/export", export_download, methods=["GET"]),
         Route("/ui/static/bootstrap.min.css", static_css, methods=["GET"]),
         # :path so namespaces containing '/' (decoded from %2F before routing)
         # still resolve to the namespace view.
@@ -434,11 +464,11 @@ def build_routes(db_getter, token: str, settings_info=None) -> list[Route]:
     ]
 
 
-def register_webui(app, db_getter, token: str, settings_info=None) -> None:
+def register_webui(app, db_getter, token: str, settings_info=None, make_export=None) -> None:
     """Attach the viewer routes to an existing Starlette app under ``/ui``.
 
     Routes are inserted ahead of the app's own routes so the viewer prefix is
     matched before any MCP catch-all. No-op semantics are the caller's job:
     only call this when ``token`` is set.
     """
-    app.router.routes[:0] = build_routes(db_getter, token, settings_info)
+    app.router.routes[:0] = build_routes(db_getter, token, settings_info, make_export)

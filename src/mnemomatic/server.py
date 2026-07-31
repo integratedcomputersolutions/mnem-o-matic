@@ -890,19 +890,46 @@ def health() -> str:
     embedder = _embedder()
     embedding_mode = embedder.mode if embedder is not None else "FTS-only (no embedder)"
 
-    # Distribution name is "mnemomatic-server"; fall back gracefully when running
-    # from a source tree with no installed metadata so health never errors out.
-    try:
-        server_version = version("mnemomatic-server")
-    except PackageNotFoundError:
-        server_version = "unknown"
-
     return json.dumps({
         "status": "ok",
-        "version": server_version,
+        "version": _server_version(),
         "embedding_mode": embedding_mode,
         "auth_enabled": bool(API_KEY),
     })
+
+
+def _server_version() -> str:
+    # Distribution name is "mnemomatic-server"; fall back gracefully when
+    # running from a source tree with no installed metadata.
+    try:
+        return version("mnemomatic-server")
+    except PackageNotFoundError:
+        return "unknown"
+
+
+def _make_export(namespace: str | None) -> tuple[bytes, str]:
+    """Build the export archive; shared by /export and the web viewer."""
+    from mnemomatic.export import build_export_zip
+
+    return build_export_zip(_db(), namespace, server_version=_server_version())
+
+
+async def _export_route(request):
+    """GET /export[?namespace=...] — zip download, behind the Bearer middleware."""
+    from starlette.responses import JSONResponse, Response
+
+    namespace = request.query_params.get("namespace") or None
+    if namespace and namespace not in _db().list_namespaces():
+        return JSONResponse(
+            {"error": "Namespace not found", "details": f"No items in namespace {namespace!r}"},
+            status_code=404,
+        )
+    data, filename = _make_export(namespace)
+    return Response(
+        data,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 # Hugging Face model cards for the models the Docker build can bake in, keyed
@@ -927,14 +954,9 @@ def _settings_info() -> dict:
     from mnemomatic.embeddings import EMBED_API, MODEL_MAX_TOKENS
 
     embedder = _embedder()
-    try:
-        server_version = version("mnemomatic-server")
-    except PackageNotFoundError:
-        server_version = "unknown"
-
     model_name = model_config.CONFIG.get("model") or EMBED_MODEL or None
     info = {
-        "version": server_version,
+        "version": _server_version(),
         "mode": embedder.mode if embedder is not None else "FTS-only (no embedder)",
         "model": model_name,
         "model_url": _HF_MODEL_PAGES.get(model_name),
@@ -1079,11 +1101,16 @@ def main():
     logger.info("Building ASGI application...")
     app = mcp.streamable_http_app()
 
+    # Zip export download. Inserted ahead of the MCP catch-all; NOT exempt
+    # from Bearer auth — it returns the entire store.
+    from starlette.routing import Route
+    app.router.routes.insert(0, Route("/export", _export_route, methods=["GET"]))
+
     # Optional read-only web viewer at /ui, gated by a single shared secret.
     # Disabled unless MNEMOMATIC_UI_TOKEN is set, so it never exposes data by default.
     if UI_TOKEN:
         from mnemomatic.webui import register_webui
-        register_webui(app, _db, UI_TOKEN, settings_info=_settings_info)
+        register_webui(app, _db, UI_TOKEN, settings_info=_settings_info, make_export=_make_export)
         logger.info("Web viewer enabled at /ui")
     else:
         logger.info("Web viewer disabled (set MNEMOMATIC_UI_TOKEN to enable)")
