@@ -173,6 +173,21 @@ mnemomatic-cli export -n myproject          # single namespace
 
 The date-based default filename means a daily cron job gets one file per day, and re-running the same day safely replaces that day's file (the CLI downloads to `<name>.part` and renames only on success).
 
+### Scheduled backups
+
+The server can also write the export archive itself, on a schedule — no cron or CLI on the host required. Point `MNEMOMATIC_BACKUP_DIR` at a directory (in Docker, somewhere under the mounted data volume):
+
+```yaml
+    environment:
+      - MNEMOMATIC_BACKUP_DIR=/data/backups
+      - MNEMOMATIC_BACKUP_INTERVAL=24   # hours between backups (default 24)
+      - MNEMOMATIC_BACKUP_KEEP=7        # archives to retain (default 7)
+```
+
+Backups are full exports (all namespaces) named `mnemomatic-backup-YYYYMMDD-HHMMSS.zip` (UTC), written atomically. Once more than `MNEMOMATIC_BACKUP_KEEP` exist, the oldest are deleted — pruning only ever touches that filename pattern, so manual exports stored in the same directory are never removed. The schedule survives restarts: the next backup is due one interval after the newest existing archive, not after boot, so restarting the server neither skips a backup nor churns the retention window. When `MNEMOMATIC_BACKUP_DIR` is unset, nothing runs.
+
+The CLI + cron path above remains the right choice when the backup needs to leave the machine or be encrypted (e.g. piping `export -o -` through `gpg`).
+
 ## CLI Interface
 
 `mnemomatic-cli` provides shell access to a running Mnem-O-matic server for agents and users without MCP support.

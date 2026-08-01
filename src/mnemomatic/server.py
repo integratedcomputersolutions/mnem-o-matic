@@ -30,6 +30,11 @@ UI_TOKEN = os.environ.get("MNEMOMATIC_UI_TOKEN", "").strip()
 MAX_SEARCH_LIMIT = 100
 MAX_LIST_LIMIT = 200
 
+# Scheduled backups of the export archive — disabled unless a directory is set.
+BACKUP_DIR = os.environ.get("MNEMOMATIC_BACKUP_DIR", "").strip()
+BACKUP_INTERVAL_HOURS = float(os.environ.get("MNEMOMATIC_BACKUP_INTERVAL", "24"))
+BACKUP_KEEP = int(os.environ.get("MNEMOMATIC_BACKUP_KEEP", "7"))
+
 # Task prefixes for asymmetric embedding models. When the bundled model is
 # trained with task prompts (e.g. EmbeddingGemma, multilingual-e5), the Docker
 # build records them in model_config.json and they apply by default when
@@ -1095,6 +1100,17 @@ def main():
     # Opt-in full re-embed (model/dim/prefix changes) before serving traffic.
     if REINDEX:
         _run_reindex()
+
+    # Scheduled backups on a daemon thread (the Database hands each thread its
+    # own connection, so the loop reads safely alongside request handling).
+    if BACKUP_DIR:
+        from pathlib import Path
+
+        from mnemomatic.backup import start_backup_thread
+        start_backup_thread(_db, Path(BACKUP_DIR), interval_hours=BACKUP_INTERVAL_HOURS,
+                            keep=BACKUP_KEEP, server_version=_server_version())
+        logger.info("Scheduled backups: every %gh to %s (keeping %d)",
+                    BACKUP_INTERVAL_HOURS, BACKUP_DIR, BACKUP_KEEP)
 
     # Always use unified ASGI app + Uvicorn code path
     # Authentication is optional based on API_KEY environment variable
