@@ -130,12 +130,63 @@ services:
 
 Then open `https://your-host/ui` (or `http://your-host:8000/ui` for direct access), enter the token once, and browse by namespace.
 
+A **Settings** page (`/ui/settings`, linked from the navbar) shows the configuration the server is running with — first section covers the embedding model: mode (built-in / external endpoint / FTS-only), model name (linked to its Hugging Face card for the built-in models), embedding dimension — with a warning when the server's dimension disagrees with the one the vector index was built at — token truncation limit or endpoint URL, task prefixes, and the document chunking settings.
+
 Notes:
 - There are **no user accounts** — access is a single shared secret, separate from `MNEMOMATIC_API_KEY` (the viewer is exempt from MCP Bearer auth and uses its own gate; the exemption only exists while the viewer is enabled).
 - The session cookie is HttpOnly and stores a value **derived** from the token with a per-process key — never the token itself. It is marked `Secure` when the connection is HTTPS (directly or via a proxy that sets `X-Forwarded-Proto`). Restarting the server invalidates existing sessions, so viewers re-enter the token.
 - Repeated wrong tokens from the same client trigger a temporary lockout (HTTP 429). The same applies to repeated invalid MCP API keys.
 - The viewer is served on the same host/port as the MCP endpoint. Because that port is typically bound to `0.0.0.0`, the shared secret is what keeps it private — choose a strong token, or additionally restrict the port at the network level (VPN, reverse proxy, firewall).
 - When `MNEMOMATIC_UI_TOKEN` is unset, `/ui` is not registered at all.
+
+## Export
+
+`GET /export` downloads the entire store (or one namespace with `?namespace=...`) as a **human-readable zip archive** — for backups, or for porting content into another system:
+
+```
+mnemomatic-export-2026-08-02.zip
+├── export-info.json          # manifest: format version, date, counts, namespace map
+└── <namespace>/
+    ├── documents/
+    │   ├── <title>.md        # the document content, byte-faithful — nothing injected
+    │   └── metadata.json     # filename → exact title, id, tags, timestamps, metadata
+    ├── knowledge/            # one .md per entry containing the fact
+    └── notes/
+```
+
+File names are sanitized titles (collisions get an id suffix); the exact originals are always in the `metadata.json` sidecars, and the manifest maps folder names back to exact namespace names. Document extensions follow the mime type (`.md`, `.txt`, `.json`). Embeddings, chunks, and full-text indexes are **not** exported — they are derived data, and excluding them keeps the archive independent of the embedding model.
+
+Three ways to trigger it:
+
+```bash
+# curl (the endpoint honors the same Bearer auth as MCP)
+curl -H "Authorization: Bearer $KEY" -OJ https://your-host/export
+
+# CLI — writes atomically (never leaves a truncated zip over a previous backup)
+mnemomatic-cli export -o /backups/          # directory: server-suggested, date-based name
+mnemomatic-cli export -o memory.zip         # exact file path
+mnemomatic-cli export -o -                  # raw zip to stdout, for piping
+mnemomatic-cli export -n myproject          # single namespace
+
+# Web viewer: Settings → Export → "Download export"
+```
+
+The date-based default filename means a daily cron job gets one file per day, and re-running the same day safely replaces that day's file (the CLI downloads to `<name>.part` and renames only on success).
+
+### Scheduled backups
+
+The server can also write the export archive itself, on a schedule — no cron or CLI on the host required. Point `MNEMOMATIC_BACKUP_DIR` at a directory (in Docker, somewhere under the mounted data volume):
+
+```yaml
+    environment:
+      - MNEMOMATIC_BACKUP_DIR=/data/backups
+      - MNEMOMATIC_BACKUP_INTERVAL=24   # hours between backups (default 24)
+      - MNEMOMATIC_BACKUP_KEEP=7        # archives to retain (default 7)
+```
+
+Backups are full exports (all namespaces) named `mnemomatic-backup-YYYYMMDD-HHMMSS.zip` (UTC), written atomically. Once more than `MNEMOMATIC_BACKUP_KEEP` exist, the oldest are deleted — pruning only ever touches that filename pattern, so manual exports stored in the same directory are never removed. The schedule survives restarts: the next backup is due one interval after the newest existing archive, not after boot, so restarting the server neither skips a backup nor churns the retention window. When `MNEMOMATIC_BACKUP_DIR` is unset, nothing runs.
+
+The CLI + cron path above remains the right choice when the backup needs to leave the machine or be encrypted (e.g. piping `export -o -` through `gpg`).
 
 ## CLI Interface
 
@@ -235,6 +286,11 @@ mnemomatic-cli namespace list
 mnemomatic-cli namespace rename old-project new-project
 mnemomatic-cli namespace delete old-project           # prompts for confirmation
 mnemomatic-cli namespace delete old-project --yes     # skip prompt (scripts/agents)
+
+# Export (see the Export section)
+mnemomatic-cli export -o /backups/                    # all namespaces, into a directory
+mnemomatic-cli export -n myproject -o project.zip     # one namespace, exact filename
+mnemomatic-cli export -o - | gpg -e -r me@example.com > backup.zip.gpg   # stream to stdout
 ```
 
 All output is JSON. Use `--pretty` for indented output:

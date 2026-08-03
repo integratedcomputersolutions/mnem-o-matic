@@ -68,8 +68,15 @@ def _esc(value) -> str:
 
 
 def _page(title: str, body: str, show_logout: bool = True) -> str:
-    """Wrap body fragments in the shared page chrome (stock Bootstrap)."""
-    logout = (
+    """Wrap body fragments in the shared page chrome (stock Bootstrap).
+
+    show_logout doubles as "the visitor is authenticated": it also controls
+    the nav links, so the login page shows neither.
+    """
+    nav = (
+        # Explicit text-light: the link sits in a plain flex div, not a
+        # navbar-nav, so the navbar's dark theme doesn't color it.
+        '<a class="nav-link px-0 text-light" href="/ui/settings">Settings</a>'
         '<form method="post" action="/ui/logout" class="m-0">'
         '<button type="submit" class="btn btn-sm btn-outline-light">Log out</button></form>'
         if show_logout else ""
@@ -88,7 +95,7 @@ def _page(title: str, body: str, show_logout: bool = True) -> str:
     <a class="navbar-brand" href="/ui">Mnem-O-matic</a>
     <div class="d-flex align-items-center gap-3">
       <span class="navbar-text">read-only viewer</span>
-      {logout}
+      {nav}
     </div>
   </div>
 </nav>
@@ -154,12 +161,18 @@ def _login_page(error: str = "") -> str:
     return _page("Login", body, show_logout=False)
 
 
-def build_routes(db_getter, token: str) -> list[Route]:
+def build_routes(db_getter, token: str, settings_info=None, make_export=None) -> list[Route]:
     """Build the viewer's Starlette routes, closing over the db accessor and token.
 
     Args:
         db_getter: zero-arg callable returning the shared Database instance.
         token: the shared secret required to view; never empty when registered.
+        settings_info: optional zero-arg callable returning the configuration
+            dict rendered on /ui/settings (see server._settings_info). When
+            None the page renders with placeholders.
+        make_export: optional callable (namespace | None) -> (zip bytes,
+            filename) powering the settings page's export download (see
+            server._make_export). When None the section and route are absent.
     """
     # The cookie carries this derived value, never the token itself. The HMAC
     # key is random per process, so cookies stop working across restarts and a
@@ -267,6 +280,109 @@ def build_routes(db_getter, token: str) -> list[Route]:
         )
         return HTMLResponse(_page(ns, body))
 
+    def settings_view(request: Request) -> Response:
+        if not _authed(request, session_value):
+            return RedirectResponse("/ui/login", status_code=303)
+        info = settings_info() if settings_info is not None else {}
+
+        def val(key, suffix=""):
+            v = info.get(key)
+            return f"{_esc(v)}{suffix}" if v is not None else '<span class="text-muted">—</span>'
+
+        def prefix(key):
+            # Prefixes are shown quoted in <code> so a trailing space — which
+            # is load-bearing for asymmetric models — is visible.
+            v = info.get(key)
+            return f"<code>&quot;{_esc(v)}&quot;</code>" if v else '<span class="text-muted">(none)</span>'
+
+        dim_cfg, dim_db = info.get("dim_configured"), info.get("dim_database")
+        alert = ""
+        if dim_cfg is not None and dim_db is not None and dim_cfg != dim_db:
+            alert = (
+                '<div class="alert alert-warning">The vector index was built at dimension '
+                f"<strong>{_esc(dim_db)}</strong> but the server is configured for "
+                f"<strong>{_esc(dim_cfg)}</strong>. Semantic search cannot work like this — "
+                "restart once with <code>MNEMOMATIC_REINDEX=1</code> to rebuild the index "
+                "and re-embed all content.</div>"
+            )
+
+        model_html = val("model")
+        if info.get("model") and info.get("model_url"):
+            model_html = (
+                f'<a href="{_esc(info["model_url"])}" target="_blank" rel="noopener">'
+                f'{_esc(info["model"])}</a>'
+            )
+        embed_rows = [
+            ("Embedding mode", val("mode")),
+            ("Model", model_html),
+            ("Embedding dimension", val("dim_configured")),
+            ("Index built at dimension", val("dim_database")),
+        ]
+        if info.get("endpoint_url"):
+            embed_rows += [
+                ("Endpoint URL", f"<code>{_esc(info['endpoint_url'])}</code>"),
+                ("Wire format", val("wire_api")),
+            ]
+        else:
+            embed_rows.append(("Token truncation limit", val("max_tokens", " tokens")))
+        embed_rows += [
+            ("Query prefix", prefix("query_prefix")),
+            ("Document prefix", prefix("doc_prefix")),
+        ]
+        chunk_rows = [
+            ("Chunk threshold", val("chunk_threshold", " chars")),
+            ("Chunk size", val("chunk_size", " chars")),
+            ("Chunk overlap", val("chunk_overlap", " chars")),
+        ]
+
+        def table(rows):
+            body_rows = "".join(
+                f'<tr><th scope="row" class="text-nowrap" style="width:14rem">{_esc(label)}</th>'
+                f"<td>{value}</td></tr>"
+                for label, value in rows
+            )
+            return f'<table class="table table-sm"><tbody>{body_rows}</tbody></table>'
+
+        export_html = ""
+        if make_export is not None:
+            export_html = (
+                '<h2 class="h5 mt-4">Export</h2>'
+                '<p class="text-muted mb-2">Download all namespaces as a zip of markdown '
+                "files with metadata sidecars — human-readable, and independent of the "
+                "embedding model.</p>"
+                '<a class="btn btn-sm btn-primary" href="/ui/export">Download export</a>'
+            )
+
+        # Sectioned so future settings (retention, ...) can be appended as
+        # further h2 blocks.
+        body = (
+            _breadcrumb(("Namespaces", "/ui"), ("Settings", None))
+            + '<h1 class="h3 mb-1">Settings</h1>'
+            + f'<p class="text-muted">mnemomatic-server {val("version")}</p>'
+            + alert
+            + '<h2 class="h5 mt-4">Embedding model</h2>'
+            + table(embed_rows)
+            + '<h2 class="h5 mt-4">Document chunking</h2>'
+            + table(chunk_rows)
+            + export_html
+        )
+        return HTMLResponse(_page("Settings", body))
+
+    def export_download(request: Request) -> Response:
+        if not _authed(request, session_value):
+            return RedirectResponse("/ui/login", status_code=303)
+        if make_export is None:
+            return HTMLResponse(
+                _page("Not found", '<div class="alert alert-warning">Export is not available.</div>'),
+                status_code=404,
+            )
+        data, filename = make_export(None)
+        return Response(
+            data,
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
     def item_view(request: Request) -> Response:
         if not _authed(request, session_value):
             return RedirectResponse("/ui/login", status_code=303)
@@ -338,6 +454,8 @@ def build_routes(db_getter, token: str) -> list[Route]:
         Route("/ui/login", login_form, methods=["GET"]),
         Route("/ui/login", login_submit, methods=["POST"]),
         Route("/ui/logout", logout, methods=["POST"]),
+        Route("/ui/settings", settings_view, methods=["GET"]),
+        Route("/ui/export", export_download, methods=["GET"]),
         Route("/ui/static/bootstrap.min.css", static_css, methods=["GET"]),
         # :path so namespaces containing '/' (decoded from %2F before routing)
         # still resolve to the namespace view.
@@ -346,11 +464,11 @@ def build_routes(db_getter, token: str) -> list[Route]:
     ]
 
 
-def register_webui(app, db_getter, token: str) -> None:
+def register_webui(app, db_getter, token: str, settings_info=None, make_export=None) -> None:
     """Attach the viewer routes to an existing Starlette app under ``/ui``.
 
     Routes are inserted ahead of the app's own routes so the viewer prefix is
     matched before any MCP catch-all. No-op semantics are the caller's job:
     only call this when ``token`` is set.
     """
-    app.router.routes[:0] = build_routes(db_getter, token)
+    app.router.routes[:0] = build_routes(db_getter, token, settings_info, make_export)

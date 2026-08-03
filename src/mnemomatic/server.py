@@ -30,6 +30,11 @@ UI_TOKEN = os.environ.get("MNEMOMATIC_UI_TOKEN", "").strip()
 MAX_SEARCH_LIMIT = 100
 MAX_LIST_LIMIT = 200
 
+# Scheduled backups of the export archive — disabled unless a directory is set.
+BACKUP_DIR = os.environ.get("MNEMOMATIC_BACKUP_DIR", "").strip()
+BACKUP_INTERVAL_HOURS = float(os.environ.get("MNEMOMATIC_BACKUP_INTERVAL", "24"))
+BACKUP_KEEP = int(os.environ.get("MNEMOMATIC_BACKUP_KEEP", "7"))
+
 # Task prefixes for asymmetric embedding models. When the bundled model is
 # trained with task prompts (e.g. EmbeddingGemma, multilingual-e5), the Docker
 # build records them in model_config.json and they apply by default when
@@ -890,19 +895,90 @@ def health() -> str:
     embedder = _embedder()
     embedding_mode = embedder.mode if embedder is not None else "FTS-only (no embedder)"
 
-    # Distribution name is "mnemomatic-server"; fall back gracefully when running
-    # from a source tree with no installed metadata so health never errors out.
-    try:
-        server_version = version("mnemomatic-server")
-    except PackageNotFoundError:
-        server_version = "unknown"
-
     return json.dumps({
         "status": "ok",
-        "version": server_version,
+        "version": _server_version(),
         "embedding_mode": embedding_mode,
         "auth_enabled": bool(API_KEY),
     })
+
+
+def _server_version() -> str:
+    # Distribution name is "mnemomatic-server"; fall back gracefully when
+    # running from a source tree with no installed metadata.
+    try:
+        return version("mnemomatic-server")
+    except PackageNotFoundError:
+        return "unknown"
+
+
+def _make_export(namespace: str | None) -> tuple[bytes, str]:
+    """Build the export archive; shared by /export and the web viewer."""
+    from mnemomatic.export import build_export_zip
+
+    return build_export_zip(_db(), namespace, server_version=_server_version())
+
+
+async def _export_route(request):
+    """GET /export[?namespace=...] — zip download, behind the Bearer middleware."""
+    from starlette.responses import JSONResponse, Response
+
+    namespace = request.query_params.get("namespace") or None
+    if namespace and namespace not in _db().list_namespaces():
+        return JSONResponse(
+            {"error": "Namespace not found", "details": f"No items in namespace {namespace!r}"},
+            status_code=404,
+        )
+    data, filename = _make_export(namespace)
+    return Response(
+        data,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# Hugging Face model cards for the models the Docker build can bake in, keyed
+# by the exact names it writes to model_config.json. Links point at the source
+# model card (weights provenance, benchmarks, license), not the ONNX mirror
+# the image downloads from. Unknown/external models simply get no link.
+_HF_MODEL_PAGES = {
+    "all-MiniLM-L6-v2": "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2",
+    "gte-multilingual-base": "https://huggingface.co/Alibaba-NLP/gte-multilingual-base",
+    "embeddinggemma-300m": "https://huggingface.co/google/embeddinggemma-300m",
+    "amaretto-embed-148m": "https://huggingface.co/AmarettoLabs/amaretto-embed-148m",
+}
+
+
+def _settings_info() -> dict:
+    """Configuration snapshot for the web viewer's settings page.
+
+    Reads EMBEDDING_DIM through the db module so it reflects the value the
+    running Database actually used (tests patch it there).
+    """
+    from mnemomatic import db as db_module
+    from mnemomatic.embeddings import EMBED_API, MODEL_MAX_TOKENS
+
+    embedder = _embedder()
+    model_name = model_config.CONFIG.get("model") or EMBED_MODEL or None
+    info = {
+        "version": _server_version(),
+        "mode": embedder.mode if embedder is not None else "FTS-only (no embedder)",
+        "model": model_name,
+        "model_url": _HF_MODEL_PAGES.get(model_name),
+        "dim_configured": db_module.EMBEDDING_DIM,
+        "dim_database": _db().stored_embed_dim(),
+        "query_prefix": EMBED_QUERY_PREFIX,
+        "doc_prefix": EMBED_DOC_PREFIX,
+        "chunk_threshold": CHUNK_THRESHOLD,
+        "chunk_size": CHUNK_SIZE,
+        "chunk_overlap": CHUNK_OVERLAP,
+    }
+    if EMBED_URL:
+        info["endpoint_url"] = EMBED_URL
+        info["wire_api"] = EMBED_API
+    else:
+        info["max_tokens"] = MODEL_MAX_TOKENS
+    return info
 
 
 @mcp.tool(annotations=_ANN_DELETE)
@@ -1025,16 +1101,32 @@ def main():
     if REINDEX:
         _run_reindex()
 
+    # Scheduled backups on a daemon thread (the Database hands each thread its
+    # own connection, so the loop reads safely alongside request handling).
+    if BACKUP_DIR:
+        from pathlib import Path
+
+        from mnemomatic.backup import start_backup_thread
+        start_backup_thread(_db, Path(BACKUP_DIR), interval_hours=BACKUP_INTERVAL_HOURS,
+                            keep=BACKUP_KEEP, server_version=_server_version())
+        logger.info("Scheduled backups: every %gh to %s (keeping %d)",
+                    BACKUP_INTERVAL_HOURS, BACKUP_DIR, BACKUP_KEEP)
+
     # Always use unified ASGI app + Uvicorn code path
     # Authentication is optional based on API_KEY environment variable
     logger.info("Building ASGI application...")
     app = mcp.streamable_http_app()
 
+    # Zip export download. Inserted ahead of the MCP catch-all; NOT exempt
+    # from Bearer auth — it returns the entire store.
+    from starlette.routing import Route
+    app.router.routes.insert(0, Route("/export", _export_route, methods=["GET"]))
+
     # Optional read-only web viewer at /ui, gated by a single shared secret.
     # Disabled unless MNEMOMATIC_UI_TOKEN is set, so it never exposes data by default.
     if UI_TOKEN:
         from mnemomatic.webui import register_webui
-        register_webui(app, _db, UI_TOKEN)
+        register_webui(app, _db, UI_TOKEN, settings_info=_settings_info, make_export=_make_export)
         logger.info("Web viewer enabled at /ui")
     else:
         logger.info("Web viewer disabled (set MNEMOMATIC_UI_TOKEN to enable)")
