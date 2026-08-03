@@ -66,7 +66,9 @@ class WebUITestBase(unittest.TestCase):
         self.ids = _seed(self.db)
         self.settings_info = dict(MODEL_INFO)
         app = Starlette()
-        register_webui(app, lambda: self.db, TOKEN, settings_info=lambda: self.settings_info)
+        register_webui(app, lambda: self.db, TOKEN,
+                       settings_info=lambda: self.settings_info,
+                       make_export=lambda ns: (b"PK\x05\x06" + b"\x00" * 18, "test-export.zip"))
         self.client = TestClient(app, follow_redirects=False)
 
     def tearDown(self):
@@ -154,6 +156,11 @@ class TestGate(WebUITestBase):
 
     def test_settings_view_requires_auth(self):
         resp = self.client.get("/ui/settings")
+        self.assertEqual(resp.status_code, 303)
+        self.assertEqual(resp.headers["location"], "/ui/login")
+
+    def test_export_requires_auth(self):
+        resp = self.client.get("/ui/export")
         self.assertEqual(resp.status_code, 303)
         self.assertEqual(resp.headers["location"], "/ui/login")
 
@@ -272,6 +279,20 @@ class TestViews(WebUITestBase):
         resp = client.get("/ui/settings")
         self.assertEqual(resp.status_code, 200)
         self.assertIn("Embedding mode", resp.text)
+        # Without make_export there is no Export section and no download.
+        self.assertNotIn("/ui/export", resp.text)
+        self.assertEqual(client.get("/ui/export").status_code, 404)
+
+    def test_settings_page_offers_export_download(self):
+        resp = self.client.get("/ui/settings")
+        self.assertIn('href="/ui/export"', resp.text)
+
+    def test_export_download(self):
+        resp = self.client.get("/ui/export")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.headers["content-type"], "application/zip")
+        self.assertIn('filename="test-export.zip"', resp.headers["content-disposition"])
+        self.assertEqual(resp.content[:2], b"PK")
 
     def test_navbar_links_settings_page(self):
         resp = self.client.get("/ui")

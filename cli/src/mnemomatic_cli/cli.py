@@ -3,9 +3,13 @@
 import argparse
 import json
 import os
+import re
 import stat
 import sys
 import tomllib
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 from mnemomatic_cli._mcp_client import MCPClient
@@ -153,6 +157,55 @@ def _cmd_tool(tool: str, args, client: MCPClient, pretty: bool,
 
 
 # ---------------------------------------------------------------------------
+# Export (plain HTTP download, no MCP involved)
+# ---------------------------------------------------------------------------
+
+def _cmd_export(args, server_url: str, api_key: str) -> None:
+    """Download the zip export; write it where -o points, atomically.
+
+    -o accepts a directory (server-suggested filename inside it), a file
+    path, or '-' for stdout. The zip lands as <name>.part first and is
+    renamed only on a complete download, so an interrupted run never
+    replaces an existing backup with a truncated file.
+    """
+    url = server_url.rstrip("/") + "/export"
+    if args.namespace:
+        url += "?" + urllib.parse.urlencode({"namespace": args.namespace})
+    req = urllib.request.Request(url)
+    if api_key:
+        req.add_header("Authorization", f"Bearer {api_key}")
+    try:
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            data = resp.read()
+            disposition = resp.headers.get("Content-Disposition", "")
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = json.loads(exc.read()).get("details", "")
+        except Exception:
+            pass
+        _err(f"export failed: HTTP {exc.code}" + (f" — {detail}" if detail else ""))
+    except urllib.error.URLError as exc:
+        _err(f"cannot reach server at {url}: {exc.reason}")
+
+    if args.output == "-":
+        sys.stdout.buffer.write(data)
+        return
+
+    match = re.search(r'filename="([^"]+)"', disposition)
+    suggested = match.group(1) if match else "mnemomatic-export.zip"
+    target = Path(args.output)
+    # A trailing separator means "directory" even if it doesn't exist yet.
+    if target.is_dir() or args.output.endswith(os.sep):
+        target = target / suggested
+    target.parent.mkdir(parents=True, exist_ok=True)
+    part = target.with_name(target.name + ".part")
+    part.write_bytes(data)
+    part.replace(target)
+    print(str(target))
+
+
+# ---------------------------------------------------------------------------
 # Resource URI mapping for the 'get' command
 # ---------------------------------------------------------------------------
 
@@ -295,6 +348,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p_ns_delete.add_argument("--yes", "-y", action="store_true",
                              help="Skip confirmation prompt (for scripts and agents)")
 
+    # -- export ---------------------------------------------------------------
+    p_export = sub.add_parser("export", help="Download a zip export of stored content")
+    p_export.add_argument("-n", "--namespace", metavar="NS",
+                          help="Export a single namespace (default: all)")
+    p_export.add_argument("-o", "--output", metavar="PATH", default=".",
+                          help="Target directory or file path; '-' writes the zip to "
+                               "stdout (default: current directory)")
+
     # -- list -----------------------------------------------------------------
     p_list = sub.add_parser("list", help="List content in a namespace")
     list_sub = p_list.add_subparsers(dest="list_type", metavar="TYPE")
@@ -335,6 +396,11 @@ def main():
     # Apply default search mode to search command (CLI flag still overrides)
     if args.command == "search" and args.mode is None:
         args.mode = default_mode
+
+    # Export is a plain HTTP download — no MCP session needed.
+    if args.command == "export":
+        _cmd_export(args, server_url, api_key)
+        return
 
     base_url = server_url.rstrip("/") + "/mcp"
 
