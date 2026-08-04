@@ -154,7 +154,7 @@ mnemomatic-export-2026-08-02.zip
     └── notes/
 ```
 
-File names are sanitized titles (collisions get an id suffix); the exact originals are always in the `metadata.json` sidecars, and the manifest maps folder names back to exact namespace names. Document extensions follow the mime type (`.md`, `.txt`, `.json`). Embeddings, chunks, and full-text indexes are **not** exported — they are derived data, and excluding them keeps the archive independent of the embedding model.
+File names are sanitized titles (collisions get an id suffix); the exact originals are always in the `metadata.json` sidecars, and the manifest maps folder names back to exact namespace names. Document extensions follow the mime type (`.md`, `.txt`, `.json`). Embeddings, chunks, and full-text indexes are **not** exported — they are derived data, and excluding them keeps the archive independent of the embedding model. Superseded knowledge entries and item revisions are not exported either: the archive carries the store's current state.
 
 Three ways to trigger it:
 
@@ -207,6 +207,25 @@ restore <revision_id>                                       # roll back / undele
 - Restored content is re-embedded immediately, so search reflects it right away.
 
 Revisions store content and metadata, not embeddings — like the export archive, they stay independent of the embedding model. Note that deleting an item does **not** purge its revisions: recovering exactly that data is what they are for. Set `MNEMOMATIC_REVISIONS_KEEP=0` if items must be gone the moment they are deleted.
+
+## Temporal Facts
+
+Knowledge entries answer questions like "what is our auth method?" — and the answer changes over time. So knowledge is **temporal**: when a fact changes, the old entry is *superseded* rather than overwritten. It stays in the store with `valid_until` (when it stopped being the current answer) and `superseded_by` (the id of its replacement), answering "what did we believe before, and until when?"
+
+How a fact changes:
+- `store_knowledge` with an existing subject and a **different** fact → the current entry is closed, the new fact becomes a new entry, and the response carries `"superseded": "<old-id>"`. Re-storing the **same** fact just refreshes the entry in place (no history spam from agents re-storing what they know).
+- `update_knowledge` changing `fact` → same supersession; changing only `confidence`/`source`/`tags`/`metadata` edits the current entry in place (captured as a revision, like documents and notes).
+
+Superseded entries are **excluded from search, listings, counts, and exports** — only the current answer surfaces. They remain readable by id and through the dedicated tool:
+
+```
+fact_history(namespace="webapp", subject="auth method")
+→ {"count": 3, "history": [ current entry, then superseded versions newest first ]}
+```
+
+History is immutable: updating a superseded entry returns an error (correct the current fact instead). Deleting one is allowed (pruning history). Deleting the *current* entry ends the chain — the next `store_knowledge` for that subject starts a fresh one, and `fact_history` still shows everything ever held for the subject.
+
+The division of labor with [revisions](#usage-tracking--revisions): fact changes are *history* (first-class, queryable, permanent); everything else — in-place edits, deletes, document/note changes — is *undo* (revisions, capped per item).
 
 ## CLI Interface
 
@@ -342,6 +361,7 @@ Once connected, your LLM has access to these tools:
 | `delete_namespace`   | Permanently delete all items in a namespace          |
 | `list_revisions`     | List saved prior versions of items (captured on every update and delete), newest first — filter by type, item, or namespace |
 | `restore`            | Restore an item to a revision: roll back an update or recreate a deleted item |
+| `fact_history`       | The timeline of a knowledge fact: the current entry, then every superseded version (see Temporal Facts) |
 
 ### Input Validation & Limits
 
@@ -365,18 +385,22 @@ If validation fails, tools return an error with details — fix the input and re
 
 ### Deduplication
 
-Store tools use upsert semantics — if an entry with the same namespace and title (for documents) or namespace and subject (for knowledge) already exists, it is updated in place rather than creating a duplicate.
+Store tools use upsert semantics — if an entry with the same namespace and title (for documents) or namespace and subject (for knowledge) already exists, it is updated rather than creating a duplicate.
 
-This matters because LLMs don't track what's already stored. Without deduplication, restarting a session and re-storing the same facts would create duplicate rows. With upsert, the second call updates the existing entry and the response includes `"created": false` so the caller knows it was an update. Notes deduplicate on namespace + title.
+This matters because LLMs don't track what's already stored. Without deduplication, restarting a session and re-storing the same facts would create duplicate rows. Documents and notes update in place (`"created": false`). Knowledge is temporal (see [Temporal Facts](#temporal-facts)): re-storing the *same* fact refreshes the entry in place, while storing a *different* fact for an existing subject supersedes it — the old entry is kept as queryable history:
 
 ```
 # First call — creates a new entry
 store_knowledge(namespace="webapp", subject="auth method", fact="Uses JWT with RS256")
 → {"id": "abc-123", "created": true}
 
-# Second call — same namespace + subject, updates in place
-store_knowledge(namespace="webapp", subject="auth method", fact="Migrated to session cookies")
+# Same fact again — refreshes in place, no history entry
+store_knowledge(namespace="webapp", subject="auth method", fact="Uses JWT with RS256")
 → {"id": "abc-123", "created": false}
+
+# The fact changed — the old entry is closed and kept as history
+store_knowledge(namespace="webapp", subject="auth method", fact="Migrated to session cookies")
+→ {"id": "def-456", "created": true, "superseded": "abc-123"}
 ```
 
 ### Chunked Retrieval for Large Documents

@@ -53,7 +53,8 @@ class TestMigration(unittest.TestCase):
 
             migrated = Database(tmp.name)
             conn = migrated._get_conn()
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()["user_version"], 2)
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()["user_version"],
+                             db_module.SCHEMA_VERSION)
             row = conn.execute("SELECT retrieval_count, last_accessed FROM notes").fetchone()
             self.assertEqual(row["retrieval_count"], 0)
             self.assertIsNone(row["last_accessed"])
@@ -127,7 +128,7 @@ class TestRevisionCapture(DbTestCase):
 
     def test_delete_namespace_captures_every_item(self):
         note = self._note()
-        k, _ = self.db.store_knowledge(
+        k, _, _ = self.db.store_knowledge(
             Knowledge(namespace="proj", subject="s", fact="f"), embedding=None)
         self.db.delete_namespace("proj")
         revs = self.db.list_revisions(namespace="proj")

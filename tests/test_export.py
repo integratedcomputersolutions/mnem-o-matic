@@ -71,7 +71,7 @@ class TestArchive(unittest.TestCase):
                      tags=["a"], metadata={"k": "v"}),
             embedding=None,
         )
-        know, _ = self.db.store_knowledge(
+        know, _, _ = self.db.store_knowledge(
             Knowledge(namespace="proj", subject="auth", fact="Uses JWT.", confidence=0.9),
             embedding=None,
         )

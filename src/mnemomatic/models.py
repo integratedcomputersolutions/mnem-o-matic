@@ -131,6 +131,11 @@ class Knowledge(_MemoryItem):
     fact: str = Field(min_length=1, max_length=MAX_FACT_LENGTH)
     confidence: float = 1.0
     source: str = Field(default="unknown", max_length=MAX_SOURCE_LENGTH)
+    # Temporal validity, maintained by the store/supersede paths. A current
+    # fact has both as None; a superseded one records when it stopped being
+    # the current answer and which entry replaced it.
+    valid_until: datetime | None = None
+    superseded_by: str | None = None
 
     @field_validator("subject", "fact", "source", mode="before")
     @classmethod

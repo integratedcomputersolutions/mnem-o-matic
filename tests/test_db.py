@@ -140,7 +140,7 @@ class TestKnowledgeCRUD(unittest.TestCase):
 
     def test_store_and_get(self):
         k = Knowledge(namespace="ns", subject="auth", fact="Uses JWT")
-        stored, created = self.db.store_knowledge(k, _fake_embedding("auth: Uses JWT"))
+        stored, created, _ = self.db.store_knowledge(k, _fake_embedding("auth: Uses JWT"))
         self.assertTrue(created)
         fetched = self.db.get_knowledge(stored.id)
         self.assertIsNotNone(fetched)
@@ -149,18 +149,31 @@ class TestKnowledgeCRUD(unittest.TestCase):
     def test_get_nonexistent_returns_none(self):
         self.assertIsNone(self.db.get_knowledge("no-such-id"))
 
-    def test_upsert_updates_in_place(self):
+    def test_upsert_supersedes_on_fact_change(self):
+        # Temporal semantics: a different fact for an existing subject closes
+        # the old entry as history and inserts a successor with a new id.
         k = Knowledge(namespace="ns", subject="db", fact="Postgres")
-        stored, _ = self.db.store_knowledge(k, _fake_embedding("db: Postgres"))
+        stored, _, _ = self.db.store_knowledge(k, _fake_embedding("db: Postgres"))
         k2 = Knowledge(namespace="ns", subject="db", fact="SQLite")
-        stored2, created2 = self.db.store_knowledge(k2, _fake_embedding("db: SQLite"))
-        self.assertFalse(created2)
-        self.assertEqual(stored2.id, stored.id)
+        stored2, created2, superseded = self.db.store_knowledge(k2, _fake_embedding("db: SQLite"))
+        self.assertTrue(created2)
+        self.assertNotEqual(stored2.id, stored.id)
+        self.assertEqual(superseded, stored.id)
         self.assertEqual(stored2.fact, "SQLite")
+
+    def test_upsert_same_fact_updates_in_place(self):
+        k = Knowledge(namespace="ns", subject="db", fact="Postgres")
+        stored, _, _ = self.db.store_knowledge(k, _fake_embedding("db: Postgres"))
+        k2 = Knowledge(namespace="ns", subject="db", fact="Postgres", confidence=0.5)
+        stored2, created2, superseded = self.db.store_knowledge(k2, _fake_embedding("db: Postgres"))
+        self.assertFalse(created2)
+        self.assertIsNone(superseded)
+        self.assertEqual(stored2.id, stored.id)
+        self.assertEqual(self.db.get_knowledge(stored.id).confidence, 0.5)
 
     def test_update_fact(self):
         k = Knowledge(namespace="ns", subject="auth", fact="old")
-        stored, _ = self.db.store_knowledge(k, _fake_embedding("auth: old"))
+        stored, _, _ = self.db.store_knowledge(k, _fake_embedding("auth: old"))
         updated = self.db.update_knowledge(stored.id, fact="new")
         self.assertEqual(updated.fact, "new")
 
@@ -183,13 +196,13 @@ class TestKnowledgeCRUD(unittest.TestCase):
 
     def test_update_invalid_field_raises(self):
         k = Knowledge(namespace="ns", subject="s", fact="f")
-        stored, _ = self.db.store_knowledge(k, _fake_embedding("s: f"))
+        stored, _, _ = self.db.store_knowledge(k, _fake_embedding("s: f"))
         with self.assertRaises(ValueError):
             self.db.update_knowledge(stored.id, bad_field="x")
 
     def test_delete(self):
         k = Knowledge(namespace="ns", subject="s", fact="f")
-        stored, _ = self.db.store_knowledge(k, _fake_embedding("s: f"))
+        stored, _, _ = self.db.store_knowledge(k, _fake_embedding("s: f"))
         self.assertTrue(self.db.delete_knowledge(stored.id))
         self.assertIsNone(self.db.get_knowledge(stored.id))
 

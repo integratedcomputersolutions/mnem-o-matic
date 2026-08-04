@@ -412,8 +412,11 @@ def store_knowledge(
     Good subjects: "auth mechanism", "database choice", "deploy pipeline", "rate limit policy"
     Good facts: "Uses JWT with RS256 signing", "Postgres, not MySQL — chosen for JSONB support"
 
-    Uses upsert semantics: if an entry with the same namespace + subject already exists,
-    it is updated in place. Check `created` in the response to distinguish new vs updated.
+    Uses temporal upsert semantics on namespace + subject: storing the same
+    fact again refreshes the entry in place, while storing a *different* fact
+    for an existing subject supersedes it — the old fact is kept as queryable
+    history (see the fact_history tool) and the response carries its id in
+    `superseded`.
 
     Args:
         namespace: Logical grouping (e.g. "webapp", "infra", "global").
@@ -439,8 +442,11 @@ def store_knowledge(
         return {"error": "Invalid knowledge entry", "details": _format_validation_error(e)}
 
     embedding = _embed_content(_knowledge_embed_text(subject, fact))
-    stored, created = _db().store_knowledge(k, embedding)
-    return {"id": stored.id, "namespace": stored.namespace, "subject": stored.subject, "created": created}
+    stored, created, superseded = _db().store_knowledge(k, embedding)
+    response = {"id": stored.id, "namespace": stored.namespace, "subject": stored.subject, "created": created}
+    if superseded:
+        response["superseded"] = superseded
+    return response
 
 
 # ── Shared update machinery ──
@@ -505,23 +511,54 @@ _UPDATE_CONFIG = {
 
 def _handle_update(item_type: str, id: str, fields: dict) -> dict:
     """Shared body for the update_* tools: validate the merged item, recompute its embedding,
-    persist, and return {id, <key>, updated}."""
+    persist, and return {id, <key>, updated}.
+
+    Knowledge is temporal: a superseded entry is immutable history, and a
+    change to the fact itself supersedes (closes the current entry and inserts
+    a successor) instead of overwriting.
+    """
     cfg = _UPDATE_CONFIG[item_type]
     db = _db()
     existing = cfg["getter"](db, id)
     if existing is None:
         return {"error": f"{item_type.capitalize()} {id} not found"}
+    if item_type == "knowledge" and existing.valid_until is not None:
+        return {"error": "Cannot update a superseded fact",
+                "details": f"Knowledge {id} is history (superseded by {existing.superseded_by}). "
+                           f"Update the current fact for this subject instead, or use fact_history to inspect it."}
 
     try:
         cfg["model"](**{**existing.model_dump(), **fields})
     except ValidationError as e:
         return {"error": "Invalid update", "details": _format_validation_error(e)}
 
+    if item_type == "knowledge" and "fact" in fields and fields["fact"] != existing.fact:
+        return _supersede_update(existing, fields)
+
     embedding = cfg["embed"](id, existing, fields)
     updated = cfg["updater"](db, id, embedding, fields)
     if updated is None:
         return {"error": f"{item_type.capitalize()} {id} not found"}
     return {"id": updated.id, cfg["key"]: getattr(updated, cfg["key"]), "updated": True}
+
+
+def _supersede_update(existing: Knowledge, fields: dict) -> dict:
+    """A fact change: build the successor entry and close the current one."""
+    data = {**existing.model_dump(), **fields}
+    for reset in ("id", "created_at", "updated_at", "valid_until", "superseded_by",
+                  "retrieval_count", "last_accessed"):
+        data.pop(reset, None)
+    successor = Knowledge(**data)  # fresh id and timestamps; merged fields pre-validated
+    embedding = _embed_content(_knowledge_embed_text(successor.subject, successor.fact))
+    try:
+        stored = _db().supersede_knowledge(existing.id, successor, embedding)
+    except sqlite3.IntegrityError:
+        return {"error": "Subject conflict",
+                "details": f"Another current fact already holds subject {successor.subject!r} "
+                           f"in namespace {successor.namespace!r}"}
+    if stored is None:
+        return {"error": f"Knowledge {existing.id} not found"}
+    return {"id": stored.id, "subject": stored.subject, "updated": True, "superseded": existing.id}
 
 
 @mcp.tool(annotations=_ANN_UPDATE)
@@ -909,6 +946,34 @@ def read(item_type: str, id: str) -> dict:
 
 
 @mcp.tool(annotations=_ANN_READ_ONLY)
+def fact_history(namespace: str, subject: str) -> dict:
+    """The full timeline of a fact: the current entry first, then every
+    superseded version, newest first.
+
+    Knowledge is temporal — when a fact changes (via store_knowledge or
+    update_knowledge), the old entry is closed rather than overwritten. Use
+    this to answer "what did we believe before?" or to audit when an answer
+    changed: each superseded entry carries valid_until (when it stopped being
+    current) and superseded_by (the id of its replacement).
+
+    History entries are read-only; only the current entry can be updated or
+    superseded.
+
+    Args:
+        namespace: The fact's namespace.
+        subject: The fact's subject (the deduplication key).
+    """
+    history = _db().knowledge_history(namespace, subject)
+    _record_access([("knowledge", k.id) for k in history])
+    return {
+        "namespace": namespace,
+        "subject": subject,
+        "count": len(history),
+        "history": [json.loads(k.model_dump_json()) for k in history],
+    }
+
+
+@mcp.tool(annotations=_ANN_READ_ONLY)
 def list_revisions(
     item_type: str | None = None,
     item_id: str | None = None,
@@ -976,6 +1041,10 @@ def restore(revision_id: int) -> dict:
         return {**result, "restored_revision": revision_id, "recreated": False}
 
     # The item is gone — recreate it, unless its key now belongs to another item.
+    if item_type == "knowledge" and item.valid_until is not None:
+        return {"error": "Cannot restore a superseded fact",
+                "details": "This revision is of a history entry; restore or re-store "
+                           "the current fact for the subject instead."}
     occupant = _db().find_by_key(item_type, item.namespace, getattr(item, key))
     if occupant is not None:
         return {"error": "Cannot restore: key is taken",
@@ -987,7 +1056,7 @@ def restore(revision_id: int) -> dict:
         embedding, chunks = _embed_document_body(item.title, item.content)
         stored, _ = _db().store_document(item, embedding, chunks)
     elif item_type == "knowledge":
-        stored, _ = _db().store_knowledge(item, _embed_content(_knowledge_embed_text(item.subject, item.fact)))
+        stored, _, _ = _db().store_knowledge(item, _embed_content(_knowledge_embed_text(item.subject, item.fact)))
     else:
         stored, _ = _db().store_note(item, _embed_content(_note_embed_text(item.title, item.content)))
     return {"id": stored.id, key: getattr(stored, key), "namespace": stored.namespace,

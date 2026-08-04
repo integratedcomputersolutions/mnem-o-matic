@@ -133,7 +133,7 @@ class TestRunReindex(unittest.TestCase):
             Document(namespace="ns", title="small", content="short body"), None)
         self.big, _ = self.db.store_document(
             Document(namespace="ns", title="big", content="paragraph. " * 300), None)
-        self.k, _ = self.db.store_knowledge(
+        self.k, _, _ = self.db.store_knowledge(
             Knowledge(namespace="other", subject="s", fact="f"), None)
         self.note, _ = self.db.store_note(
             Note(namespace="ns", title="n", content="c"), None)
