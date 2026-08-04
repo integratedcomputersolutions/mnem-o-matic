@@ -4,7 +4,7 @@ import os
 import re
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from importlib.metadata import PackageNotFoundError, version
 
 import uvicorn
@@ -44,6 +44,14 @@ MAX_LIST_LIMIT = 200
 BACKUP_DIR = os.environ.get("MNEMOMATIC_BACKUP_DIR", "").strip()
 BACKUP_INTERVAL_HOURS = float(os.environ.get("MNEMOMATIC_BACKUP_INTERVAL", "24"))
 BACKUP_KEEP = int(os.environ.get("MNEMOMATIC_BACKUP_KEEP", "7"))
+
+# Cosine similarity at or above which two items count as near-duplicates —
+# used by the `similar` field on store responses and by consolidation_report's
+# clustering. Correct-but-distinct search hits typically score 0.3–0.6 across
+# the bundled models, near-duplicates well above 0.8. 0 disables the store-time
+# check entirely.
+SIMILAR_THRESHOLD = float(os.environ.get("MNEMOMATIC_SIMILAR_THRESHOLD", "0.8"))
+_SIMILAR_LIMIT = 3
 
 # Task prefixes for asymmetric embedding models. When the bundled model is
 # trained with task prompts (e.g. EmbeddingGemma, multilingual-e5), the Docker
@@ -247,6 +255,29 @@ def _embed_content(text: str) -> list[float] | None:
     return _safe_embed(EMBED_DOC_PREFIX + text)
 
 
+def _similar_items(table: str, item_id: str, namespace: str,
+                   embedding: list[float] | None) -> list[dict]:
+    """Near-duplicates of a just-stored item, for the agent mid-write to judge.
+
+    The server only flags — merging, superseding, or ignoring is the caller's
+    decision. Empty when there is nothing above SIMILAR_THRESHOLD, no
+    embedding (FTS-only mode, chunked documents), or the check is disabled.
+    Never breaks the store that triggered it.
+    """
+    if embedding is None or SIMILAR_THRESHOLD <= 0:
+        return []
+    try:
+        results = _db().search_vec(embedding, table=table, namespace=namespace,
+                                   limit=_SIMILAR_LIMIT + 1)
+    except Exception as e:
+        logger.warning("Similar-item check failed: %s: %s", type(e).__name__, e)
+        return []
+    return [
+        {"id": r.id, "title": r.title, "score": round(r.score, 3)}
+        for r in results if r.id != item_id and r.score >= SIMILAR_THRESHOLD
+    ][:_SIMILAR_LIMIT]
+
+
 def _knowledge_embed_text(subject: str, fact: str) -> str:
     """Text embedded for a knowledge entry. Shared by store and update so they never drift."""
     return f"{subject}: {fact}"
@@ -362,6 +393,10 @@ def store_document(
     exists, it is updated in place. Check `created` in the response to distinguish
     a new entry (true) from an update (false).
 
+    When the new content is nearly identical to items already in the namespace,
+    the response includes `similar` (id, title, score) — review those before
+    creating another near-duplicate.
+
     Args:
         namespace: Logical grouping for the document (e.g. "webapp", "infra", "global").
                    Use a project name to scope content, or "global" for cross-project material.
@@ -387,7 +422,11 @@ def store_document(
     embedding, chunks = _embed_document_body(title, content)
 
     stored, created = _db().store_document(doc, embedding, chunks)
-    return {"id": stored.id, "namespace": stored.namespace, "title": stored.title, "created": created}
+    response = {"id": stored.id, "namespace": stored.namespace, "title": stored.title, "created": created}
+    similar = _similar_items("documents", stored.id, namespace, embedding)
+    if similar:
+        response["similar"] = similar
+    return response
 
 
 @mcp.tool(annotations=_ANN_STORE)
@@ -418,6 +457,10 @@ def store_knowledge(
     history (see the fact_history tool) and the response carries its id in
     `superseded`.
 
+    When the new content is nearly identical to items already in the namespace,
+    the response includes `similar` (id, title, score) — review those before
+    creating another near-duplicate.
+
     Args:
         namespace: Logical grouping (e.g. "webapp", "infra", "global").
         subject: Short label for what this fact is about. Acts as the deduplication key.
@@ -446,6 +489,9 @@ def store_knowledge(
     response = {"id": stored.id, "namespace": stored.namespace, "subject": stored.subject, "created": created}
     if superseded:
         response["superseded"] = superseded
+    similar = _similar_items("knowledge", stored.id, namespace, embedding)
+    if similar:
+        response["similar"] = similar
     return response
 
 
@@ -672,6 +718,10 @@ def store_note(
     Uses upsert semantics: if a note with the same namespace + title already exists,
     it is updated in place. Check `created` in the response to distinguish new vs updated.
 
+    When the new content is nearly identical to items already in the namespace,
+    the response includes `similar` (id, title, score) — review those before
+    creating another near-duplicate.
+
     Args:
         namespace: Logical grouping (e.g. "personal", "webapp", "global").
         title: Short label for the note. Acts as the deduplication key within a namespace.
@@ -695,7 +745,11 @@ def store_note(
 
     embedding = _embed_content(_note_embed_text(title, content))
     stored, created = _db().store_note(note, embedding)
-    return {"id": stored.id, "namespace": stored.namespace, "title": stored.title, "created": created}
+    response = {"id": stored.id, "namespace": stored.namespace, "title": stored.title, "created": created}
+    similar = _similar_items("notes", stored.id, namespace, embedding)
+    if similar:
+        response["similar"] = similar
+    return response
 
 
 @mcp.tool(annotations=_ANN_UPDATE)
@@ -1061,6 +1115,153 @@ def restore(revision_id: int) -> dict:
         stored, _ = _db().store_note(item, _embed_content(_note_embed_text(item.title, item.content)))
     return {"id": stored.id, key: getattr(stored, key), "namespace": stored.namespace,
             "restored_revision": revision_id, "recreated": True}
+
+
+_ITEM_TYPE_TO_TABLE_INV = {table: item_type for item_type, table in _ITEM_TYPE_TO_TABLE.items()}
+
+
+def _duplicate_clusters(item_type: str, vectors: list[tuple[str, str, list[float]]],
+                        threshold: float) -> list[dict]:
+    """Group items whose pairwise cosine similarity reaches the threshold.
+
+    Vectors are stored L2-normalized, so the dot product is the cosine.
+    Union-find over qualifying pairs; clusters report their strongest pair.
+    """
+    parent = list(range(len(vectors)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    pairs = []
+    for i in range(len(vectors)):
+        for j in range(i + 1, len(vectors)):
+            score = sum(a * b for a, b in zip(vectors[i][2], vectors[j][2]))
+            if score >= threshold:
+                pairs.append((i, j, score))
+                parent[find(i)] = find(j)
+
+    members: dict[int, list[int]] = {}
+    for i in range(len(vectors)):
+        members.setdefault(find(i), []).append(i)
+    best: dict[int, float] = {}
+    for i, j, score in pairs:
+        root = find(i)
+        best[root] = max(best.get(root, 0.0), score)
+
+    return [
+        {"type": item_type,
+         "similarity": round(best[root], 3),
+         "items": [{"id": vectors[i][0], "title": vectors[i][1]} for i in group]}
+        for root, group in members.items() if len(group) > 1
+    ]
+
+
+@mcp.tool(annotations=_ANN_READ_ONLY)
+def consolidation_report(namespace: str, similarity_threshold: float | None = None,
+                         stale_days: int = 90) -> dict:
+    """Mechanical consolidation candidates for a namespace: near-duplicate
+    clusters and stale items. The report only flags — reviewing each candidate
+    and deciding to merge, supersede, tag, delete, or keep is your job (the
+    `consolidate` prompt walks through it).
+
+    - duplicate_clusters: groups of same-type items whose embeddings are
+      nearly identical (cosine >= similarity_threshold). Chunked documents
+      have no whole-document vector and can't be clustered.
+    - stale: current items never retrieved since usage tracking began and not
+      updated in `stale_days` days, oldest first. On a server where tracking
+      was enabled recently, "never retrieved" spans only that period — don't
+      treat a low count as meaning unused forever.
+
+    Args:
+        namespace: The namespace to analyze.
+        similarity_threshold: Cosine similarity for clustering (default: the
+            server's MNEMOMATIC_SIMILAR_THRESHOLD, normally 0.8).
+        stale_days: Only items untouched for this many days count as stale
+            (default 90).
+    """
+    threshold = SIMILAR_THRESHOLD if similarity_threshold is None else float(similarity_threshold)
+    if threshold <= 0:
+        return {"error": "Invalid similarity_threshold", "details": "Must be positive (cosine similarity)"}
+
+    clusters = []
+    for table in ("documents", "knowledge", "notes"):
+        vectors = _db().item_vectors(table, namespace)
+        clusters.extend(_duplicate_clusters(_ITEM_TYPE_TO_TABLE_INV[table], vectors, threshold))
+    clusters.sort(key=lambda c: c["similarity"], reverse=True)
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max(0, int(stale_days)))).isoformat()
+    stale = _db().stale_items(namespace, cutoff)
+
+    return {
+        "namespace": namespace,
+        "similarity_threshold": threshold,
+        "stale_days": stale_days,
+        "duplicate_clusters": clusters,
+        "stale": stale,
+        "counts": _db().namespace_counts().get(namespace, {}),
+    }
+
+
+# ── Prompts ──
+
+
+@mcp.prompt()
+def consolidate(namespace: str) -> str:
+    """Review and tidy a namespace: merge duplicates, refresh or retire stale items."""
+    return f"""You are consolidating the Mnem-O-matic namespace {namespace!r} — merging \
+near-duplicates and reviewing stale content so the memory stays trustworthy and searchable.
+
+1. Call consolidation_report(namespace={namespace!r}).
+
+2. For each duplicate cluster, read() every member, then decide:
+   - Same information twice → merge: keep the better-written item, fold any unique details \
+into it with update_*, delete the other. Prefer merging content over discarding it.
+   - Knowledge entries that disagree → the newer/correct fact should supersede: \
+update_knowledge(id, fact=...) on the current entry closes the old one as history. \
+Never edit superseded entries (they are immutable history).
+   - Genuinely distinct items that merely look alike → leave them; consider sharper \
+titles/subjects so they stay distinguishable.
+
+3. For each stale item, read() it and decide: still true and useful → leave it (or tag \
+"evergreen"); outdated but historically relevant → tag "deprecated"; wrong or worthless → \
+delete it (deletes are recoverable via list_revisions/restore).
+
+4. Be conservative: when unsure, keep the item and say so. Never delete or modify anything \
+you have not read in full.
+
+5. Finish with a short summary: actions taken (with ids), items flagged but deliberately \
+kept, and anything a human should look at."""
+
+
+@mcp.prompt()
+def briefing(task: str, namespace: str = "") -> str:
+    """Assemble relevant memory context for a task before starting work."""
+    scope = f"namespace={namespace!r}" if namespace else "the whole store (omit the namespace argument)"
+    return f"""Build a briefing from Mnem-O-matic for the following task, searching {scope}:
+
+<task>
+{task}
+</task>
+
+1. Derive 3–5 different search queries from the task: key terms, but also paraphrases \
+and related concepts the stored content might use instead. Run search() for each — \
+hybrid mode by default, semantic mode for the conceptual ones.
+
+2. read() the items whose snippets look relevant; snippets are truncated and chunked \
+documents return only the matching passage (partial: true).
+
+3. Where a knowledge entry is central to the task, check fact_history(namespace, subject) \
+— knowing an answer changed recently (and from what) is often as important as the answer.
+
+4. Reply with a briefing, not a search log:
+   - Established facts and decisions that constrain the task (cite item ids, note \
+confidence and freshness).
+   - Relevant reference material (documents/notes) with one-line summaries.
+   - Gaps and open questions the memory does not answer.
+   Keep it tight — only what changes how the task should be done."""
 
 
 # ── Resources ──
