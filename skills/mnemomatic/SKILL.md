@@ -13,6 +13,23 @@ description: >
 A persistent shared memory layer: recall past decisions, load project context, and store
 anything worth remembering for future sessions.
 
+## When to Reach for Memory
+
+**Read** when:
+- starting work in a project you haven't touched this session
+- the user references past work — "like we did before", "what did we decide about X"
+- you're about to say "I don't know" or "there's no prior decision on this" — check first
+- a task depends on conventions, constraints, or choices that aren't in the code
+
+**Write** when:
+- the user says to remember something (store it as stated, don't paraphrase away details)
+- a decision is made or reversed in conversation — capture the *why*, not just the outcome
+- you solved a non-obvious problem, or learned a user preference or correction
+- a task ends — pause and store what a future session would need before the context is gone
+
+**Never store**: secrets, tokens, or credentials (this is shared memory); mid-task
+ephemera that won't matter tomorrow; anything the codebase or git history already records.
+
 ## Recall
 
 **Search before answering questions or starting work** — a prior session may have already
@@ -64,8 +81,6 @@ place (`created: false`); knowledge is temporal (next section).
 found near-identical existing items. Read them and either merge your content into the
 existing item, store the corrected fact so it supersedes, or delete your redundant
 addition — don't leave both.
-
-Do **not** store what the codebase, git history, or documentation already records.
 
 ## Temporal Knowledge
 
