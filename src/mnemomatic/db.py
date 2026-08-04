@@ -28,7 +28,11 @@ BUSY_TIMEOUT_MS = 5000
 # Version 2: usage-tracking columns (retrieval_count, last_accessed) on the
 # content tables, plus the `revisions` table capturing prior state on
 # update/delete so content can be inspected and restored.
-SCHEMA_VERSION = 2
+# Version 3: temporal facts — knowledge rows gain valid_until/superseded_by;
+# changing a fact closes the old row and inserts a successor instead of
+# overwriting, and the (namespace, subject) unique index becomes partial so
+# it only constrains current rows.
+SCHEMA_VERSION = 3
 CHUNK_THRESHOLD = int(os.environ.get("MNEMOMATIC_CHUNK_THRESHOLD", "2000"))
 CHUNK_SIZE = int(os.environ.get("MNEMOMATIC_CHUNK_SIZE", "1000"))
 CHUNK_OVERLAP = int(os.environ.get("MNEMOMATIC_CHUNK_OVERLAP", "200"))
@@ -47,10 +51,22 @@ _TABLE_COLUMNS = {
     "documents": ("id", "namespace", "title", "content", "mime_type",
                   "tags", "metadata", "created_at", "updated_at"),
     "knowledge": ("id", "namespace", "subject", "fact", "confidence", "source",
-                  "tags", "metadata", "created_at", "updated_at"),
+                  "tags", "metadata", "created_at", "updated_at",
+                  "valid_until", "superseded_by"),
     "notes": ("id", "namespace", "title", "content", "source",
               "tags", "metadata", "created_at", "updated_at"),
 }
+
+# Extra WHERE fragment restricting a table to its live rows. Only knowledge
+# has history rows to hide: superseded facts stay in the table (that's the
+# point) but are excluded from search, listings, counts, and upsert lookups.
+_CURRENT_ONLY = {"documents": "", "knowledge": " AND {alias}valid_until IS NULL", "notes": ""}
+
+
+def _current_filter(table: str, alias: str = "") -> str:
+    return _CURRENT_ONLY[table].format(alias=f"{alias}." if alias else "")
+
+
 _TABLE_UPDATE_FIELDS = {
     "documents": frozenset({"title", "content", "mime_type", "tags", "metadata"}),
     "knowledge": frozenset({"subject", "fact", "confidence", "source", "tags", "metadata"}),
@@ -187,7 +203,7 @@ def _item_column_values(item, columns) -> list:
         v = getattr(item, col)
         if col in ("tags", "metadata"):
             v = json.dumps(v)
-        elif col in ("created_at", "updated_at"):
+        elif isinstance(v, datetime):
             v = v.isoformat()
         values.append(v)
     return values
@@ -250,7 +266,9 @@ class Database:
                 tags TEXT NOT NULL DEFAULT '[]',
                 metadata TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                valid_until TEXT,
+                superseded_by TEXT
             );
 
             CREATE TABLE IF NOT EXISTS notes (
@@ -269,9 +287,11 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_knowledge_namespace ON knowledge(namespace);
             CREATE INDEX IF NOT EXISTS idx_notes_namespace ON notes(namespace);
             CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_ns_title ON documents(namespace, title);
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_ns_subject ON knowledge(namespace, subject);
             CREATE UNIQUE INDEX IF NOT EXISTS idx_notes_ns_title ON notes(namespace, title);
         """)
+        # The knowledge uniqueness index is created by _migrate_to_v3 (it is
+        # partial — current rows only — and pre-v3 databases carry a full one
+        # that must be dropped first, which can't be expressed as IF NOT EXISTS).
 
         # FTS5 tables
         conn.executescript("""
@@ -423,7 +443,7 @@ class Database:
                         f"re-embed all content at the new dimension on startup."
                     )
             if version < SCHEMA_VERSION:
-                self._migrate_to_v2(conn)
+                self._migrate_content_schema(conn)
                 # A pending dim change leaves the version to rebuild_vec_tables,
                 # which stamps it once the vec tables actually match.
                 if not self.dim_change_pending:
@@ -458,7 +478,7 @@ class Database:
                                     "Legacy embeddings have dim %d, configured %d — deferring "
                                     "to reindex rebuild", found_dim, EMBEDDING_DIM,
                                 )
-                                self._migrate_to_v2(conn)
+                                self._migrate_content_schema(conn)
                                 conn.commit()
                                 return
                             raise RuntimeError(
@@ -479,20 +499,26 @@ class Database:
                 "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('embed_dim', ?)",
                 (str(EMBEDDING_DIM),),
             )
-            self._migrate_to_v2(conn)
+            self._migrate_content_schema(conn)
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             conn.commit()
         except Exception:
             conn.rollback()
             raise
 
+    @classmethod
+    def _migrate_content_schema(cls, conn: sqlite3.Connection) -> None:
+        """Apply the content-table migrations (v2, v3) in order.
+
+        Every step is idempotent (column-existence checks, IF NOT EXISTS) so
+        this is safe to run on any database regardless of which path reached it.
+        """
+        cls._migrate_to_v2(conn)
+        cls._migrate_to_v3(conn)
+
     @staticmethod
     def _migrate_to_v2(conn: sqlite3.Connection) -> None:
-        """Version 2: usage-tracking columns and the revisions table.
-
-        Idempotent (column-existence checks, IF NOT EXISTS) so it is safe to
-        run on any database regardless of which path reached it.
-        """
+        """Version 2: usage-tracking columns and the revisions table."""
         for table in _TABLES:
             cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
             if "retrieval_count" not in cols:
@@ -513,6 +539,22 @@ class Database:
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_revisions_item ON revisions(item_type, item_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_revisions_ns ON revisions(namespace, revised_at)")
+
+    @staticmethod
+    def _migrate_to_v3(conn: sqlite3.Connection) -> None:
+        """Version 3: temporal facts — validity columns on knowledge, and the
+        (namespace, subject) uniqueness constraint narrowed to current rows so
+        superseded history can share a subject."""
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(knowledge)")}
+        if "valid_until" not in cols:
+            conn.execute("ALTER TABLE knowledge ADD COLUMN valid_until TEXT")
+        if "superseded_by" not in cols:
+            conn.execute("ALTER TABLE knowledge ADD COLUMN superseded_by TEXT")
+        conn.execute("DROP INDEX IF EXISTS idx_knowledge_ns_subject")
+        conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_ns_subject_current
+            ON knowledge(namespace, subject) WHERE valid_until IS NULL
+        """)
 
     def rebuild_vec_tables(self) -> None:
         """Drop and recreate all vec0 tables empty, at the configured dimension.
@@ -648,13 +690,14 @@ class Database:
         return row
 
     def find_by_key(self, item_type: str, namespace: str, key_value: str) -> str | None:
-        """The id occupying (namespace, title/subject), or None. Used by restore
-        to refuse recreating an item under a key another item now owns."""
+        """The id currently occupying (namespace, title/subject), or None. Used by
+        restore to refuse recreating an item under a key another item now owns."""
         table = _ITEM_TYPE_TO_TABLE.get(item_type)
         if table is None:
             raise ValueError(f"Invalid type {item_type!r}: must be 'document', 'knowledge', or 'note'")
         row = self._get_conn().execute(
-            f"SELECT id FROM {table} WHERE namespace = ? AND {_TABLE_TITLE_FIELD[table]} = ?",
+            f"SELECT id FROM {table} WHERE namespace = ? AND {_TABLE_TITLE_FIELD[table]} = ?"
+            f"{_current_filter(table)}",
             (namespace, key_value),
         ).fetchone()
         return row["id"] if row else None
@@ -673,7 +716,7 @@ class Database:
         key = _TABLE_TITLE_FIELD[table]
         columns = _TABLE_COLUMNS[table]
         existing = conn.execute(
-            f"SELECT rowid, * FROM {table} WHERE namespace = ? AND {key} = ?",
+            f"SELECT rowid, * FROM {table} WHERE namespace = ? AND {key} = ?{_current_filter(table)}",
             (item.namespace, getattr(item, key)),
         ).fetchone()
 
@@ -749,7 +792,8 @@ class Database:
 
     def _list_items(self, table: str, namespace: str) -> list:
         rows = self._get_conn().execute(
-            f"SELECT * FROM {table} WHERE namespace = ? ORDER BY updated_at DESC", (namespace,)
+            f"SELECT * FROM {table} WHERE namespace = ?{_current_filter(table)} "
+            f"ORDER BY updated_at DESC", (namespace,)
         ).fetchall()
         return [_row_to_model(_TABLE_MODEL[table], r) for r in rows]
 
@@ -806,8 +850,92 @@ class Database:
 
     # ── Knowledge CRUD ──
 
-    def store_knowledge(self, k: Knowledge, embedding: list[float] | None) -> tuple[Knowledge, bool]:
-        return self._store_item("knowledge", k, embedding)
+    def store_knowledge(self, k: Knowledge, embedding: list[float] | None) -> tuple[Knowledge, bool, str | None]:
+        """Store a fact with temporal upsert semantics.
+
+        Returns (stored, created, superseded_id). No current row with this
+        (namespace, subject): plain insert. Current row with the *same* fact:
+        in-place refresh of the other fields (revision captured), no history
+        entry. Current row with a *different* fact: the old row is closed
+        (valid_until, superseded_by) and kept as history, and the new fact is
+        inserted as its successor.
+        """
+        conn = self._get_conn()
+        existing = conn.execute(
+            "SELECT rowid, * FROM knowledge WHERE namespace = ? AND subject = ? "
+            "AND valid_until IS NULL",
+            (k.namespace, k.subject),
+        ).fetchone()
+        if existing is None or existing["fact"] == k.fact:
+            stored, created = self._store_item("knowledge", k, embedding)
+            return stored, created, None
+        successor = self._supersede(conn, existing, k, embedding)
+        return successor, True, existing["id"]
+
+    def supersede_knowledge(self, k_id: str, successor: Knowledge,
+                            embedding: list[float] | None) -> Knowledge | None:
+        """Close the fact `k_id` and insert `successor` as its replacement.
+
+        The update path for fact changes. Returns None when k_id doesn't
+        exist; raises ValueError when it is already superseded (history is
+        immutable) and sqlite3.IntegrityError when the successor's subject
+        collides with a different current fact.
+        """
+        conn = self._get_conn()
+        old = conn.execute("SELECT rowid, * FROM knowledge WHERE id = ?", (k_id,)).fetchone()
+        if old is None:
+            return None
+        if old["valid_until"] is not None:
+            raise ValueError(f"knowledge {k_id} is already superseded — history is immutable")
+        return self._supersede(conn, old, successor, embedding)
+
+    def _supersede(self, conn: sqlite3.Connection, old_row: dict, new_item: Knowledge,
+                   embedding: list[float] | None) -> Knowledge:
+        """Close old_row and insert new_item as the current fact. Commits.
+
+        The old row keeps its content and usage counters — supersession *is*
+        the history, so no revision is captured. Its vector is dropped: only
+        current facts participate in semantic search.
+        """
+        now = datetime.now(timezone.utc)
+        stored = new_item.model_copy(update={
+            "created_at": now, "updated_at": now,
+            "valid_until": None, "superseded_by": None,
+        })
+        try:
+            conn.execute(
+                "UPDATE knowledge SET valid_until = ?, superseded_by = ? WHERE id = ?",
+                (now.isoformat(), stored.id, old_row["id"]),
+            )
+            conn.execute("DELETE FROM vec_knowledge WHERE rowid = ?", (old_row["rowid"],))
+            columns = _TABLE_COLUMNS["knowledge"]
+            rowid = conn.execute(
+                f"INSERT INTO knowledge ({', '.join(columns)}) "
+                f"VALUES ({', '.join('?' * len(columns))}) RETURNING rowid",
+                _item_column_values(stored, columns),
+            ).fetchone()["rowid"]
+            if embedding is not None:
+                conn.execute(
+                    "INSERT INTO vec_knowledge (rowid, namespace, embedding) VALUES (?, ?, ?)",
+                    (rowid, stored.namespace, _serialize_embedding(embedding)),
+                )
+            conn.commit()
+        except Exception:
+            # A subject conflict on the successor insert must not leave the
+            # old row closed in the open transaction.
+            conn.rollback()
+            raise
+        return stored
+
+    def knowledge_history(self, namespace: str, subject: str) -> list[Knowledge]:
+        """All facts ever held for (namespace, subject): current first, then
+        superseded versions newest first."""
+        rows = self._get_conn().execute(
+            "SELECT * FROM knowledge WHERE namespace = ? AND subject = ? "
+            "ORDER BY (valid_until IS NULL) DESC, created_at DESC",
+            (namespace, subject),
+        ).fetchall()
+        return [_row_to_model(Knowledge, r) for r in rows]
 
     def get_knowledge(self, k_id: str) -> Knowledge | None:
         return self._get_item("knowledge", k_id)
@@ -939,9 +1067,11 @@ class Database:
                 key = _TABLE_TITLE_FIELD[table]
                 # The moved item wins a collision: drop the target's row (and
                 # its vector; document chunks cascade via FK + trigger) first.
+                # For knowledge only current rows collide — superseded history
+                # on either side moves/stays untouched (subjects may repeat).
                 losers = conn.execute(
-                    f"""DELETE FROM {table} WHERE namespace = ? AND {key} IN
-                        (SELECT {key} FROM {table} WHERE namespace = ?)
+                    f"""DELETE FROM {table} WHERE namespace = ?{_current_filter(table)} AND {key} IN
+                        (SELECT {key} FROM {table} WHERE namespace = ?{_current_filter(table)})
                         RETURNING rowid, *""",
                     (new, old),
                 ).fetchall()
@@ -989,7 +1119,7 @@ class Database:
         rows = self._get_conn().execute("""
             SELECT DISTINCT namespace FROM documents
             UNION
-            SELECT DISTINCT namespace FROM knowledge
+            SELECT DISTINCT namespace FROM knowledge WHERE valid_until IS NULL
             UNION
             SELECT DISTINCT namespace FROM notes
             ORDER BY namespace
@@ -1008,11 +1138,12 @@ class Database:
             raise ValueError(f"Invalid type {item_type!r}: must be 'document', 'knowledge', or 'note'")
         conn = self._get_conn()
         total = conn.execute(
-            f"SELECT COUNT(*) AS n FROM {table} WHERE namespace = ?", (namespace,)
+            f"SELECT COUNT(*) AS n FROM {table} WHERE namespace = ?{_current_filter(table)}",
+            (namespace,),
         ).fetchone()["n"]
         columns = ", ".join(_LIST_SUMMARY_COLUMNS[table])
         rows = conn.execute(
-            f"SELECT {columns} FROM {table} WHERE namespace = ? "
+            f"SELECT {columns} FROM {table} WHERE namespace = ?{_current_filter(table)} "
             f"ORDER BY updated_at DESC LIMIT ? OFFSET ?",
             (namespace, limit, offset),
         ).fetchall()
@@ -1029,7 +1160,8 @@ class Database:
         conn = self._get_conn()
         counts: dict[str, dict[str, int]] = {}
         for table in _TABLES:
-            for row in conn.execute(f"SELECT namespace, COUNT(*) AS n FROM {table} GROUP BY namespace"):
+            where = f"WHERE 1=1{_current_filter(table)} " if _current_filter(table) else ""
+            for row in conn.execute(f"SELECT namespace, COUNT(*) AS n FROM {table} {where}GROUP BY namespace"):
                 counts.setdefault(row["namespace"], dict.fromkeys(_TABLES, 0))[table] = row["n"]
         return {ns: counts[ns] for ns in sorted(counts)}
 
@@ -1043,7 +1175,7 @@ class Database:
             SELECT {alias}.*, {fts_table}.rank
             FROM {fts_table}
             JOIN {table} {alias} ON {alias}.rowid = {fts_table}.rowid
-            WHERE {fts_table} MATCH ?
+            WHERE {fts_table} MATCH ?{_current_filter(table, alias)}
         """
         params: list = [query]
         if namespace:

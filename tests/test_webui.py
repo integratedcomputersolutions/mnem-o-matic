@@ -47,7 +47,7 @@ def _seed(db: Database) -> dict:
         embedding=None,
     )
     # Knowledge content carries an XSS probe to verify escaping.
-    know, _ = db.store_knowledge(
+    know, _, _ = db.store_knowledge(
         Knowledge(namespace="proj", subject="auth", fact="<script>alert(1)</script>"),
         embedding=None,
     )

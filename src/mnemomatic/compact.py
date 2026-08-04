@@ -31,6 +31,7 @@ _COMPACT_DESCRIPTIONS: dict[str, str] = {
     "delete_namespace": "Permanently delete all items in a namespace.",
     "list_revisions":   "List saved prior versions of items (captured on every update/delete), newest first. Filter by item_type/item_id/namespace.",
     "restore":          "Restore an item to a revision from list_revisions: rolls back an update or recreates a deleted item.",
+    "fact_history":     "Timeline of a knowledge fact by namespace+subject: current entry first, then superseded versions newest first.",
 }
 
 # Param descriptions only for constrained/non-obvious values; all others are stripped.
