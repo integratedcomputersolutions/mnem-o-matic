@@ -4,6 +4,7 @@ import os
 import re
 import sqlite3
 import threading
+from datetime import datetime, timedelta, timezone
 from importlib.metadata import PackageNotFoundError, version
 
 import uvicorn
@@ -14,7 +15,16 @@ from pydantic import ValidationError
 from mnemomatic import model_config
 from mnemomatic.auth import BearerAuthMiddleware
 from mnemomatic.compact import CompactToolsMiddleware
-from mnemomatic.db import CHUNK_OVERLAP, CHUNK_SIZE, CHUNK_THRESHOLD, EMBEDDING_DIM, Database, _chunk_text
+from mnemomatic.db import (
+    CHUNK_OVERLAP,
+    CHUNK_SIZE,
+    CHUNK_THRESHOLD,
+    EMBEDDING_DIM,
+    Database,
+    _chunk_text,
+    _ITEM_TYPE_TO_TABLE,
+    _TABLE_UPDATE_FIELDS,
+)
 from mnemomatic.models import Document, Knowledge, Note
 
 logger = logging.getLogger("mnemomatic")
@@ -34,6 +44,14 @@ MAX_LIST_LIMIT = 200
 BACKUP_DIR = os.environ.get("MNEMOMATIC_BACKUP_DIR", "").strip()
 BACKUP_INTERVAL_HOURS = float(os.environ.get("MNEMOMATIC_BACKUP_INTERVAL", "24"))
 BACKUP_KEEP = int(os.environ.get("MNEMOMATIC_BACKUP_KEEP", "7"))
+
+# Cosine similarity at or above which two items count as near-duplicates —
+# used by the `similar` field on store responses and by consolidation_report's
+# clustering. Correct-but-distinct search hits typically score 0.3–0.6 across
+# the bundled models, near-duplicates well above 0.8. 0 disables the store-time
+# check entirely.
+SIMILAR_THRESHOLD = float(os.environ.get("MNEMOMATIC_SIMILAR_THRESHOLD", "0.8"))
+_SIMILAR_LIMIT = 3
 
 # Task prefixes for asymmetric embedding models. When the bundled model is
 # trained with task prompts (e.g. EmbeddingGemma, multilingual-e5), the Docker
@@ -237,6 +255,29 @@ def _embed_content(text: str) -> list[float] | None:
     return _safe_embed(EMBED_DOC_PREFIX + text)
 
 
+def _similar_items(table: str, item_id: str, namespace: str,
+                   embedding: list[float] | None) -> list[dict]:
+    """Near-duplicates of a just-stored item, for the agent mid-write to judge.
+
+    The server only flags — merging, superseding, or ignoring is the caller's
+    decision. Empty when there is nothing above SIMILAR_THRESHOLD, no
+    embedding (FTS-only mode, chunked documents), or the check is disabled.
+    Never breaks the store that triggered it.
+    """
+    if embedding is None or SIMILAR_THRESHOLD <= 0:
+        return []
+    try:
+        results = _db().search_vec(embedding, table=table, namespace=namespace,
+                                   limit=_SIMILAR_LIMIT + 1)
+    except Exception as e:
+        logger.warning("Similar-item check failed: %s: %s", type(e).__name__, e)
+        return []
+    return [
+        {"id": r.id, "title": r.title, "score": round(r.score, 3)}
+        for r in results if r.id != item_id and r.score >= SIMILAR_THRESHOLD
+    ][:_SIMILAR_LIMIT]
+
+
 def _knowledge_embed_text(subject: str, fact: str) -> str:
     """Text embedded for a knowledge entry. Shared by store and update so they never drift."""
     return f"{subject}: {fact}"
@@ -352,6 +393,10 @@ def store_document(
     exists, it is updated in place. Check `created` in the response to distinguish
     a new entry (true) from an update (false).
 
+    When the new content is nearly identical to items already in the namespace,
+    the response includes `similar` (id, title, score) — review those before
+    creating another near-duplicate.
+
     Args:
         namespace: Logical grouping for the document (e.g. "webapp", "infra", "global").
                    Use a project name to scope content, or "global" for cross-project material.
@@ -377,7 +422,11 @@ def store_document(
     embedding, chunks = _embed_document_body(title, content)
 
     stored, created = _db().store_document(doc, embedding, chunks)
-    return {"id": stored.id, "namespace": stored.namespace, "title": stored.title, "created": created}
+    response = {"id": stored.id, "namespace": stored.namespace, "title": stored.title, "created": created}
+    similar = _similar_items("documents", stored.id, namespace, embedding)
+    if similar:
+        response["similar"] = similar
+    return response
 
 
 @mcp.tool(annotations=_ANN_STORE)
@@ -402,8 +451,15 @@ def store_knowledge(
     Good subjects: "auth mechanism", "database choice", "deploy pipeline", "rate limit policy"
     Good facts: "Uses JWT with RS256 signing", "Postgres, not MySQL — chosen for JSONB support"
 
-    Uses upsert semantics: if an entry with the same namespace + subject already exists,
-    it is updated in place. Check `created` in the response to distinguish new vs updated.
+    Uses temporal upsert semantics on namespace + subject: storing the same
+    fact again refreshes the entry in place, while storing a *different* fact
+    for an existing subject supersedes it — the old fact is kept as queryable
+    history (see the fact_history tool) and the response carries its id in
+    `superseded`.
+
+    When the new content is nearly identical to items already in the namespace,
+    the response includes `similar` (id, title, score) — review those before
+    creating another near-duplicate.
 
     Args:
         namespace: Logical grouping (e.g. "webapp", "infra", "global").
@@ -429,8 +485,14 @@ def store_knowledge(
         return {"error": "Invalid knowledge entry", "details": _format_validation_error(e)}
 
     embedding = _embed_content(_knowledge_embed_text(subject, fact))
-    stored, created = _db().store_knowledge(k, embedding)
-    return {"id": stored.id, "namespace": stored.namespace, "subject": stored.subject, "created": created}
+    stored, created, superseded = _db().store_knowledge(k, embedding)
+    response = {"id": stored.id, "namespace": stored.namespace, "subject": stored.subject, "created": created}
+    if superseded:
+        response["superseded"] = superseded
+    similar = _similar_items("knowledge", stored.id, namespace, embedding)
+    if similar:
+        response["similar"] = similar
+    return response
 
 
 # ── Shared update machinery ──
@@ -495,23 +557,54 @@ _UPDATE_CONFIG = {
 
 def _handle_update(item_type: str, id: str, fields: dict) -> dict:
     """Shared body for the update_* tools: validate the merged item, recompute its embedding,
-    persist, and return {id, <key>, updated}."""
+    persist, and return {id, <key>, updated}.
+
+    Knowledge is temporal: a superseded entry is immutable history, and a
+    change to the fact itself supersedes (closes the current entry and inserts
+    a successor) instead of overwriting.
+    """
     cfg = _UPDATE_CONFIG[item_type]
     db = _db()
     existing = cfg["getter"](db, id)
     if existing is None:
         return {"error": f"{item_type.capitalize()} {id} not found"}
+    if item_type == "knowledge" and existing.valid_until is not None:
+        return {"error": "Cannot update a superseded fact",
+                "details": f"Knowledge {id} is history (superseded by {existing.superseded_by}). "
+                           f"Update the current fact for this subject instead, or use fact_history to inspect it."}
 
     try:
         cfg["model"](**{**existing.model_dump(), **fields})
     except ValidationError as e:
         return {"error": "Invalid update", "details": _format_validation_error(e)}
 
+    if item_type == "knowledge" and "fact" in fields and fields["fact"] != existing.fact:
+        return _supersede_update(existing, fields)
+
     embedding = cfg["embed"](id, existing, fields)
     updated = cfg["updater"](db, id, embedding, fields)
     if updated is None:
         return {"error": f"{item_type.capitalize()} {id} not found"}
     return {"id": updated.id, cfg["key"]: getattr(updated, cfg["key"]), "updated": True}
+
+
+def _supersede_update(existing: Knowledge, fields: dict) -> dict:
+    """A fact change: build the successor entry and close the current one."""
+    data = {**existing.model_dump(), **fields}
+    for reset in ("id", "created_at", "updated_at", "valid_until", "superseded_by",
+                  "retrieval_count", "last_accessed"):
+        data.pop(reset, None)
+    successor = Knowledge(**data)  # fresh id and timestamps; merged fields pre-validated
+    embedding = _embed_content(_knowledge_embed_text(successor.subject, successor.fact))
+    try:
+        stored = _db().supersede_knowledge(existing.id, successor, embedding)
+    except sqlite3.IntegrityError:
+        return {"error": "Subject conflict",
+                "details": f"Another current fact already holds subject {successor.subject!r} "
+                           f"in namespace {successor.namespace!r}"}
+    if stored is None:
+        return {"error": f"Knowledge {existing.id} not found"}
+    return {"id": stored.id, "subject": stored.subject, "updated": True, "superseded": existing.id}
 
 
 @mcp.tool(annotations=_ANN_UPDATE)
@@ -625,6 +718,10 @@ def store_note(
     Uses upsert semantics: if a note with the same namespace + title already exists,
     it is updated in place. Check `created` in the response to distinguish new vs updated.
 
+    When the new content is nearly identical to items already in the namespace,
+    the response includes `similar` (id, title, score) — review those before
+    creating another near-duplicate.
+
     Args:
         namespace: Logical grouping (e.g. "personal", "webapp", "global").
         title: Short label for the note. Acts as the deduplication key within a namespace.
@@ -648,7 +745,11 @@ def store_note(
 
     embedding = _embed_content(_note_embed_text(title, content))
     stored, created = _db().store_note(note, embedding)
-    return {"id": stored.id, "namespace": stored.namespace, "title": stored.title, "created": created}
+    response = {"id": stored.id, "namespace": stored.namespace, "title": stored.title, "created": created}
+    similar = _similar_items("notes", stored.id, namespace, embedding)
+    if similar:
+        response["similar"] = similar
+    return response
 
 
 @mcp.tool(annotations=_ANN_UPDATE)
@@ -801,6 +902,8 @@ def search(
         logger.warning("Search failed for query %r: %s", query, e)
         return [{"error": "Search failed", "details": str(e)}]
 
+    _record_access([(r.type, r.id) for r in results])
+
     # Convert results to dicts and add degradation metadata if applicable
     response = [r.model_dump() for r in results]
     if degraded:
@@ -822,11 +925,20 @@ _READ_GETTERS = {
 }
 
 
+def _record_access(refs: list[tuple[str, str]]) -> None:
+    """Usage bookkeeping for items surfaced to a client — never breaks the request."""
+    try:
+        _db().record_access(refs)
+    except Exception as e:
+        logger.warning("Recording item access failed: %s: %s", type(e).__name__, e)
+
+
 def _get_resource(item_type: str, id: str) -> str:
     """Shared body for the get_* MCP resources: fetch by id, return JSON or a not-found error."""
     obj = _READ_GETTERS[item_type](_db(), id)
     if obj is None:
         return json.dumps({"error": f"{item_type.capitalize()} {id} not found"})
+    _record_access([(item_type, id)])
     return obj.model_dump_json()
 
 
@@ -883,7 +995,273 @@ def read(item_type: str, id: str) -> dict:
     item = getter(_db(), id)
     if item is None:
         return {"error": f"{item_type} not found", "id": id}
+    _record_access([(item_type, id)])
     return json.loads(item.model_dump_json())
+
+
+@mcp.tool(annotations=_ANN_READ_ONLY)
+def fact_history(namespace: str, subject: str) -> dict:
+    """The full timeline of a fact: the current entry first, then every
+    superseded version, newest first.
+
+    Knowledge is temporal — when a fact changes (via store_knowledge or
+    update_knowledge), the old entry is closed rather than overwritten. Use
+    this to answer "what did we believe before?" or to audit when an answer
+    changed: each superseded entry carries valid_until (when it stopped being
+    current) and superseded_by (the id of its replacement).
+
+    History entries are read-only; only the current entry can be updated or
+    superseded.
+
+    Args:
+        namespace: The fact's namespace.
+        subject: The fact's subject (the deduplication key).
+    """
+    history = _db().knowledge_history(namespace, subject)
+    _record_access([("knowledge", k.id) for k in history])
+    return {
+        "namespace": namespace,
+        "subject": subject,
+        "count": len(history),
+        "history": [json.loads(k.model_dump_json()) for k in history],
+    }
+
+
+@mcp.tool(annotations=_ANN_READ_ONLY)
+def list_revisions(
+    item_type: str | None = None,
+    item_id: str | None = None,
+    namespace: str | None = None,
+    limit: int = 20,
+) -> dict:
+    """List saved revisions — prior versions of items captured on every update and delete.
+
+    Use this to find a version to roll back to (then call the restore tool with
+    the revision's id), to recover something deleted by mistake, or to review
+    what recently changed in a namespace. Filters combine; with no filters the
+    newest revisions across the whole store are returned.
+
+    Each revision is a summary (revision id, item_type, item_id, namespace,
+    title/subject, op, revised_at) — op is "update" (the item changed after
+    this state was saved) or "delete" (the item was deleted). The server keeps
+    a limited number of revisions per item; older ones are pruned.
+
+    Args:
+        item_type: Filter by type — "document", "knowledge", or "note" (optional).
+        item_id: Filter to one item's history (optional).
+        namespace: Filter by namespace (optional).
+        limit: Maximum revisions to return, newest first (default 20, max 200).
+    """
+    if item_type is not None and item_type not in _READ_GETTERS:
+        return {"error": "Invalid item_type", "details": f"Must be one of: {', '.join(sorted(_READ_GETTERS))}"}
+    limit = max(1, min(int(limit), MAX_LIST_LIMIT))
+    revisions = _db().list_revisions(item_type=item_type, item_id=item_id,
+                                     namespace=namespace, limit=limit)
+    return {"revisions": revisions, "limit": limit}
+
+
+@mcp.tool(annotations=_ANN_UPDATE)
+def restore(revision_id: int) -> dict:
+    """Restore an item to a saved revision — undo an update or recover a deleted item.
+
+    Find the revision id with the list_revisions tool first. If the item still
+    exists, its content is rolled back to the revision's state (the current
+    state is saved as a new revision first, so a restore can itself be undone).
+    If the item was deleted, it is recreated with its original id.
+
+    Restoring re-embeds the content, so search reflects the restored state
+    immediately.
+
+    Args:
+        revision_id: The revision to restore, from list_revisions.
+    """
+    try:
+        rev = _db().get_revision(revision_id)
+    except ValidationError as e:
+        return {"error": "Revision payload no longer validates", "details": _format_validation_error(e)}
+    if rev is None:
+        return {"error": f"Revision {revision_id} not found"}
+
+    item_type, item = rev["item_type"], rev["item"]
+    key = _UPDATE_CONFIG[item_type]["key"]
+
+    if _READ_GETTERS[item_type](_db(), rev["item_id"]) is not None:
+        # Roll the live item back through the normal update path — it captures
+        # the current state as a revision and re-embeds what changed.
+        fields = {f: getattr(item, f) for f in _TABLE_UPDATE_FIELDS[_ITEM_TYPE_TO_TABLE[item_type]]}
+        result = _handle_update(item_type, rev["item_id"], fields)
+        if "error" in result:
+            return result
+        return {**result, "restored_revision": revision_id, "recreated": False}
+
+    # The item is gone — recreate it, unless its key now belongs to another item.
+    if item_type == "knowledge" and item.valid_until is not None:
+        return {"error": "Cannot restore a superseded fact",
+                "details": "This revision is of a history entry; restore or re-store "
+                           "the current fact for the subject instead."}
+    occupant = _db().find_by_key(item_type, item.namespace, getattr(item, key))
+    if occupant is not None:
+        return {"error": "Cannot restore: key is taken",
+                "details": f"{item_type} {occupant} now occupies "
+                           f"{item.namespace!r}/{getattr(item, key)!r} — delete or rename it first"}
+
+    item = item.model_copy(update={"updated_at": datetime.now(timezone.utc)})
+    if item_type == "document":
+        embedding, chunks = _embed_document_body(item.title, item.content)
+        stored, _ = _db().store_document(item, embedding, chunks)
+    elif item_type == "knowledge":
+        stored, _, _ = _db().store_knowledge(item, _embed_content(_knowledge_embed_text(item.subject, item.fact)))
+    else:
+        stored, _ = _db().store_note(item, _embed_content(_note_embed_text(item.title, item.content)))
+    return {"id": stored.id, key: getattr(stored, key), "namespace": stored.namespace,
+            "restored_revision": revision_id, "recreated": True}
+
+
+_ITEM_TYPE_TO_TABLE_INV = {table: item_type for item_type, table in _ITEM_TYPE_TO_TABLE.items()}
+
+
+def _duplicate_clusters(item_type: str, vectors: list[tuple[str, str, list[float]]],
+                        threshold: float) -> list[dict]:
+    """Group items whose pairwise cosine similarity reaches the threshold.
+
+    Vectors are stored L2-normalized, so the dot product is the cosine.
+    Union-find over qualifying pairs; clusters report their strongest pair.
+    """
+    parent = list(range(len(vectors)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    pairs = []
+    for i in range(len(vectors)):
+        for j in range(i + 1, len(vectors)):
+            score = sum(a * b for a, b in zip(vectors[i][2], vectors[j][2]))
+            if score >= threshold:
+                pairs.append((i, j, score))
+                parent[find(i)] = find(j)
+
+    members: dict[int, list[int]] = {}
+    for i in range(len(vectors)):
+        members.setdefault(find(i), []).append(i)
+    best: dict[int, float] = {}
+    for i, j, score in pairs:
+        root = find(i)
+        best[root] = max(best.get(root, 0.0), score)
+
+    return [
+        {"type": item_type,
+         "similarity": round(best[root], 3),
+         "items": [{"id": vectors[i][0], "title": vectors[i][1]} for i in group]}
+        for root, group in members.items() if len(group) > 1
+    ]
+
+
+@mcp.tool(annotations=_ANN_READ_ONLY)
+def consolidation_report(namespace: str, similarity_threshold: float | None = None,
+                         stale_days: int = 90) -> dict:
+    """Mechanical consolidation candidates for a namespace: near-duplicate
+    clusters and stale items. The report only flags — reviewing each candidate
+    and deciding to merge, supersede, tag, delete, or keep is your job (the
+    `consolidate` prompt walks through it).
+
+    - duplicate_clusters: groups of same-type items whose embeddings are
+      nearly identical (cosine >= similarity_threshold). Chunked documents
+      have no whole-document vector and can't be clustered.
+    - stale: current items never retrieved since usage tracking began and not
+      updated in `stale_days` days, oldest first. On a server where tracking
+      was enabled recently, "never retrieved" spans only that period — don't
+      treat a low count as meaning unused forever.
+
+    Args:
+        namespace: The namespace to analyze.
+        similarity_threshold: Cosine similarity for clustering (default: the
+            server's MNEMOMATIC_SIMILAR_THRESHOLD, normally 0.8).
+        stale_days: Only items untouched for this many days count as stale
+            (default 90).
+    """
+    threshold = SIMILAR_THRESHOLD if similarity_threshold is None else float(similarity_threshold)
+    if threshold <= 0:
+        return {"error": "Invalid similarity_threshold", "details": "Must be positive (cosine similarity)"}
+
+    clusters = []
+    for table in ("documents", "knowledge", "notes"):
+        vectors = _db().item_vectors(table, namespace)
+        clusters.extend(_duplicate_clusters(_ITEM_TYPE_TO_TABLE_INV[table], vectors, threshold))
+    clusters.sort(key=lambda c: c["similarity"], reverse=True)
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max(0, int(stale_days)))).isoformat()
+    stale = _db().stale_items(namespace, cutoff)
+
+    return {
+        "namespace": namespace,
+        "similarity_threshold": threshold,
+        "stale_days": stale_days,
+        "duplicate_clusters": clusters,
+        "stale": stale,
+        "counts": _db().namespace_counts().get(namespace, {}),
+    }
+
+
+# ── Prompts ──
+
+
+@mcp.prompt()
+def consolidate(namespace: str) -> str:
+    """Review and tidy a namespace: merge duplicates, refresh or retire stale items."""
+    return f"""You are consolidating the Mnem-O-matic namespace {namespace!r} — merging \
+near-duplicates and reviewing stale content so the memory stays trustworthy and searchable.
+
+1. Call consolidation_report(namespace={namespace!r}).
+
+2. For each duplicate cluster, read() every member, then decide:
+   - Same information twice → merge: keep the better-written item, fold any unique details \
+into it with update_*, delete the other. Prefer merging content over discarding it.
+   - Knowledge entries that disagree → the newer/correct fact should supersede: \
+update_knowledge(id, fact=...) on the current entry closes the old one as history. \
+Never edit superseded entries (they are immutable history).
+   - Genuinely distinct items that merely look alike → leave them; consider sharper \
+titles/subjects so they stay distinguishable.
+
+3. For each stale item, read() it and decide: still true and useful → leave it (or tag \
+"evergreen"); outdated but historically relevant → tag "deprecated"; wrong or worthless → \
+delete it (deletes are recoverable via list_revisions/restore).
+
+4. Be conservative: when unsure, keep the item and say so. Never delete or modify anything \
+you have not read in full.
+
+5. Finish with a short summary: actions taken (with ids), items flagged but deliberately \
+kept, and anything a human should look at."""
+
+
+@mcp.prompt()
+def briefing(task: str, namespace: str = "") -> str:
+    """Assemble relevant memory context for a task before starting work."""
+    scope = f"namespace={namespace!r}" if namespace else "the whole store (omit the namespace argument)"
+    return f"""Build a briefing from Mnem-O-matic for the following task, searching {scope}:
+
+<task>
+{task}
+</task>
+
+1. Derive 3–5 different search queries from the task: key terms, but also paraphrases \
+and related concepts the stored content might use instead. Run search() for each — \
+hybrid mode by default, semantic mode for the conceptual ones.
+
+2. read() the items whose snippets look relevant; snippets are truncated and chunked \
+documents return only the matching passage (partial: true).
+
+3. Where a knowledge entry is central to the task, check fact_history(namespace, subject) \
+— knowing an answer changed recently (and from what) is often as important as the answer.
+
+4. Reply with a briefing, not a search log:
+   - Established facts and decisions that constrain the task (cite item ids, note \
+confidence and freshness).
+   - Relevant reference material (documents/notes) with one-line summaries.
+   - Gaps and open questions the memory does not answer.
+   Keep it tight — only what changes how the task should be done."""
 
 
 # ── Resources ──

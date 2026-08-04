@@ -21,6 +21,11 @@ services:
       - MNEMOMATIC_DB_PATH=/data/mnemomatic.db
       # - MNEMOMATIC_API_KEY=  # set a strong key: openssl rand -base64 32
       # - MNEMOMATIC_UI_TOKEN=  # enable the read-only web viewer at /ui; shared secret, not a user account
+      # - MNEMOMATIC_BACKUP_DIR=/data/backups                       # enable scheduled export-zip backups; keep it inside the mounted volume
+      # - MNEMOMATIC_BACKUP_INTERVAL=24                             # hours between backups (default: 24)
+      # - MNEMOMATIC_BACKUP_KEEP=7                                  # backup archives to retain; older ones are pruned (default: 7)
+      # - MNEMOMATIC_REVISIONS_KEEP=10                              # prior versions kept per item for the restore tool (default: 10; 0 disables)
+      # - MNEMOMATIC_SIMILAR_THRESHOLD=0.8                          # cosine similarity for near-duplicate flagging on store + consolidation_report (0 disables)
       # - MNEMOMATIC_CORS_ORIGINS=*  # allow browser clients; use comma-separated origins to restrict
       # - MNEMOMATIC_EMBED_URL=http://ollama:11434/v1/embeddings    # required for lite image (OpenAI-compatible: Ollama, llama.cpp, vLLM)
       # - MNEMOMATIC_EMBED_API=openai                               # or 'ollama' for the native /api/embeddings endpoint

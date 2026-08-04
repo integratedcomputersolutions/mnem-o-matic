@@ -69,7 +69,7 @@ class TestDocumentPrefix(PrefixTestBase):
         stored = MagicMock()
         stored.id, stored.namespace, stored.title, stored.subject = "id", "ns", "t", "s"
         fake_db.store_document.return_value = (stored, True)
-        fake_db.store_knowledge.return_value = (stored, True)
+        fake_db.store_knowledge.return_value = (stored, True, None)
         fake_db.store_note.return_value = (stored, True)
         return fake_db
 

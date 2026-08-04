@@ -154,7 +154,7 @@ mnemomatic-export-2026-08-02.zip
     └── notes/
 ```
 
-File names are sanitized titles (collisions get an id suffix); the exact originals are always in the `metadata.json` sidecars, and the manifest maps folder names back to exact namespace names. Document extensions follow the mime type (`.md`, `.txt`, `.json`). Embeddings, chunks, and full-text indexes are **not** exported — they are derived data, and excluding them keeps the archive independent of the embedding model.
+File names are sanitized titles (collisions get an id suffix); the exact originals are always in the `metadata.json` sidecars, and the manifest maps folder names back to exact namespace names. Document extensions follow the mime type (`.md`, `.txt`, `.json`). Embeddings, chunks, and full-text indexes are **not** exported — they are derived data, and excluding them keeps the archive independent of the embedding model. Superseded knowledge entries and item revisions are not exported either: the archive carries the store's current state.
 
 Three ways to trigger it:
 
@@ -187,6 +187,66 @@ The server can also write the export archive itself, on a schedule — no cron o
 Backups are full exports (all namespaces) named `mnemomatic-backup-YYYYMMDD-HHMMSS.zip` (UTC), written atomically. Once more than `MNEMOMATIC_BACKUP_KEEP` exist, the oldest are deleted — pruning only ever touches that filename pattern, so manual exports stored in the same directory are never removed. The schedule survives restarts: the next backup is due one interval after the newest existing archive, not after boot, so restarting the server neither skips a backup nor churns the retention window. When `MNEMOMATIC_BACKUP_DIR` is unset, nothing runs.
 
 The CLI + cron path above remains the right choice when the backup needs to leave the machine or be encrypted (e.g. piping `export -o -` through `gpg`).
+
+## Usage Tracking & Revisions
+
+Two always-on recording mechanisms make the store safer to mutate and lay the groundwork for memory-review workflows:
+
+**Usage tracking** — every item carries a `retrieval_count` and `last_accessed`, bumped when the item is fetched with the `read` tool (or an MCP resource) and when a search surfaces it in results. Browsing does **not** count: `list_items`, the web viewer, exports, and backups never touch the counters, so they measure genuine retrieval, not housekeeping. The counters appear in `read` output and `list_items` summaries; `updated_at` is never affected. There is no ranking impact yet — the data accumulates first, so any future ranking blend can be tuned against real numbers.
+
+**Revisions** — every update and delete first saves the item's prior state, including upsert overwrites (`store_*` on an existing title/subject), tag edits, `delete_namespace`, and items replaced by a `rename_namespace` merge. The server keeps the newest `MNEMOMATIC_REVISIONS_KEEP` revisions per item (default 10; `0` disables capture). Two tools work with them:
+
+```
+list_revisions [item_type] [item_id] [namespace] [limit]   # newest first; op is "update" or "delete"
+restore <revision_id>                                       # roll back / undelete
+```
+
+`restore` semantics:
+- If the item still exists, its content rolls back to the revision's state through the normal update path — the pre-restore state is captured as a new revision first, so **a restore can itself be undone**.
+- If the item was deleted, it is recreated with its original id and `created_at`. When another item has since taken the same namespace + title/subject, the restore refuses (naming the occupant) instead of overwriting it.
+- Restored content is re-embedded immediately, so search reflects it right away.
+
+Revisions store content and metadata, not embeddings — like the export archive, they stay independent of the embedding model. Note that deleting an item does **not** purge its revisions: recovering exactly that data is what they are for. Set `MNEMOMATIC_REVISIONS_KEEP=0` if items must be gone the moment they are deleted.
+
+## Temporal Facts
+
+Knowledge entries answer questions like "what is our auth method?" — and the answer changes over time. So knowledge is **temporal**: when a fact changes, the old entry is *superseded* rather than overwritten. It stays in the store with `valid_until` (when it stopped being the current answer) and `superseded_by` (the id of its replacement), answering "what did we believe before, and until when?"
+
+How a fact changes:
+- `store_knowledge` with an existing subject and a **different** fact → the current entry is closed, the new fact becomes a new entry, and the response carries `"superseded": "<old-id>"`. Re-storing the **same** fact just refreshes the entry in place (no history spam from agents re-storing what they know).
+- `update_knowledge` changing `fact` → same supersession; changing only `confidence`/`source`/`tags`/`metadata` edits the current entry in place (captured as a revision, like documents and notes).
+
+Superseded entries are **excluded from search, listings, counts, and exports** — only the current answer surfaces. They remain readable by id and through the dedicated tool:
+
+```
+fact_history(namespace="webapp", subject="auth method")
+→ {"count": 3, "history": [ current entry, then superseded versions newest first ]}
+```
+
+History is immutable: updating a superseded entry returns an error (correct the current fact instead). Deleting one is allowed (pruning history). Deleting the *current* entry ends the chain — the next `store_knowledge` for that subject starts a fresh one, and `fact_history` still shows everything ever held for the subject.
+
+The division of labor with [revisions](#usage-tracking--revisions): fact changes are *history* (first-class, queryable, permanent); everything else — in-place edits, deletes, document/note changes — is *undo* (revisions, capped per item).
+
+## Memory Hygiene: Duplicates, Consolidation, Prompts
+
+Mnem-O-matic never needs its own LLM for memory upkeep — every MCP client already is one. The server does the mechanical part (vector math, usage statistics) and hands the judgment to the connected agent:
+
+**`similar` on store responses** — when newly stored content is nearly identical (cosine ≥ `MNEMOMATIC_SIMILAR_THRESHOLD`, default 0.8) to items already in the namespace, the store response includes a `similar` list (id, title, score). The agent that is mid-write is the best judge: merge, supersede, or ignore. Requires an embedder; chunked documents (no whole-document vector) are skipped; `0` disables the check.
+
+**`consolidation_report` tool** — mechanical consolidation candidates for a namespace: same-type near-duplicate clusters computed from the stored vectors, plus stale items (never retrieved since usage tracking began and not updated in `stale_days` days, default 90). Pure vector math and SQL — the report only *flags*.
+
+**Prompts** — two MCP prompts turn the report into workflows (in Claude Code they appear as slash commands):
+
+- `consolidate(namespace)` — walks the agent through the report: read every cluster member, merge duplicates (fold unique details in, delete the copy — recoverable via revisions), let conflicting facts supersede through `update_knowledge`, review stale items (keep / tag `deprecated` / delete), and report actions taken. Conservative by instruction: nothing is deleted unread.
+- `briefing(task, [namespace])` — memory that shows up prepared: the agent derives several search queries from a task description, reads what's relevant, checks `fact_history` where an answer may have changed, and answers with a briefing (constraints, references, gaps) instead of a search log.
+
+For scheduled upkeep, run the consolidation from cron via a headless agent — it uses your existing subscription, no API keys:
+
+```
+claude -p "Use the mnemomatic consolidate prompt on namespace 'myproject' and apply its workflow."
+```
+
+A note on early reports: usage counters only accumulate from the moment this feature is deployed, so "never retrieved" on a fresh upgrade means "not retrieved *yet*" — give the data a few weeks before trusting the stale list.
 
 ## CLI Interface
 
@@ -320,6 +380,10 @@ Once connected, your LLM has access to these tools:
 | `list_items`         | List item summaries in a namespace, newest first, paginated with `limit`/`offset` (response includes `total`) |
 | `rename_namespace`   | Rename a namespace atomically across all item types. Merges into an existing target: on title/subject collisions the moved item replaces the target's (upsert semantics); the response reports `replaced` counts. |
 | `delete_namespace`   | Permanently delete all items in a namespace          |
+| `list_revisions`     | List saved prior versions of items (captured on every update and delete), newest first — filter by type, item, or namespace |
+| `restore`            | Restore an item to a revision: roll back an update or recreate a deleted item |
+| `fact_history`       | The timeline of a knowledge fact: the current entry, then every superseded version (see Temporal Facts) |
+| `consolidation_report` | Consolidation candidates for a namespace: near-duplicate clusters and stale never-retrieved items (see Memory Hygiene) |
 
 ### Input Validation & Limits
 
@@ -343,18 +407,22 @@ If validation fails, tools return an error with details — fix the input and re
 
 ### Deduplication
 
-Store tools use upsert semantics — if an entry with the same namespace and title (for documents) or namespace and subject (for knowledge) already exists, it is updated in place rather than creating a duplicate.
+Store tools use upsert semantics — if an entry with the same namespace and title (for documents) or namespace and subject (for knowledge) already exists, it is updated rather than creating a duplicate.
 
-This matters because LLMs don't track what's already stored. Without deduplication, restarting a session and re-storing the same facts would create duplicate rows. With upsert, the second call updates the existing entry and the response includes `"created": false` so the caller knows it was an update. Notes deduplicate on namespace + title.
+This matters because LLMs don't track what's already stored. Without deduplication, restarting a session and re-storing the same facts would create duplicate rows. Documents and notes update in place (`"created": false`). Knowledge is temporal (see [Temporal Facts](#temporal-facts)): re-storing the *same* fact refreshes the entry in place, while storing a *different* fact for an existing subject supersedes it — the old entry is kept as queryable history:
 
 ```
 # First call — creates a new entry
 store_knowledge(namespace="webapp", subject="auth method", fact="Uses JWT with RS256")
 → {"id": "abc-123", "created": true}
 
-# Second call — same namespace + subject, updates in place
-store_knowledge(namespace="webapp", subject="auth method", fact="Migrated to session cookies")
+# Same fact again — refreshes in place, no history entry
+store_knowledge(namespace="webapp", subject="auth method", fact="Uses JWT with RS256")
 → {"id": "abc-123", "created": false}
+
+# The fact changed — the old entry is closed and kept as history
+store_knowledge(namespace="webapp", subject="auth method", fact="Migrated to session cookies")
+→ {"id": "def-456", "created": true, "superseded": "abc-123"}
 ```
 
 ### Chunked Retrieval for Large Documents

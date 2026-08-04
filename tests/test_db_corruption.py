@@ -39,7 +39,7 @@ class TestJSONCorruption(unittest.TestCase):
 
         # Store test knowledge
         self.k = Knowledge(namespace="ns", subject="TestSubject", fact="TestFact", tags=["x"])
-        self.k_stored, _ = self.db.store_knowledge(self.k, _fake_embedding("TestSubject: TestFact"))
+        self.k_stored, _, _ = self.db.store_knowledge(self.k, _fake_embedding("TestSubject: TestFact"))
 
         # Store test note
         self.note = Note(namespace="ns", title="TestNote", content="NoteContent", tags=["note"])
