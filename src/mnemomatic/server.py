@@ -670,11 +670,13 @@ def update_knowledge(
 
 @mcp.tool(annotations=_ANN_DELETE)
 def delete_document(id: str) -> dict:
-    """Permanently delete a document from Mnem-O-matic.
+    """Delete a document from Mnem-O-matic.
 
-    Use when a document is no longer relevant or was stored by mistake. This action
-    is irreversible. If the document might still be useful later, consider updating
-    it or adding a "deprecated" tag instead.
+    Use when a document is no longer relevant or was stored by mistake. The prior
+    state is kept as a revision, so a mistaken delete can be undone via
+    list_revisions + restore (until the item's revisions are pruned). If the
+    document might still be useful later, consider updating it or adding a
+    "deprecated" tag instead.
 
     Args:
         id: The document ID to delete.
@@ -684,11 +686,12 @@ def delete_document(id: str) -> dict:
 
 @mcp.tool(annotations=_ANN_DELETE)
 def delete_knowledge(id: str) -> dict:
-    """Permanently delete a knowledge entry from Mnem-O-matic.
+    """Delete a knowledge entry from Mnem-O-matic.
 
-    Use when a fact is no longer true or was stored incorrectly. This action is
-    irreversible. If the fact is still true but outdated, prefer using update_knowledge
-    to correct it rather than deleting and re-creating it.
+    Use when a fact was stored by mistake or should never have existed. If the
+    fact simply changed, do NOT delete — store or update the corrected fact and
+    the old one is kept as queryable history (see fact_history). A mistaken
+    delete can be undone via list_revisions + restore.
 
     Args:
         id: The knowledge entry ID to delete.
@@ -782,11 +785,13 @@ def update_note(
 
 @mcp.tool(annotations=_ANN_DELETE)
 def delete_note(id: str) -> dict:
-    """Permanently delete a note from Mnem-O-matic.
+    """Delete a note from Mnem-O-matic.
 
-    Use when a note is no longer relevant or was stored by mistake. This action is
-    irreversible. If the content might still be useful, consider updating it or
-    adding a "archived" tag instead of deleting.
+    Use when a note is no longer relevant or was stored by mistake. The prior
+    state is kept as a revision, so a mistaken delete can be undone via
+    list_revisions + restore (until the item's revisions are pruned). If the
+    content might still be useful, consider updating it or adding an
+    "archived" tag instead.
 
     Args:
         id: The note ID to delete.
@@ -1361,11 +1366,13 @@ def _settings_info() -> dict:
 
 @mcp.tool(annotations=_ANN_DELETE)
 def delete_namespace(namespace: str) -> dict:
-    """Permanently delete all items in a namespace.
+    """Delete all items in a namespace.
 
     Removes every document, knowledge entry, and note in the given namespace in
-    a single atomic operation. This is irreversible — deleted items cannot be
-    recovered. If you only want to reorganize content, use rename_namespace instead.
+    a single atomic operation. Each item's final state is kept as a revision, so
+    individual items can be recovered via list_revisions + restore — but there
+    is no one-call undo for the whole namespace, so treat this as destructive.
+    If you only want to reorganize content, use rename_namespace instead.
 
     Args:
         namespace: The namespace to delete.

@@ -55,8 +55,56 @@ context elsewhere in the file.
 | `store_knowledge` | Single atomic facts: decisions, technology choices, conventions, constraints | namespace + subject |
 | `store_note` | Informal content: rough thoughts, meeting notes, observations, transcripts, temporary items | namespace + title |
 
-All three use **upsert semantics** — storing with the same key updates in place. Check `created`
-in the response: `true` = new entry, `false` = updated existing.
+All three deduplicate on their key. Documents and notes **upsert** — storing with the same
+key updates in place (`created: false`). Knowledge is **temporal** — see the next section.
+
+**Respond to `similar`:** when a store response includes a `similar` list, the server found
+near-identical existing items. Don't ignore it — read them and either merge your content into
+the existing item, let the existing fact be superseded, or delete your redundant addition.
+
+## Temporal Knowledge
+
+Facts change, and Mnem-O-matic keeps the timeline. `store_knowledge` on an existing subject:
+
+- **Same fact again** → refreshes the entry in place (`created: false`). Safe to re-store
+  what you already know.
+- **Different fact** → the old entry is closed as history and your fact becomes its
+  successor: `created: true` plus `"superseded": "<old-id>"`.
+
+So to correct or update a fact, just store it — never delete-and-recreate. Search and
+listings only surface the current answer. To see what was believed before (and until when):
+
+```
+fact_history(namespace="myproject", subject="auth mechanism")
+→ current entry first, then superseded versions with valid_until / superseded_by
+```
+
+History entries are immutable — update the current fact, not a superseded one. Changing
+only `confidence`, `source`, `tags`, or `metadata` via `update_knowledge` edits in place
+without creating history.
+
+## Undo & Recovery
+
+Every update and delete first saves the item's prior state as a **revision** (a limited
+number are kept per item). Mistakes are recoverable:
+
+```
+list_revisions(item_id="abc-123")            # one item's history
+list_revisions(namespace="myproject")        # what changed recently, incl. deletes
+restore(revision_id=42)                      # roll back an update, or undelete
+```
+
+`restore` on a live item rolls its content back (and is itself undoable); on a deleted item
+it recreates it with the original id. Prefer fixing a bad edit with `restore` over
+re-typing content from memory.
+
+## Memory Hygiene
+
+`consolidation_report(namespace)` returns near-duplicate clusters (from embeddings) and
+stale items (never retrieved, not recently updated) — candidates only; reviewing and acting
+is your job. Two server prompts package the workflows (as slash commands in Claude Code):
+`consolidate` (walk the report; read everything before merging or deleting) and `briefing`
+(assemble memory context for a task before starting work).
 
 **Rule of thumb:**
 - More than two sentences? → document or note
@@ -96,13 +144,15 @@ are moved into it. On a title/subject conflict the moved item replaces the targe
 how many target items were overwritten. If both versions matter, rename the colliding
 items first.
 
-Use `delete_namespace` to permanently remove all items in a namespace at once:
+Use `delete_namespace` to remove all items in a namespace at once:
 
 ```
 delete_namespace(namespace="old-project")
 ```
 
-This is irreversible. Prefer `rename_namespace` if you only want to reorganize content.
+Prefer `rename_namespace` if you only want to reorganize content. Deleted items can be
+recovered individually via `list_revisions`/`restore` while their revisions last, but
+there is no one-call undo for a whole namespace.
 
 ## Storing Good Knowledge Entries
 
@@ -127,4 +177,5 @@ when only tags need to change.
 ## What NOT to Store
 
 - Information already in the codebase, git history, or documentation
-- Duplicates — always search first to avoid creating redundant entries
+- Duplicates — always search first to avoid creating redundant entries (and act on the
+  `similar` field when a store response includes it)
