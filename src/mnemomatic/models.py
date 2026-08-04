@@ -71,20 +71,27 @@ def _validate_metadata(v):
     return v
 
 
-class Document(BaseModel):
+class _MemoryItem(BaseModel):
+    """Fields and validation shared by the three content types.
+
+    Subclasses add their content fields and validate those for whitespace
+    themselves — the base can only vouch for the fields it declares.
+    """
+
     id: str = Field(default_factory=_new_id)
     namespace: str = Field(min_length=1, max_length=MAX_NAMESPACE_LENGTH)
-    title: str = Field(min_length=1, max_length=MAX_TITLE_LENGTH)
-    content: str = Field(min_length=1, max_length=MAX_CONTENT_LENGTH)
-    mime_type: str = "text/markdown"
     tags: list[str] = Field(default_factory=list, max_length=MAX_TAGS)
     metadata: dict = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
+    # Usage tracking, maintained by Database.record_access — read-only from
+    # the API's perspective; never written through the store/update paths.
+    retrieval_count: int = 0
+    last_accessed: datetime | None = None
 
-    @field_validator("namespace", "title", "content", mode="before")
+    @field_validator("namespace", mode="before")
     @classmethod
-    def validate_no_only_whitespace(cls, v):
+    def validate_namespace_not_blank(cls, v):
         return _validate_whitespace(v)
 
     @field_validator("tags")
@@ -97,6 +104,17 @@ class Document(BaseModel):
     def validate_metadata(cls, v):
         return _validate_metadata(v)
 
+
+class Document(_MemoryItem):
+    title: str = Field(min_length=1, max_length=MAX_TITLE_LENGTH)
+    content: str = Field(min_length=1, max_length=MAX_CONTENT_LENGTH)
+    mime_type: str = "text/markdown"
+
+    @field_validator("title", "content", mode="before")
+    @classmethod
+    def validate_no_only_whitespace(cls, v):
+        return _validate_whitespace(v)
+
     @field_validator("mime_type")
     @classmethod
     def validate_mime_type(cls, v):
@@ -108,19 +126,13 @@ class Document(BaseModel):
         return v
 
 
-class Knowledge(BaseModel):
-    id: str = Field(default_factory=_new_id)
-    namespace: str = Field(min_length=1, max_length=MAX_NAMESPACE_LENGTH)
+class Knowledge(_MemoryItem):
     subject: str = Field(min_length=1, max_length=MAX_SUBJECT_LENGTH)
     fact: str = Field(min_length=1, max_length=MAX_FACT_LENGTH)
     confidence: float = 1.0
     source: str = Field(default="unknown", max_length=MAX_SOURCE_LENGTH)
-    tags: list[str] = Field(default_factory=list, max_length=MAX_TAGS)
-    metadata: dict = Field(default_factory=dict)
-    created_at: datetime = Field(default_factory=_utcnow)
-    updated_at: datetime = Field(default_factory=_utcnow)
 
-    @field_validator("namespace", "subject", "fact", "source", mode="before")
+    @field_validator("subject", "fact", "source", mode="before")
     @classmethod
     def validate_no_only_whitespace(cls, v):
         return _validate_whitespace(v)
@@ -135,42 +147,16 @@ class Knowledge(BaseModel):
             raise ValueError(f"confidence must be between 0.0 and 1.0, got {v}")
         return float(v)
 
-    @field_validator("tags")
-    @classmethod
-    def validate_tags(cls, v):
-        return _validate_tags(v)
 
-    @field_validator("metadata")
-    @classmethod
-    def validate_metadata(cls, v):
-        return _validate_metadata(v)
-
-
-class Note(BaseModel):
-    id: str = Field(default_factory=_new_id)
-    namespace: str = Field(min_length=1, max_length=MAX_NAMESPACE_LENGTH)
+class Note(_MemoryItem):
     title: str = Field(min_length=1, max_length=MAX_TITLE_LENGTH)
     content: str = Field(min_length=1, max_length=MAX_CONTENT_LENGTH)
     source: str = Field(default="text", max_length=MAX_SOURCE_LENGTH)
-    tags: list[str] = Field(default_factory=list, max_length=MAX_TAGS)
-    metadata: dict = Field(default_factory=dict)
-    created_at: datetime = Field(default_factory=_utcnow)
-    updated_at: datetime = Field(default_factory=_utcnow)
 
-    @field_validator("namespace", "title", "content", "source", mode="before")
+    @field_validator("title", "content", "source", mode="before")
     @classmethod
     def validate_no_only_whitespace(cls, v):
         return _validate_whitespace(v)
-
-    @field_validator("tags")
-    @classmethod
-    def validate_tags(cls, v):
-        return _validate_tags(v)
-
-    @field_validator("metadata")
-    @classmethod
-    def validate_metadata(cls, v):
-        return _validate_metadata(v)
 
 
 class SearchResult(BaseModel):
