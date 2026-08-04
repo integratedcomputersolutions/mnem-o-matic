@@ -4,6 +4,7 @@ import os
 import re
 import sqlite3
 import threading
+from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, version
 
 import uvicorn
@@ -14,7 +15,16 @@ from pydantic import ValidationError
 from mnemomatic import model_config
 from mnemomatic.auth import BearerAuthMiddleware
 from mnemomatic.compact import CompactToolsMiddleware
-from mnemomatic.db import CHUNK_OVERLAP, CHUNK_SIZE, CHUNK_THRESHOLD, EMBEDDING_DIM, Database, _chunk_text
+from mnemomatic.db import (
+    CHUNK_OVERLAP,
+    CHUNK_SIZE,
+    CHUNK_THRESHOLD,
+    EMBEDDING_DIM,
+    Database,
+    _chunk_text,
+    _ITEM_TYPE_TO_TABLE,
+    _TABLE_UPDATE_FIELDS,
+)
 from mnemomatic.models import Document, Knowledge, Note
 
 logger = logging.getLogger("mnemomatic")
@@ -801,6 +811,8 @@ def search(
         logger.warning("Search failed for query %r: %s", query, e)
         return [{"error": "Search failed", "details": str(e)}]
 
+    _record_access([(r.type, r.id) for r in results])
+
     # Convert results to dicts and add degradation metadata if applicable
     response = [r.model_dump() for r in results]
     if degraded:
@@ -822,11 +834,20 @@ _READ_GETTERS = {
 }
 
 
+def _record_access(refs: list[tuple[str, str]]) -> None:
+    """Usage bookkeeping for items surfaced to a client — never breaks the request."""
+    try:
+        _db().record_access(refs)
+    except Exception as e:
+        logger.warning("Recording item access failed: %s: %s", type(e).__name__, e)
+
+
 def _get_resource(item_type: str, id: str) -> str:
     """Shared body for the get_* MCP resources: fetch by id, return JSON or a not-found error."""
     obj = _READ_GETTERS[item_type](_db(), id)
     if obj is None:
         return json.dumps({"error": f"{item_type.capitalize()} {id} not found"})
+    _record_access([(item_type, id)])
     return obj.model_dump_json()
 
 
@@ -883,7 +904,94 @@ def read(item_type: str, id: str) -> dict:
     item = getter(_db(), id)
     if item is None:
         return {"error": f"{item_type} not found", "id": id}
+    _record_access([(item_type, id)])
     return json.loads(item.model_dump_json())
+
+
+@mcp.tool(annotations=_ANN_READ_ONLY)
+def list_revisions(
+    item_type: str | None = None,
+    item_id: str | None = None,
+    namespace: str | None = None,
+    limit: int = 20,
+) -> dict:
+    """List saved revisions — prior versions of items captured on every update and delete.
+
+    Use this to find a version to roll back to (then call the restore tool with
+    the revision's id), to recover something deleted by mistake, or to review
+    what recently changed in a namespace. Filters combine; with no filters the
+    newest revisions across the whole store are returned.
+
+    Each revision is a summary (revision id, item_type, item_id, namespace,
+    title/subject, op, revised_at) — op is "update" (the item changed after
+    this state was saved) or "delete" (the item was deleted). The server keeps
+    a limited number of revisions per item; older ones are pruned.
+
+    Args:
+        item_type: Filter by type — "document", "knowledge", or "note" (optional).
+        item_id: Filter to one item's history (optional).
+        namespace: Filter by namespace (optional).
+        limit: Maximum revisions to return, newest first (default 20, max 200).
+    """
+    if item_type is not None and item_type not in _READ_GETTERS:
+        return {"error": "Invalid item_type", "details": f"Must be one of: {', '.join(sorted(_READ_GETTERS))}"}
+    limit = max(1, min(int(limit), MAX_LIST_LIMIT))
+    revisions = _db().list_revisions(item_type=item_type, item_id=item_id,
+                                     namespace=namespace, limit=limit)
+    return {"revisions": revisions, "limit": limit}
+
+
+@mcp.tool(annotations=_ANN_UPDATE)
+def restore(revision_id: int) -> dict:
+    """Restore an item to a saved revision — undo an update or recover a deleted item.
+
+    Find the revision id with the list_revisions tool first. If the item still
+    exists, its content is rolled back to the revision's state (the current
+    state is saved as a new revision first, so a restore can itself be undone).
+    If the item was deleted, it is recreated with its original id.
+
+    Restoring re-embeds the content, so search reflects the restored state
+    immediately.
+
+    Args:
+        revision_id: The revision to restore, from list_revisions.
+    """
+    try:
+        rev = _db().get_revision(revision_id)
+    except ValidationError as e:
+        return {"error": "Revision payload no longer validates", "details": _format_validation_error(e)}
+    if rev is None:
+        return {"error": f"Revision {revision_id} not found"}
+
+    item_type, item = rev["item_type"], rev["item"]
+    key = _UPDATE_CONFIG[item_type]["key"]
+
+    if _READ_GETTERS[item_type](_db(), rev["item_id"]) is not None:
+        # Roll the live item back through the normal update path — it captures
+        # the current state as a revision and re-embeds what changed.
+        fields = {f: getattr(item, f) for f in _TABLE_UPDATE_FIELDS[_ITEM_TYPE_TO_TABLE[item_type]]}
+        result = _handle_update(item_type, rev["item_id"], fields)
+        if "error" in result:
+            return result
+        return {**result, "restored_revision": revision_id, "recreated": False}
+
+    # The item is gone — recreate it, unless its key now belongs to another item.
+    occupant = _db().find_by_key(item_type, item.namespace, getattr(item, key))
+    if occupant is not None:
+        return {"error": "Cannot restore: key is taken",
+                "details": f"{item_type} {occupant} now occupies "
+                           f"{item.namespace!r}/{getattr(item, key)!r} — delete or rename it first"}
+
+    item = item.model_copy(update={"updated_at": datetime.now(timezone.utc)})
+    if item_type == "document":
+        embedding, chunks = _embed_document_body(item.title, item.content)
+        stored, _ = _db().store_document(item, embedding, chunks)
+    elif item_type == "knowledge":
+        stored, _ = _db().store_knowledge(item, _embed_content(_knowledge_embed_text(item.subject, item.fact)))
+    else:
+        stored, _ = _db().store_note(item, _embed_content(_note_embed_text(item.title, item.content)))
+    return {"id": stored.id, key: getattr(stored, key), "namespace": stored.namespace,
+            "restored_revision": revision_id, "recreated": True}
 
 
 # ── Resources ──

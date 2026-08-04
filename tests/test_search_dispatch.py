@@ -43,6 +43,10 @@ class FakeResult:
 
     def __init__(self, tag):
         self.tag = tag
+        # search() records usage for surfaced items via (result.type, result.id),
+        # so the stand-in carries them like a real SearchResult.
+        self.type = "note"
+        self.id = f"fake-{tag}"
 
     def model_dump(self):
         return {"source": self.tag}
@@ -53,6 +57,9 @@ class FakeDB:
 
     def __init__(self):
         self.calls = []
+
+    def record_access(self, refs):
+        pass  # usage bookkeeping isn't part of the dispatch matrix
 
     def search_fts(self, query, table, namespace, limit):
         self.calls.append(("fts", query, table, namespace, limit))

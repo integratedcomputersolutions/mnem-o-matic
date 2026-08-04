@@ -188,6 +188,26 @@ Backups are full exports (all namespaces) named `mnemomatic-backup-YYYYMMDD-HHMM
 
 The CLI + cron path above remains the right choice when the backup needs to leave the machine or be encrypted (e.g. piping `export -o -` through `gpg`).
 
+## Usage Tracking & Revisions
+
+Two always-on recording mechanisms make the store safer to mutate and lay the groundwork for memory-review workflows:
+
+**Usage tracking** — every item carries a `retrieval_count` and `last_accessed`, bumped when the item is fetched with the `read` tool (or an MCP resource) and when a search surfaces it in results. Browsing does **not** count: `list_items`, the web viewer, exports, and backups never touch the counters, so they measure genuine retrieval, not housekeeping. The counters appear in `read` output and `list_items` summaries; `updated_at` is never affected. There is no ranking impact yet — the data accumulates first, so any future ranking blend can be tuned against real numbers.
+
+**Revisions** — every update and delete first saves the item's prior state, including upsert overwrites (`store_*` on an existing title/subject), tag edits, `delete_namespace`, and items replaced by a `rename_namespace` merge. The server keeps the newest `MNEMOMATIC_REVISIONS_KEEP` revisions per item (default 10; `0` disables capture). Two tools work with them:
+
+```
+list_revisions [item_type] [item_id] [namespace] [limit]   # newest first; op is "update" or "delete"
+restore <revision_id>                                       # roll back / undelete
+```
+
+`restore` semantics:
+- If the item still exists, its content rolls back to the revision's state through the normal update path — the pre-restore state is captured as a new revision first, so **a restore can itself be undone**.
+- If the item was deleted, it is recreated with its original id and `created_at`. When another item has since taken the same namespace + title/subject, the restore refuses (naming the occupant) instead of overwriting it.
+- Restored content is re-embedded immediately, so search reflects it right away.
+
+Revisions store content and metadata, not embeddings — like the export archive, they stay independent of the embedding model. Note that deleting an item does **not** purge its revisions: recovering exactly that data is what they are for. Set `MNEMOMATIC_REVISIONS_KEEP=0` if items must be gone the moment they are deleted.
+
 ## CLI Interface
 
 `mnemomatic-cli` provides shell access to a running Mnem-O-matic server for agents and users without MCP support.
@@ -320,6 +340,8 @@ Once connected, your LLM has access to these tools:
 | `list_items`         | List item summaries in a namespace, newest first, paginated with `limit`/`offset` (response includes `total`) |
 | `rename_namespace`   | Rename a namespace atomically across all item types. Merges into an existing target: on title/subject collisions the moved item replaces the target's (upsert semantics); the response reports `replaced` counts. |
 | `delete_namespace`   | Permanently delete all items in a namespace          |
+| `list_revisions`     | List saved prior versions of items (captured on every update and delete), newest first — filter by type, item, or namespace |
+| `restore`            | Restore an item to a revision: roll back an update or recreate a deleted item |
 
 ### Input Validation & Limits
 

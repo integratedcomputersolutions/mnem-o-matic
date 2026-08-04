@@ -25,10 +25,17 @@ BUSY_TIMEOUT_MS = 5000
 # user_version; Database._init_schema migrates older databases forward.
 # Version 1: vec0 tables gained a `namespace` partition key so namespace-
 # filtered KNN happens inside the index instead of post-filtering in Python.
-SCHEMA_VERSION = 1
+# Version 2: usage-tracking columns (retrieval_count, last_accessed) on the
+# content tables, plus the `revisions` table capturing prior state on
+# update/delete so content can be inspected and restored.
+SCHEMA_VERSION = 2
 CHUNK_THRESHOLD = int(os.environ.get("MNEMOMATIC_CHUNK_THRESHOLD", "2000"))
 CHUNK_SIZE = int(os.environ.get("MNEMOMATIC_CHUNK_SIZE", "1000"))
 CHUNK_OVERLAP = int(os.environ.get("MNEMOMATIC_CHUNK_OVERLAP", "200"))
+
+# Revisions retained per item; the oldest beyond this are pruned as new ones
+# are captured. 0 disables revision capture entirely.
+REVISIONS_KEEP = int(os.environ.get("MNEMOMATIC_REVISIONS_KEEP", "10"))
 
 # The three content tables, in display order. Each has a parallel vec_<table>.
 _TABLES = ("documents", "knowledge", "notes")
@@ -67,9 +74,9 @@ _TABLE_RESOURCE_URI = {
 # Summary columns returned by list_page — mirrors the list resources; never
 # includes document/note content so pages stay small.
 _LIST_SUMMARY_COLUMNS = {
-    "documents": ("id", "title", "mime_type", "tags", "updated_at"),
-    "knowledge": ("id", "subject", "fact", "confidence", "tags", "updated_at"),
-    "notes": ("id", "title", "source", "tags", "updated_at"),
+    "documents": ("id", "title", "mime_type", "tags", "updated_at", "retrieval_count", "last_accessed"),
+    "knowledge": ("id", "subject", "fact", "confidence", "tags", "updated_at", "retrieval_count", "last_accessed"),
+    "notes": ("id", "title", "source", "tags", "updated_at", "retrieval_count", "last_accessed"),
 }
 
 
@@ -399,7 +406,7 @@ class Database:
         """
         version = conn.execute("PRAGMA user_version").fetchone()["user_version"]
 
-        if version >= SCHEMA_VERSION:
+        if version >= 1:
             stored = conn.execute("SELECT value FROM schema_meta WHERE key = 'embed_dim'").fetchone()
             if stored and int(stored["value"]) != EMBEDDING_DIM:
                 if self.allow_dim_change:
@@ -408,13 +415,20 @@ class Database:
                         "rebuilt and all content re-embedded", stored["value"], EMBEDDING_DIM,
                     )
                     self.dim_change_pending = True
-                    return
-                raise RuntimeError(
-                    f"Embedding dimension mismatch: database was created with dim {stored['value']} "
-                    f"but MNEMOMATIC_EMBED_DIM={EMBEDDING_DIM}. Set MNEMOMATIC_EMBED_DIM={stored['value']} "
-                    f"to keep the existing index, or set MNEMOMATIC_REINDEX=1 to rebuild the index and "
-                    f"re-embed all content at the new dimension on startup."
-                )
+                else:
+                    raise RuntimeError(
+                        f"Embedding dimension mismatch: database was created with dim {stored['value']} "
+                        f"but MNEMOMATIC_EMBED_DIM={EMBEDDING_DIM}. Set MNEMOMATIC_EMBED_DIM={stored['value']} "
+                        f"to keep the existing index, or set MNEMOMATIC_REINDEX=1 to rebuild the index and "
+                        f"re-embed all content at the new dimension on startup."
+                    )
+            if version < SCHEMA_VERSION:
+                self._migrate_to_v2(conn)
+                # A pending dim change leaves the version to rebuild_vec_tables,
+                # which stamps it once the vec tables actually match.
+                if not self.dim_change_pending:
+                    conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+                    conn.commit()
             return
 
         # Version 0: either a fresh database or one from before schema
@@ -444,6 +458,8 @@ class Database:
                                     "Legacy embeddings have dim %d, configured %d — deferring "
                                     "to reindex rebuild", found_dim, EMBEDDING_DIM,
                                 )
+                                self._migrate_to_v2(conn)
+                                conn.commit()
                                 return
                             raise RuntimeError(
                                 f"Cannot migrate {name}: stored embeddings have dim {found_dim} "
@@ -463,11 +479,40 @@ class Database:
                 "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('embed_dim', ?)",
                 (str(EMBEDDING_DIM),),
             )
+            self._migrate_to_v2(conn)
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             conn.commit()
         except Exception:
             conn.rollback()
             raise
+
+    @staticmethod
+    def _migrate_to_v2(conn: sqlite3.Connection) -> None:
+        """Version 2: usage-tracking columns and the revisions table.
+
+        Idempotent (column-existence checks, IF NOT EXISTS) so it is safe to
+        run on any database regardless of which path reached it.
+        """
+        for table in _TABLES:
+            cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+            if "retrieval_count" not in cols:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN retrieval_count INTEGER NOT NULL DEFAULT 0")
+            if "last_accessed" not in cols:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN last_accessed TEXT")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS revisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                item_type TEXT NOT NULL,
+                item_id TEXT NOT NULL,
+                namespace TEXT NOT NULL,
+                title TEXT NOT NULL,
+                op TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                revised_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_revisions_item ON revisions(item_type, item_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_revisions_ns ON revisions(namespace, revised_at)")
 
     def rebuild_vec_tables(self) -> None:
         """Drop and recreate all vec0 tables empty, at the configured dimension.
@@ -521,6 +566,99 @@ class Database:
         conn.commit()
         return True
 
+    # ── Usage tracking & revisions ──
+
+    def record_access(self, refs: list[tuple[str, str]]) -> None:
+        """Bump retrieval_count/last_accessed for the given (item_type, id) pairs.
+
+        Called explicitly by the read/search surfaces only — never from
+        internal reads — so exports, backups, list pages, and the web viewer
+        don't inflate the counters. updated_at is deliberately untouched.
+        """
+        if not refs:
+            return
+        conn = self._get_conn()
+        now = datetime.now(timezone.utc).isoformat()
+        by_table: dict[str, set[str]] = {}
+        for item_type, item_id in refs:
+            table = _ITEM_TYPE_TO_TABLE.get(item_type)
+            if table:
+                by_table.setdefault(table, set()).add(item_id)
+        for table, ids in by_table.items():
+            conn.execute(
+                f"UPDATE {table} SET retrieval_count = retrieval_count + 1, last_accessed = ? "
+                f"WHERE id IN ({','.join('?' * len(ids))})",
+                (now, *ids),
+            )
+        conn.commit()
+
+    def _capture_revision(self, conn: sqlite3.Connection, table: str, row: dict, op: str) -> None:
+        """Save a row's prior state into revisions and prune per-item history. Does not commit.
+
+        `row` is the full table row about to be overwritten or deleted; the
+        payload keeps only the model columns (tags/metadata stay in their
+        stored JSON-string form, hydrated again on restore). op is 'update'
+        or 'delete'.
+        """
+        if REVISIONS_KEEP <= 0:
+            return
+        payload = {col: row[col] for col in _TABLE_COLUMNS[table]}
+        conn.execute(
+            "INSERT INTO revisions (item_type, item_id, namespace, title, op, payload, revised_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (_TABLE_TO_TYPE[table], row["id"], row["namespace"],
+             row[_TABLE_TITLE_FIELD[table]], op, json.dumps(payload),
+             datetime.now(timezone.utc).isoformat()),
+        )
+        conn.execute(
+            "DELETE FROM revisions WHERE item_type = ? AND item_id = ? AND id NOT IN "
+            "(SELECT id FROM revisions WHERE item_type = ? AND item_id = ? ORDER BY id DESC LIMIT ?)",
+            (_TABLE_TO_TYPE[table], row["id"], _TABLE_TO_TYPE[table], row["id"], REVISIONS_KEEP),
+        )
+
+    def list_revisions(self, item_type: str | None = None, item_id: str | None = None,
+                       namespace: str | None = None, limit: int = 20) -> list[dict]:
+        """Revision summaries, newest first — no payloads, so listings stay small."""
+        if item_type is not None and item_type not in _ITEM_TYPE_TO_TABLE:
+            raise ValueError(f"Invalid type {item_type!r}: must be 'document', 'knowledge', or 'note'")
+        sql = "SELECT id, item_type, item_id, namespace, title, op, revised_at FROM revisions"
+        clauses, params = [], []
+        for column, value in (("item_type", item_type), ("item_id", item_id), ("namespace", namespace)):
+            if value is not None:
+                clauses.append(f"{column} = ?")
+                params.append(value)
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        return self._get_conn().execute(sql, params).fetchall()
+
+    def get_revision(self, revision_id: int) -> dict | None:
+        """One revision with its payload hydrated into the item's model (as 'item')."""
+        row = self._get_conn().execute(
+            "SELECT * FROM revisions WHERE id = ?", (revision_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        table = _ITEM_TYPE_TO_TABLE[row["item_type"]]
+        payload = _safe_json_loads(row["payload"], None, f"revision {revision_id}")
+        if payload is None:
+            return None
+        row["item"] = _row_to_model(_TABLE_MODEL[table], payload)
+        return row
+
+    def find_by_key(self, item_type: str, namespace: str, key_value: str) -> str | None:
+        """The id occupying (namespace, title/subject), or None. Used by restore
+        to refuse recreating an item under a key another item now owns."""
+        table = _ITEM_TYPE_TO_TABLE.get(item_type)
+        if table is None:
+            raise ValueError(f"Invalid type {item_type!r}: must be 'document', 'knowledge', or 'note'")
+        row = self._get_conn().execute(
+            f"SELECT id FROM {table} WHERE namespace = ? AND {_TABLE_TITLE_FIELD[table]} = ?",
+            (namespace, key_value),
+        ).fetchone()
+        return row["id"] if row else None
+
     # ── Generic CRUD helpers ──
 
     def _store_item(self, table: str, item, embedding: list[float] | None,
@@ -535,11 +673,12 @@ class Database:
         key = _TABLE_TITLE_FIELD[table]
         columns = _TABLE_COLUMNS[table]
         existing = conn.execute(
-            f"SELECT id, rowid, created_at FROM {table} WHERE namespace = ? AND {key} = ?",
+            f"SELECT rowid, * FROM {table} WHERE namespace = ? AND {key} = ?",
             (item.namespace, getattr(item, key)),
         ).fetchone()
 
         if existing:
+            self._capture_revision(conn, table, existing, "update")
             stored = item.model_copy(update={
                 "id": existing["id"],
                 "created_at": datetime.fromisoformat(existing["created_at"]),
@@ -581,10 +720,11 @@ class Database:
     def _delete_item(self, table: str, item_id: str) -> bool:
         conn = self._get_conn()
         row = conn.execute(
-            f"DELETE FROM {table} WHERE id = ? RETURNING rowid", (item_id,)
+            f"DELETE FROM {table} WHERE id = ? RETURNING rowid, *", (item_id,)
         ).fetchone()
         if not row:
             return False
+        self._capture_revision(conn, table, row, "delete")
         conn.execute(f"DELETE FROM vec_{table} WHERE rowid = ?", (row["rowid"],))
         conn.commit()
         return True
@@ -618,6 +758,10 @@ class Database:
         if invalid:
             raise ValueError(f"Invalid {table} fields: {invalid}")
         conn = self._get_conn()
+        prior = conn.execute(f"SELECT * FROM {table} WHERE id = ?", (item_id,)).fetchone()
+        if prior is None:
+            return None
+        self._capture_revision(conn, table, prior, "update")
         fields["updated_at"] = datetime.now(timezone.utc).isoformat()
         set_clauses = []
         values = []
@@ -701,9 +845,10 @@ class Database:
         table = _ITEM_TYPE_TO_TABLE.get(item_type)
         if table is None:
             raise ValueError(f"Invalid type {item_type!r}: must be 'document', 'knowledge', or 'note'")
-        row = conn.execute(f"SELECT tags FROM {table} WHERE id = ?", (item_id,)).fetchone()
+        row = conn.execute(f"SELECT * FROM {table} WHERE id = ?", (item_id,)).fetchone()
         if not row:
             raise ValueError(f"{item_type} {item_id} not found")
+        self._capture_revision(conn, table, row, "update")
         tags = set(_safe_json_loads(row["tags"], [], f"tags row {row.get('id','?')}"))
         if add_tags:
             tags.update(add_tags)
@@ -797,11 +942,12 @@ class Database:
                 losers = conn.execute(
                     f"""DELETE FROM {table} WHERE namespace = ? AND {key} IN
                         (SELECT {key} FROM {table} WHERE namespace = ?)
-                        RETURNING rowid""",
+                        RETURNING rowid, *""",
                     (new, old),
                 ).fetchall()
                 replaced[table] = len(losers)
                 for loser in losers:
+                    self._capture_revision(conn, table, loser, "delete")
                     conn.execute(f"DELETE FROM vec_{table} WHERE rowid = ?", (loser["rowid"],))
                 cur = conn.execute(
                     f"UPDATE {table} SET namespace = ? WHERE namespace = ?", (new, old)
@@ -825,8 +971,10 @@ class Database:
         counts = {}
         for table in _TABLES:
             rows = conn.execute(
-                f"DELETE FROM {table} WHERE namespace = ? RETURNING rowid", (namespace,)
+                f"DELETE FROM {table} WHERE namespace = ? RETURNING rowid, *", (namespace,)
             ).fetchall()
+            for row in rows:
+                self._capture_revision(conn, table, row, "delete")
             counts[table] = len(rows)
             if rows:
                 rowids = [r["rowid"] for r in rows]
