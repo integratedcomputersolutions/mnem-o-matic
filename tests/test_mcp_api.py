@@ -114,7 +114,8 @@ class TestKnowledge(unittest.TestCase):
         self.assertIn(result["id"], _search_ids(self.client, "Store Read Test Fact"))
 
     def test_duplicate_upserts(self):
-        """Same namespace+subject should update in place, not create a duplicate."""
+        """Knowledge is temporal: same fact refreshes in place, a different
+        fact supersedes — old entry kept as history, only the current one in search."""
         r1 = self.client.call_tool("store_knowledge", {
             "namespace": NS,
             "subject": "Upsert Knowledge Target",
@@ -123,16 +124,35 @@ class TestKnowledge(unittest.TestCase):
         self._cleanup_ids.append(r1["id"])
         self.assertTrue(r1["created"])
 
+        # Same fact again: in-place refresh, no history entry.
         r2 = self.client.call_tool("store_knowledge", {
+            "namespace": NS,
+            "subject": "Upsert Knowledge Target",
+            "fact": "Original fact",
+        })
+        self.assertFalse(r2["created"])
+        self.assertEqual(r2["id"], r1["id"])
+        self.assertNotIn("superseded", r2)
+
+        # Different fact: the old entry is closed and a successor created.
+        r3 = self.client.call_tool("store_knowledge", {
             "namespace": NS,
             "subject": "Upsert Knowledge Target",
             "fact": "Updated fact",
         })
-        self.assertFalse(r2["created"])
-        self.assertEqual(r2["id"], r1["id"])
+        self._cleanup_ids.append(r3["id"])
+        self.assertTrue(r3["created"])
+        self.assertNotEqual(r3["id"], r1["id"])
+        self.assertEqual(r3["superseded"], r1["id"])
 
+        # Search sees only the current entry; history is in fact_history.
         ids = _search_ids(self.client, "Upsert Knowledge Target")
-        self.assertEqual(ids.count(r1["id"]), 1)
+        self.assertEqual(ids.count(r3["id"]), 1)
+        self.assertNotIn(r1["id"], ids)
+        history = self.client.call_tool("fact_history", {
+            "namespace": NS, "subject": "Upsert Knowledge Target",
+        })
+        self.assertEqual([e["id"] for e in history["history"]], [r3["id"], r1["id"]])
 
     def test_delete(self):
         """Deleting a knowledge entry removes it from search; deleting again returns false."""
