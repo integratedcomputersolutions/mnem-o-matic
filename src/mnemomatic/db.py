@@ -689,6 +689,47 @@ class Database:
         row["item"] = _row_to_model(_TABLE_MODEL[table], payload)
         return row
 
+    def item_vectors(self, table: str, namespace: str) -> list[tuple[str, str, list[float]]]:
+        """(id, title/subject, embedding) for every current item in the namespace
+        that has a whole-item vector.
+
+        Feeds the consolidation report's duplicate clustering. Chunked
+        documents (no whole-document vector) and superseded facts (vector
+        dropped at supersession) are naturally absent.
+        """
+        if table not in _TABLES:
+            raise ValueError(f"Invalid table {table!r}")
+        rows = self._get_conn().execute(
+            f"SELECT t.id AS id, t.{_TABLE_TITLE_FIELD[table]} AS title, v.embedding AS embedding "
+            f"FROM {table} t JOIN vec_{table} v ON v.rowid = t.rowid "
+            f"WHERE t.namespace = ?{_current_filter(table, 't')}",
+            (namespace,),
+        ).fetchall()
+        return [
+            (r["id"], r["title"],
+             list(struct.unpack(f"{len(r['embedding']) // 4}f", r["embedding"])))
+            for r in rows
+        ]
+
+    def stale_items(self, namespace: str, cutoff: str, limit: int = 50) -> list[dict]:
+        """Current items never retrieved since usage tracking began and not
+        updated since `cutoff` (ISO timestamp), oldest first."""
+        out: list[dict] = []
+        conn = self._get_conn()
+        for table in _TABLES:
+            rows = conn.execute(
+                f"SELECT id, {_TABLE_TITLE_FIELD[table]} AS title, updated_at, retrieval_count "
+                f"FROM {table} WHERE namespace = ? AND retrieval_count = 0 "
+                f"AND updated_at < ?{_current_filter(table)} "
+                f"ORDER BY updated_at LIMIT ?",
+                (namespace, cutoff, limit),
+            ).fetchall()
+            for row in rows:
+                row["type"] = _TABLE_TO_TYPE[table]
+            out.extend(rows)
+        out.sort(key=lambda r: r["updated_at"])
+        return out[:limit]
+
     def find_by_key(self, item_type: str, namespace: str, key_value: str) -> str | None:
         """The id currently occupying (namespace, title/subject), or None. Used by
         restore to refuse recreating an item under a key another item now owns."""

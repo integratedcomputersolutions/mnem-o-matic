@@ -227,6 +227,27 @@ History is immutable: updating a superseded entry returns an error (correct the 
 
 The division of labor with [revisions](#usage-tracking--revisions): fact changes are *history* (first-class, queryable, permanent); everything else — in-place edits, deletes, document/note changes — is *undo* (revisions, capped per item).
 
+## Memory Hygiene: Duplicates, Consolidation, Prompts
+
+Mnem-O-matic never needs its own LLM for memory upkeep — every MCP client already is one. The server does the mechanical part (vector math, usage statistics) and hands the judgment to the connected agent:
+
+**`similar` on store responses** — when newly stored content is nearly identical (cosine ≥ `MNEMOMATIC_SIMILAR_THRESHOLD`, default 0.8) to items already in the namespace, the store response includes a `similar` list (id, title, score). The agent that is mid-write is the best judge: merge, supersede, or ignore. Requires an embedder; chunked documents (no whole-document vector) are skipped; `0` disables the check.
+
+**`consolidation_report` tool** — mechanical consolidation candidates for a namespace: same-type near-duplicate clusters computed from the stored vectors, plus stale items (never retrieved since usage tracking began and not updated in `stale_days` days, default 90). Pure vector math and SQL — the report only *flags*.
+
+**Prompts** — two MCP prompts turn the report into workflows (in Claude Code they appear as slash commands):
+
+- `consolidate(namespace)` — walks the agent through the report: read every cluster member, merge duplicates (fold unique details in, delete the copy — recoverable via revisions), let conflicting facts supersede through `update_knowledge`, review stale items (keep / tag `deprecated` / delete), and report actions taken. Conservative by instruction: nothing is deleted unread.
+- `briefing(task, [namespace])` — memory that shows up prepared: the agent derives several search queries from a task description, reads what's relevant, checks `fact_history` where an answer may have changed, and answers with a briefing (constraints, references, gaps) instead of a search log.
+
+For scheduled upkeep, run the consolidation from cron via a headless agent — it uses your existing subscription, no API keys:
+
+```
+claude -p "Use the mnemomatic consolidate prompt on namespace 'myproject' and apply its workflow."
+```
+
+A note on early reports: usage counters only accumulate from the moment this feature is deployed, so "never retrieved" on a fresh upgrade means "not retrieved *yet*" — give the data a few weeks before trusting the stale list.
+
 ## CLI Interface
 
 `mnemomatic-cli` provides shell access to a running Mnem-O-matic server for agents and users without MCP support.
@@ -362,6 +383,7 @@ Once connected, your LLM has access to these tools:
 | `list_revisions`     | List saved prior versions of items (captured on every update and delete), newest first — filter by type, item, or namespace |
 | `restore`            | Restore an item to a revision: roll back an update or recreate a deleted item |
 | `fact_history`       | The timeline of a knowledge fact: the current entry, then every superseded version (see Temporal Facts) |
+| `consolidation_report` | Consolidation candidates for a namespace: near-duplicate clusters and stale never-retrieved items (see Memory Hygiene) |
 
 ### Input Validation & Limits
 

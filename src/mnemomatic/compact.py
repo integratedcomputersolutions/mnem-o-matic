@@ -32,6 +32,7 @@ _COMPACT_DESCRIPTIONS: dict[str, str] = {
     "list_revisions":   "List saved prior versions of items (captured on every update/delete), newest first. Filter by item_type/item_id/namespace.",
     "restore":          "Restore an item to a revision from list_revisions: rolls back an update or recreates a deleted item.",
     "fact_history":     "Timeline of a knowledge fact by namespace+subject: current entry first, then superseded versions newest first.",
+    "consolidation_report": "Consolidation candidates for a namespace: near-duplicate clusters (vector similarity) and stale never-retrieved items.",
 }
 
 # Param descriptions only for constrained/non-obvious values; all others are stripped.
