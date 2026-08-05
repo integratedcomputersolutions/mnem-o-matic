@@ -34,11 +34,13 @@ _COMPACT_DESCRIPTIONS: dict[str, str] = {
     "fact_history":     "Timeline of a knowledge fact by namespace+subject: current entry first, then superseded versions newest first.",
     "consolidation_report": "Consolidation candidates for a namespace: near-duplicate clusters (vector similarity) and stale never-retrieved items.",
     "list_audit":       "Audit trail of write operations, newest first. Filter by item_type/item_id/namespace/op.",
+    "related":          "Items most similar to an existing item (by embedding), across all content types.",
 }
 
 # Param descriptions only for constrained/non-obvious values; all others are stripped.
 _COMPACT_PARAMS: dict[str, dict[str, str]] = {
-    "search":          {"mode": "hybrid|fulltext|semantic", "content_type": "all|documents|knowledge|notes", "namespace": "filter by namespace; omit for global search"},
+    "search":          {"mode": "hybrid|fulltext|semantic", "content_type": "all|documents|knowledge|notes", "namespace": "filter by namespace; omit for global search", "tags": "only items with ALL these tags", "updated_after": "ISO date/datetime lower bound"},
+    "related":         {"item_type": "document|knowledge|note"},
     "read":            {"item_type": "document|knowledge|note"},
     "list_items":      {"item_type": "document|knowledge|note"},
     "tag":             {"item_type": "document|knowledge|note"},

@@ -73,6 +73,25 @@ def _current_filter(table: str, alias: str = "") -> str:
     return _CURRENT_ONLY[table].format(alias=f"{alias}." if alias else "")
 
 
+def _item_filters(tags: list[str] | None, updated_after: str | None,
+                  alias: str = "") -> tuple[str, list]:
+    """WHERE fragments (and their params) for the optional search filters.
+
+    Tags AND together — an item must carry every requested tag (json_each
+    over the stored JSON array). updated_after compares ISO-8601 strings,
+    which orders correctly against the stored isoformat timestamps.
+    """
+    prefix = f"{alias}." if alias else ""
+    sql, params = "", []
+    for tag in tags or ():
+        sql += f" AND EXISTS (SELECT 1 FROM json_each({prefix}tags) WHERE json_each.value = ?)"
+        params.append(tag)
+    if updated_after:
+        sql += f" AND {prefix}updated_at >= ?"
+        params.append(updated_after)
+    return sql, params
+
+
 _TABLE_UPDATE_FIELDS = {
     "documents": frozenset({"title", "content", "mime_type", "tags", "metadata"}),
     "knowledge": frozenset({"subject", "fact", "confidence", "source", "tags", "metadata"}),
@@ -811,6 +830,43 @@ class Database:
                 row["detail"] = _safe_json_loads(row["detail"], None, f"audit {row['id']}")
         return rows
 
+    def item_embedding(self, item_type: str, item_id: str) -> list[float] | None:
+        """The stored embedding for an item, or None when it has no vector.
+
+        Chunked documents carry no whole-document vector; the renormalized
+        mean of their chunk vectors stands in as a centroid — good enough
+        for "more like this" neighbor queries.
+        """
+        table = _ITEM_TYPE_TO_TABLE.get(item_type)
+        if table is None:
+            raise ValueError(f"Invalid type {item_type!r}: must be 'document', 'knowledge', or 'note'")
+        conn = self._get_conn()
+        row = conn.execute(f"SELECT rowid FROM {table} WHERE id = ?", (item_id,)).fetchone()
+        if row is None:
+            return None
+        vec = conn.execute(
+            f"SELECT embedding FROM vec_{table} WHERE rowid = ?", (row["rowid"],)
+        ).fetchone()
+        if vec is not None:
+            dim = len(vec["embedding"]) // 4
+            return list(struct.unpack(f"{dim}f", vec["embedding"]))
+        if table != "documents":
+            return None
+        chunk_vecs = conn.execute(
+            "SELECT v.embedding AS embedding FROM document_chunks dc "
+            "JOIN vec_document_chunks v ON v.rowid = dc.id WHERE dc.document_id = ?",
+            (item_id,),
+        ).fetchall()
+        if not chunk_vecs:
+            return None
+        dim = len(chunk_vecs[0]["embedding"]) // 4
+        centroid = [0.0] * dim
+        for r in chunk_vecs:
+            for i, v in enumerate(struct.unpack(f"{dim}f", r["embedding"])):
+                centroid[i] += v
+        norm = sum(v * v for v in centroid) ** 0.5
+        return [v / norm for v in centroid] if norm else None
+
     def find_by_key(self, item_type: str, namespace: str, key_value: str) -> str | None:
         """The id currently occupying (namespace, title/subject), or None. Used by
         restore to refuse recreating an item under a key another item now owns."""
@@ -1114,33 +1170,36 @@ class Database:
 
     # ── Search ──
 
-    def search_fts(self, query: str, table: str = "all", namespace: str | None = None, limit: int = 20) -> list[SearchResult]:
+    def search_fts(self, query: str, table: str = "all", namespace: str | None = None, limit: int = 20,
+                   tags: list[str] | None = None, updated_after: str | None = None) -> list[SearchResult]:
         results = []
         for t in _TABLES:
             if table in ("all", t):
-                results.extend(self._fts_search_table(t, query, namespace, limit))
+                results.extend(self._fts_search_table(t, query, namespace, limit, tags, updated_after))
         results.sort(key=lambda r: r.score, reverse=True)
         return results[:limit]
 
-    def search_vec(self, embedding: list[float], table: str = "all", namespace: str | None = None, limit: int = 20) -> list[SearchResult]:
+    def search_vec(self, embedding: list[float], table: str = "all", namespace: str | None = None, limit: int = 20,
+                   tags: list[str] | None = None, updated_after: str | None = None) -> list[SearchResult]:
         results = []
         if table in ("all", "documents"):
-            chunk_results = self._vec_search_document_chunks(embedding, namespace, limit)
+            chunk_results = self._vec_search_document_chunks(embedding, namespace, limit, tags, updated_after)
             chunked_ids = {r.id for r in chunk_results}
             results.extend(chunk_results)
             # Also search whole-doc vectors (small docs and pre-chunk legacy data)
-            for r in self._vec_search_table("documents", embedding, namespace, limit):
+            for r in self._vec_search_table("documents", embedding, namespace, limit, tags, updated_after):
                 if r.id not in chunked_ids:
                     results.append(r)
         for t in ("knowledge", "notes"):
             if table in ("all", t):
-                results.extend(self._vec_search_table(t, embedding, namespace, limit))
+                results.extend(self._vec_search_table(t, embedding, namespace, limit, tags, updated_after))
         results.sort(key=lambda r: r.score, reverse=True)
         return results[:limit]
 
-    def search_hybrid(self, query: str, embedding: list[float], table: str = "all", namespace: str | None = None, limit: int = 20) -> list[SearchResult]:
-        fts_results = self.search_fts(query, table, namespace, limit * 2)
-        vec_results = self.search_vec(embedding, table, namespace, limit * 2)
+    def search_hybrid(self, query: str, embedding: list[float], table: str = "all", namespace: str | None = None, limit: int = 20,
+                      tags: list[str] | None = None, updated_after: str | None = None) -> list[SearchResult]:
+        fts_results = self.search_fts(query, table, namespace, limit * 2, tags, updated_after)
+        vec_results = self.search_vec(embedding, table, namespace, limit * 2, tags, updated_after)
 
         # Reciprocal Rank Fusion — rank-based merging that's immune to score scale differences
         k = 60  # standard RRF constant
@@ -1289,17 +1348,19 @@ class Database:
 
     # ── Private helpers ──
 
-    def _fts_search_table(self, table: str, query: str, namespace: str | None, limit: int) -> list[SearchResult]:
+    def _fts_search_table(self, table: str, query: str, namespace: str | None, limit: int,
+                          tags: list[str] | None = None, updated_after: str | None = None) -> list[SearchResult]:
         conn = self._get_conn()
         fts_table = f"{table}_fts"
         alias = {"documents": "d", "knowledge": "k", "notes": "n"}[table]
+        filter_sql, filter_params = _item_filters(tags, updated_after, alias)
         sql = f"""
             SELECT {alias}.*, {fts_table}.rank
             FROM {fts_table}
             JOIN {table} {alias} ON {alias}.rowid = {fts_table}.rowid
-            WHERE {fts_table} MATCH ?{_current_filter(table, alias)}
+            WHERE {fts_table} MATCH ?{_current_filter(table, alias)}{filter_sql}
         """
-        params: list = [query]
+        params: list = [query, *filter_params]
         if namespace:
             sql += f" AND {alias}.namespace = ?"
             params.append(namespace)
@@ -1315,7 +1376,8 @@ class Database:
             results.append(_row_to_search_result(table, row, score))
         return results
 
-    def _vec_search_table(self, table: str, embedding: list[float], namespace: str | None, limit: int) -> list[SearchResult]:
+    def _vec_search_table(self, table: str, embedding: list[float], namespace: str | None, limit: int,
+                          tags: list[str] | None = None, updated_after: str | None = None) -> list[SearchResult]:
         conn = self._get_conn()
         vec_table = f"vec_{table}"
 
@@ -1325,8 +1387,12 @@ class Database:
         #    The namespace partition key filters inside the index, so a small
         #    namespace still yields its own `limit` nearest neighbors.
         # 2. Single IN lookup on the main table → all detail rows at once (not N+1)
+        # Tag/recency filters can only apply at step 2, so the KNN over-fetches
+        # to compensate for neighbors the filters will drop.
+        filter_sql, filter_params = _item_filters(tags, updated_after)
+        knn_limit = limit * 3 if filter_sql else limit
         knn_sql = f"SELECT rowid, distance FROM {vec_table} WHERE embedding MATCH ? AND k = ?"
-        knn_params: list = [_serialize_embedding(embedding), limit]
+        knn_params: list = [_serialize_embedding(embedding), knn_limit]
         if namespace:
             knn_sql += " AND namespace = ?"
             knn_params.append(namespace)
@@ -1340,7 +1406,8 @@ class Database:
         params: list = [row["rowid"] for row in vec_rows]
 
         detail_rows = conn.execute(
-            f"SELECT *, rowid FROM {table} WHERE rowid IN ({placeholders})", params
+            f"SELECT *, rowid FROM {table} WHERE rowid IN ({placeholders}){filter_sql}",
+            params + filter_params
         ).fetchall()
 
         results = []
@@ -1374,10 +1441,11 @@ class Database:
                 (cursor.lastrowid, namespace, _serialize_embedding(chunk_embedding)),
             )
 
-    def _vec_search_document_chunks(self, embedding: list[float], namespace: str | None, limit: int) -> list[SearchResult]:
+    def _vec_search_document_chunks(self, embedding: list[float], namespace: str | None, limit: int,
+                                    tags: list[str] | None = None, updated_after: str | None = None) -> list[SearchResult]:
         """Search chunk-level embeddings; returns the best matching chunk per document."""
         conn = self._get_conn()
-        fetch_limit = limit * 3  # over-fetch to account for per-document dedup
+        fetch_limit = limit * 3  # over-fetch to account for per-document dedup (and any filters)
 
         # Namespace filtering happens inside the KNN via the partition key, so
         # the over-fetch only compensates for multiple chunks per document.
@@ -1394,13 +1462,14 @@ class Database:
         placeholders = ",".join("?" * len(vec_rows))
         params: list = [row["rowid"] for row in vec_rows]
 
+        filter_sql, filter_params = _item_filters(tags, updated_after, "d")
         rows = conn.execute(f"""
             SELECT dc.id AS chunk_rowid, dc.document_id, dc.content AS chunk_content,
                    d.namespace, d.title, d.tags
             FROM document_chunks dc
             JOIN documents d ON d.id = dc.document_id
-            WHERE dc.id IN ({placeholders})
-        """, params).fetchall()
+            WHERE dc.id IN ({placeholders}){filter_sql}
+        """, params + filter_params).fetchall()
 
         # Keep only the best-scoring chunk per document
         best: dict[str, tuple] = {}
