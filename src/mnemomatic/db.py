@@ -4,7 +4,7 @@ import os
 import sqlite3
 import struct
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import sqlite_vec
@@ -32,7 +32,9 @@ BUSY_TIMEOUT_MS = 5000
 # changing a fact closes the old row and inserts a successor instead of
 # overwriting, and the (namespace, subject) unique index becomes partial so
 # it only constrains current rows.
-SCHEMA_VERSION = 3
+# Version 4: the append-only audit_log table — one row per write operation
+# (event trail for accountability, complementing revisions' content capture).
+SCHEMA_VERSION = 4
 CHUNK_THRESHOLD = int(os.environ.get("MNEMOMATIC_CHUNK_THRESHOLD", "2000"))
 CHUNK_SIZE = int(os.environ.get("MNEMOMATIC_CHUNK_SIZE", "1000"))
 CHUNK_OVERLAP = int(os.environ.get("MNEMOMATIC_CHUNK_OVERLAP", "200"))
@@ -40,6 +42,10 @@ CHUNK_OVERLAP = int(os.environ.get("MNEMOMATIC_CHUNK_OVERLAP", "200"))
 # Revisions retained per item; the oldest beyond this are pruned as new ones
 # are captured. 0 disables revision capture entirely.
 REVISIONS_KEEP = int(os.environ.get("MNEMOMATIC_REVISIONS_KEEP", "10"))
+
+# Audit events older than this are pruned as new ones are appended.
+# 0 keeps the trail forever.
+AUDIT_KEEP_DAYS = int(os.environ.get("MNEMOMATIC_AUDIT_KEEP_DAYS", "730"))
 
 # The three content tables, in display order. Each has a parallel vec_<table>.
 _TABLES = ("documents", "knowledge", "notes")
@@ -508,13 +514,14 @@ class Database:
 
     @classmethod
     def _migrate_content_schema(cls, conn: sqlite3.Connection) -> None:
-        """Apply the content-table migrations (v2, v3) in order.
+        """Apply the content-table migrations (v2, v3, v4) in order.
 
         Every step is idempotent (column-existence checks, IF NOT EXISTS) so
         this is safe to run on any database regardless of which path reached it.
         """
         cls._migrate_to_v2(conn)
         cls._migrate_to_v3(conn)
+        cls._migrate_to_v4(conn)
 
     @staticmethod
     def _migrate_to_v2(conn: sqlite3.Connection) -> None:
@@ -555,6 +562,33 @@ class Database:
             CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_ns_subject_current
             ON knowledge(namespace, subject) WHERE valid_until IS NULL
         """)
+
+    @staticmethod
+    def _migrate_to_v4(conn: sqlite3.Connection) -> None:
+        """Version 4: the append-only audit log.
+
+        Event trail, not content: revisions hold what an item *was* (for
+        restore, pruned per item); the audit log holds what *happened* and
+        who did it (for accountability, never pruned).
+        """
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL,
+                op TEXT NOT NULL,
+                item_type TEXT,
+                item_id TEXT,
+                namespace TEXT,
+                title TEXT,
+                actor TEXT,
+                client TEXT,
+                ip TEXT,
+                detail TEXT
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_item ON audit_log(item_type, item_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_ns ON audit_log(namespace, id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts)")
 
     def rebuild_vec_tables(self) -> None:
         """Drop and recreate all vec0 tables empty, at the configured dimension.
@@ -729,6 +763,53 @@ class Database:
             out.extend(rows)
         out.sort(key=lambda r: r["updated_at"])
         return out[:limit]
+
+    def append_audit(self, op: str, *, item_type: str | None = None,
+                     item_id: str | None = None, namespace: str | None = None,
+                     title: str | None = None, actor: str | None = None,
+                     client: str | None = None, ip: str | None = None,
+                     detail: dict | None = None) -> None:
+        """Append one event to the audit log, pruning events past retention.
+
+        Retention is time-based (AUDIT_KEEP_DAYS, default two years; 0 keeps
+        forever) — accountability wants age, not a per-item count like
+        revisions. The prune is an indexed range delete, cheap on every append.
+        """
+        conn = self._get_conn()
+        now = datetime.now(timezone.utc)
+        conn.execute(
+            "INSERT INTO audit_log (ts, op, item_type, item_id, namespace, title, "
+            "actor, client, ip, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (now.isoformat(), op, item_type, item_id, namespace,
+             title, actor, client, ip, json.dumps(detail) if detail else None),
+        )
+        if AUDIT_KEEP_DAYS > 0:
+            cutoff = (now - timedelta(days=AUDIT_KEEP_DAYS)).isoformat()
+            conn.execute("DELETE FROM audit_log WHERE ts < ?", (cutoff,))
+        conn.commit()
+
+    def list_audit(self, item_type: str | None = None, item_id: str | None = None,
+                   namespace: str | None = None, op: str | None = None,
+                   limit: int = 50) -> list[dict]:
+        """Audit events, newest first, with optional filters. detail is parsed JSON."""
+        if item_type is not None and item_type not in _ITEM_TYPE_TO_TABLE:
+            raise ValueError(f"Invalid type {item_type!r}: must be 'document', 'knowledge', or 'note'")
+        sql = "SELECT * FROM audit_log"
+        clauses, params = [], []
+        for column, value in (("item_type", item_type), ("item_id", item_id),
+                              ("namespace", namespace), ("op", op)):
+            if value is not None:
+                clauses.append(f"{column} = ?")
+                params.append(value)
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        rows = self._get_conn().execute(sql, params).fetchall()
+        for row in rows:
+            if row["detail"]:
+                row["detail"] = _safe_json_loads(row["detail"], None, f"audit {row['id']}")
+        return rows
 
     def find_by_key(self, item_type: str, namespace: str, key_value: str) -> str | None:
         """The id currently occupying (namespace, title/subject), or None. Used by

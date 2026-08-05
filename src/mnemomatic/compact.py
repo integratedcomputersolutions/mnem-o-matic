@@ -23,16 +23,17 @@ _COMPACT_DESCRIPTIONS: dict[str, str] = {
     "update_document":  "Update specific fields of a document by id. Only supplied fields change.",
     "update_knowledge": "Update specific fields of a knowledge entry by id. Only supplied fields change.",
     "update_note":      "Update specific fields of a note by id. Only supplied fields change.",
-    "delete_document":  "Permanently delete a document by id.",
-    "delete_knowledge": "Permanently delete a knowledge entry by id.",
-    "delete_note":      "Permanently delete a note by id.",
+    "delete_document":  "Delete a document by id. Undoable via list_revisions + restore.",
+    "delete_knowledge": "Delete a knowledge entry by id. For changed facts, store the new fact instead (keeps history). Undoable via restore.",
+    "delete_note":      "Delete a note by id. Undoable via list_revisions + restore.",
     "tag":              "Add or remove tags on any item without changing other fields.",
     "rename_namespace": "Rename a namespace across all items. Merges into existing target; moved items win title/subject conflicts.",
-    "delete_namespace": "Permanently delete all items in a namespace.",
+    "delete_namespace": "Delete all items in a namespace. Items individually restorable via revisions; no bulk undo.",
     "list_revisions":   "List saved prior versions of items (captured on every update/delete), newest first. Filter by item_type/item_id/namespace.",
     "restore":          "Restore an item to a revision from list_revisions: rolls back an update or recreates a deleted item.",
     "fact_history":     "Timeline of a knowledge fact by namespace+subject: current entry first, then superseded versions newest first.",
     "consolidation_report": "Consolidation candidates for a namespace: near-duplicate clusters (vector similarity) and stale never-retrieved items.",
+    "list_audit":       "Audit trail of write operations, newest first. Filter by item_type/item_id/namespace/op.",
 }
 
 # Param descriptions only for constrained/non-obvious values; all others are stripped.
@@ -43,6 +44,7 @@ _COMPACT_PARAMS: dict[str, dict[str, str]] = {
     "tag":             {"item_type": "document|knowledge|note"},
     "store_knowledge": {"confidence": "0.0-1.0"},
     "list_revisions":  {"item_type": "document|knowledge|note"},
+    "list_audit":      {"item_type": "document|knowledge|note"},
 }
 
 def _simplify_prop(prop: dict) -> dict:

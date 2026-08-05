@@ -249,6 +249,7 @@ Environment variables (set in `docker-compose.yml` or passed to Docker):
 | `MNEMOMATIC_BACKUP_KEEP`    | `7`                         | Scheduled backup archives to retain; older ones are pruned |
 | `MNEMOMATIC_REVISIONS_KEEP` | `10`                        | Prior versions retained per item (captured on update/delete) for the `restore` tool. `0` disables revision capture. |
 | `MNEMOMATIC_SIMILAR_THRESHOLD` | `0.8`                    | Cosine similarity at which stored items count as near-duplicates (`similar` field on store responses, `consolidation_report` clustering). `0` disables the store-time check. |
+| `MNEMOMATIC_AUDIT_KEEP_DAYS` | `730`                      | Audit-log retention in days; older events are pruned as new ones are appended. `0` keeps the trail forever. |
 | `MNEMOMATIC_EMBED_URL`      | *(unset)*                   | External embedding endpoint (takes priority over the built-in model) |
 | `MNEMOMATIC_EMBED_API`      | `openai`                    | Endpoint wire format: `openai` (llama.cpp, vLLM, LM Studio, Ollama `/v1/embeddings`) or `ollama` (native `/api/embeddings`) |
 | `MNEMOMATIC_EMBED_MODEL`    | *(empty)*                   | Model name passed to the external embedder               |
