@@ -864,6 +864,8 @@ def search(
     namespace: str | None = None,
     limit: int = 10,
     mode: str = "hybrid",
+    tags: list[str] | None = None,
+    updated_after: str | None = None,
 ) -> list[dict]:
     """Search across documents, knowledge, and notes in Mnem-O-matic.
 
@@ -887,6 +889,10 @@ def search(
         namespace: Restrict results to a specific namespace (optional). Omit to search globally.
         limit: Maximum number of results to return (default 10, max 100). Increase for broader recall.
         mode: Search algorithm — "hybrid" (default), "fulltext", or "semantic".
+        tags: Only return items carrying ALL of these tags (optional).
+        updated_after: Only return items updated at or after this ISO date or
+                       datetime, e.g. "2026-08-01" (optional). Useful for
+                       "recent" queries; ordering is still by relevance.
     """
     valid_types = {"documents", "knowledge", "notes", "all"}
     if content_type not in valid_types:
@@ -902,6 +908,14 @@ def search(
 
     limit = max(1, min(int(limit), MAX_SEARCH_LIMIT))
 
+    if updated_after is not None:
+        try:
+            datetime.fromisoformat(updated_after)
+        except ValueError:
+            return [{"error": "Invalid updated_after",
+                     "details": "Must be an ISO date or datetime, e.g. 2026-08-01 or 2026-08-01T12:00:00"}]
+    filters = {"tags": tags or None, "updated_after": updated_after}
+
     # FTS5 needs special characters escaped; semantic embedding uses the original query
     fts_query = _escape_fts_query(query)
 
@@ -916,23 +930,23 @@ def search(
     try:
         # hybrid silently degrades to fulltext when no embedder is available
         if mode == "fulltext" or (mode == "hybrid" and emb is None):
-            results = _db().search_fts(fts_query, table=table, namespace=namespace, limit=limit)
+            results = _db().search_fts(fts_query, table=table, namespace=namespace, limit=limit, **filters)
             if mode == "hybrid" and emb is None:
                 degraded = True
         elif mode == "semantic":
             embedding = _embed_query(query)
             if embedding is None:
                 return [{"error": "Semantic search failed", "details": "Embedding service is unavailable. Try fulltext mode."}]
-            results = _db().search_vec(embedding, table=table, namespace=namespace, limit=limit)
+            results = _db().search_vec(embedding, table=table, namespace=namespace, limit=limit, **filters)
         else:  # hybrid with embedder
             embedding = _embed_query(query)
             # If embedding fails, degrade to fulltext search
             if embedding is None:
                 logger.info("Hybrid search degrading to fulltext due to embedding failure")
-                results = _db().search_fts(fts_query, table=table, namespace=namespace, limit=limit)
+                results = _db().search_fts(fts_query, table=table, namespace=namespace, limit=limit, **filters)
                 degraded = True
             else:
-                results = _db().search_hybrid(fts_query, embedding, table=table, namespace=namespace, limit=limit)
+                results = _db().search_hybrid(fts_query, embedding, table=table, namespace=namespace, limit=limit, **filters)
     except sqlite3.Error as e:
         # Escaping should keep FTS5 syntax errors out, but any residual DB
         # error must come back as a tool-level error, not a protocol failure.
@@ -1051,6 +1065,48 @@ def read(item_type: str, id: str) -> dict:
         return {"error": f"{item_type} not found", "id": id}
     _record_access([(item_type, id)])
     return json.loads(item.model_dump_json())
+
+
+@mcp.tool(annotations=_ANN_READ_ONLY)
+def related(item_type: str, id: str, namespace: str | None = None, limit: int = 5) -> dict:
+    """Find items most similar to an existing item — "more like this".
+
+    Use after reading an item to discover connected context without crafting
+    a search query: related decisions around a document, notes touching the
+    same topic as a fact. Results span all content types, ranked by embedding
+    similarity to the given item.
+
+    Requires semantic search (an embedder); works for chunked documents via
+    their chunk-vector centroid. The item itself is never returned.
+
+    Args:
+        item_type: The item's type — "document", "knowledge", or "note".
+        id: The item to find neighbors for.
+        namespace: Restrict results to one namespace (optional). Omit to
+                   search across all namespaces.
+        limit: Maximum related items to return (default 5, max 100).
+    """
+    if item_type not in _READ_GETTERS:
+        return {"error": "Invalid item_type", "details": f"Must be one of: {', '.join(sorted(_READ_GETTERS))}"}
+    limit = max(1, min(int(limit), MAX_SEARCH_LIMIT))
+
+    if _READ_GETTERS[item_type](_db(), id) is None:
+        return {"error": f"{item_type} not found", "id": id}
+    embedding = _db().item_embedding(item_type, id)
+    if embedding is None:
+        return {"error": "No embedding for this item",
+                "details": "The item has no stored vector (FTS-only mode, or stored before "
+                           "an embedder was configured — a MNEMOMATIC_REINDEX=1 restart embeds it)."}
+
+    try:
+        results = _db().search_vec(embedding, table="all", namespace=namespace, limit=limit + 1)
+    except sqlite3.Error as e:
+        logger.warning("Related-items search failed for %s %s: %s", item_type, id, e)
+        return {"error": "Related search failed", "details": str(e)}
+    neighbors = [r for r in results if r.id != id][:limit]
+    _record_access([(r.type, r.id) for r in neighbors])
+    return {"item_type": item_type, "item_id": id,
+            "related": [r.model_dump() for r in neighbors]}
 
 
 @mcp.tool(annotations=_ANN_READ_ONLY)

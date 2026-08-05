@@ -46,9 +46,17 @@ search("recent decisions")
 | `fulltext` | A specific name, term, or exact phrase |
 | `semantic` | A concept or question where stored content may use different words |
 
+Two optional filters narrow any mode: `tags=[...]` (items must carry **all** of them) and
+`updated_after="2026-08-01"` (ISO date/datetime) — use them for "recent" or "tagged X"
+requests instead of filtering results yourself.
+
 Results carry a `snippet` preview; call `read(item_type, id)` for full content before
 relying on an item. A document hit with `partial: true` matched one chunk of a larger
 document — the snippet is the best passage, not the whole file, so always `read` it.
+
+After reading something relevant, `related(item_type, id)` returns its nearest neighbors
+across all types — the cheapest way to pull in surrounding context you didn't know to
+search for.
 
 For a thorough context load at task start, the server's `briefing` prompt (a slash command
 in Claude Code) packages the whole workflow: multi-query search → read → summarize.
