@@ -61,16 +61,21 @@ class FakeDB:
     def record_access(self, refs):
         pass  # usage bookkeeping isn't part of the dispatch matrix
 
-    def search_fts(self, query, table, namespace, limit):
+    # The filter kwargs (tags/updated_after) are always passed by search();
+    # they're recorded but not part of the dispatch matrix (see test_filters.py).
+    def search_fts(self, query, table, namespace, limit, **filters):
         self.calls.append(("fts", query, table, namespace, limit))
+        self.filters = filters
         return [FakeResult("fts")]
 
-    def search_vec(self, embedding, table, namespace, limit):
+    def search_vec(self, embedding, table, namespace, limit, **filters):
         self.calls.append(("vec", embedding, table, namespace, limit))
+        self.filters = filters
         return [FakeResult("vec")]
 
-    def search_hybrid(self, query, embedding, table, namespace, limit):
+    def search_hybrid(self, query, embedding, table, namespace, limit, **filters):
         self.calls.append(("hybrid", query, embedding, table, namespace, limit))
+        self.filters = filters
         return [FakeResult("hybrid")]
 
 

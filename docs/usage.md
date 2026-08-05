@@ -335,6 +335,7 @@ mode = "fulltext"
 # Search
 mnemomatic-cli search "authentication"
 mnemomatic-cli search "JWT tokens" -n webapp -m semantic -l 5
+mnemomatic-cli search "deploy" --tag runbook --updated-after 2026-08-01
 
 # Store
 mnemomatic-cli store document myproject "API spec" "Full API specification text"
@@ -407,7 +408,8 @@ Once connected, your LLM has access to these tools:
 | `delete_knowledge`   | Remove a knowledge entry                             |
 | `delete_note`        | Remove a note                                        |
 | `tag`                | Add or remove tags on any entry                      |
-| `search`             | Search across all stored data                        |
+| `search`             | Search across all stored data; optional `tags` / `updated_after` filters (see Search Filters) |
+| `related`            | Items most similar to an existing item — "more like this" (see Related Items) |
 | `read`               | Fetch full content of an item by ID                  |
 | `list_items`         | List item summaries in a namespace, newest first, paginated with `limit`/`offset` (response includes `total`) |
 | `rename_namespace`   | Rename a namespace atomically across all item types. Merges into an existing target: on title/subject collisions the moved item replaces the target's (upsert semantics); the response reports `replaced` counts. |
@@ -491,6 +493,37 @@ The `search` tool supports three modes:
 - **fulltext** — keyword and phrase matching via SQLite FTS5
 - **semantic** — meaning-based search via vector embeddings
 - **hybrid** (default) — combines both, ranked by a blended score
+
+### Search Filters
+
+Two optional filters narrow any mode, and compose with `namespace` and `content_type`:
+
+- **`tags`** — only items carrying **all** the listed tags (exact matches, not prefixes)
+- **`updated_after`** — only items updated at or after an ISO date or datetime (`"2026-08-01"`, `"2026-08-01T12:00:00"`)
+
+```
+search("deployment", tags=["runbook"])                     # tagged runbooks only
+search("auth", updated_after="2026-08-01")                  # what changed recently
+search("cache", tags=["decision"], updated_after="2026-07-01", namespace="webapp")
+```
+
+Filtering never changes the ranking — results still come back by relevance, and only qualifying items are considered. From the CLI:
+
+```bash
+mnemomatic-cli search "deployment" --tag runbook --tag current
+mnemomatic-cli search "auth" --updated-after 2026-08-01
+```
+
+### Related Items
+
+`related(item_type, id)` returns the items most similar to one you already have — "more like this", without composing a query:
+
+```
+related(item_type="document", id="abc-123")            # neighbors across all types
+related(item_type="knowledge", id="def-456", namespace="webapp", limit=10)
+```
+
+Results span all content types, ranked by embedding similarity, and never include the item itself. It needs an embedder (semantic search); chunked documents work through the centroid of their chunk vectors. Items stored while no embedder was configured have no vector and return an error suggesting a `MNEMOMATIC_REINDEX=1` restart.
 
 ### Example Usage
 

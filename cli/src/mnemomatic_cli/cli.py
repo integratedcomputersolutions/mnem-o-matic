@@ -247,6 +247,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_search.add_argument("-m", "--mode", metavar="MODE",
                           choices=["hybrid", "fulltext", "semantic"], default=None,
                           help="Search mode (overrides config/default)")
+    p_search.add_argument("--tag", metavar="TAG", action="append", dest="tags",
+                          help="Only items with this tag; repeat to require several")
+    p_search.add_argument("--updated-after", metavar="DATE",
+                          help="Only items updated at or after this ISO date/datetime")
 
     # -- store ----------------------------------------------------------------
     p_store = sub.add_parser("store", help="Store content")
@@ -421,6 +425,10 @@ def main():
             }
             if args.namespace:
                 params["namespace"] = args.namespace
+            if args.tags:
+                params["tags"] = args.tags
+            if args.updated_after:
+                params["updated_after"] = args.updated_after
             _run(lambda: client.call_tool("search", params), pretty)
         case "store":
             tool = f"store_{args.store_type}"
