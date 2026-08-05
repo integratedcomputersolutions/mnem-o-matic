@@ -28,9 +28,9 @@ Mnem-O-matic fixes this by providing a shared, persistent memory that any LLM ca
 
 All types support namespaces (per-project or global), tags, and metadata. Everything is searchable via full-text and semantic search. Large documents are automatically split into chunks at store time, so search returns the most relevant passage rather than the entire file — giving agents focused context without burning their context window.
 
-## A Memory, Not a Filing Cabinet
+## A Memory and a Filing Cabinet
 
-Content has history, mistakes are reversible, and the store helps keep itself tidy:
+The filing cabinet is the part above — organized, tagged, searchable storage. What makes it also a *memory* is how content behaves over time: it has history, mistakes are reversible, and the store helps keep itself tidy:
 
 - **Temporal facts** — knowledge answers questions whose answers change. When a fact changes, the old entry is superseded rather than overwritten: search returns only the current answer, and `fact_history` shows what was believed before, and until when. [More →](docs/usage.md#temporal-facts)
 - **Undo & recovery** — every update and delete first saves the item's prior state as a revision; `restore` rolls back a bad edit or recreates a deleted item under its original id. [More →](docs/usage.md#usage-tracking--revisions)
