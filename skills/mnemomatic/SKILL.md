@@ -139,3 +139,6 @@ search to look everywhere.
 items — candidates only; reviewing and acting is your job. The server's `consolidate`
 prompt walks the workflow: read every flagged item before merging, superseding, tagging,
 or deleting.
+
+Every write is recorded in an append-only audit trail — `list_audit(namespace=...)` shows
+recent activity (who changed what, when), `list_audit(item_id=...)` traces one item.

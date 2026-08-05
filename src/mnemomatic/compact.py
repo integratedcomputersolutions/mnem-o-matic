@@ -33,6 +33,7 @@ _COMPACT_DESCRIPTIONS: dict[str, str] = {
     "restore":          "Restore an item to a revision from list_revisions: rolls back an update or recreates a deleted item.",
     "fact_history":     "Timeline of a knowledge fact by namespace+subject: current entry first, then superseded versions newest first.",
     "consolidation_report": "Consolidation candidates for a namespace: near-duplicate clusters (vector similarity) and stale never-retrieved items.",
+    "list_audit":       "Audit trail of write operations, newest first. Filter by item_type/item_id/namespace/op.",
 }
 
 # Param descriptions only for constrained/non-obvious values; all others are stripped.
@@ -43,6 +44,7 @@ _COMPACT_PARAMS: dict[str, dict[str, str]] = {
     "tag":             {"item_type": "document|knowledge|note"},
     "store_knowledge": {"confidence": "0.0-1.0"},
     "list_revisions":  {"item_type": "document|knowledge|note"},
+    "list_audit":      {"item_type": "document|knowledge|note"},
 }
 
 def _simplify_prop(prop: dict) -> dict:
