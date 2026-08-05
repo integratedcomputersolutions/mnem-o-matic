@@ -238,6 +238,8 @@ list_audit(op="delete")                            # all deletions, store-wide
 
 Reads are deliberately not audited (usage tracking covers retrieval); failed operations are not recorded; and a failing audit write never breaks the operation it describes. With a single shared API key the `actor` is self-reported — per-key authenticated attribution would come with scoped API keys, which the schema already accommodates.
 
+Retention is time-based: events older than `MNEMOMATIC_AUDIT_KEEP_DAYS` (default 730 — two years) are pruned as new ones are appended; set `0` to keep the trail forever. Events are a couple of hundred bytes each (titles and ids, never content), so even the default retention stays in the low tens of MB on a busy store.
+
 ## Temporal Facts
 
 Knowledge entries answer questions like "what is our auth method?" — and the answer changes over time. So knowledge is **temporal**: when a fact changes, the old entry is *superseded* rather than overwritten. It stays in the store with `valid_until` (when it stopped being the current answer) and `superseded_by` (the id of its replacement), answering "what did we believe before, and until when?"

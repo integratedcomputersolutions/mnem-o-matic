@@ -4,7 +4,7 @@ import os
 import sqlite3
 import struct
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import sqlite_vec
@@ -42,6 +42,10 @@ CHUNK_OVERLAP = int(os.environ.get("MNEMOMATIC_CHUNK_OVERLAP", "200"))
 # Revisions retained per item; the oldest beyond this are pruned as new ones
 # are captured. 0 disables revision capture entirely.
 REVISIONS_KEEP = int(os.environ.get("MNEMOMATIC_REVISIONS_KEEP", "10"))
+
+# Audit events older than this are pruned as new ones are appended.
+# 0 keeps the trail forever.
+AUDIT_KEEP_DAYS = int(os.environ.get("MNEMOMATIC_AUDIT_KEEP_DAYS", "730"))
 
 # The three content tables, in display order. Each has a parallel vec_<table>.
 _TABLES = ("documents", "knowledge", "notes")
@@ -584,6 +588,7 @@ class Database:
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_item ON audit_log(item_type, item_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_ns ON audit_log(namespace, id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts)")
 
     def rebuild_vec_tables(self) -> None:
         """Drop and recreate all vec0 tables empty, at the configured dimension.
@@ -764,14 +769,23 @@ class Database:
                      title: str | None = None, actor: str | None = None,
                      client: str | None = None, ip: str | None = None,
                      detail: dict | None = None) -> None:
-        """Append one event to the audit log. Append-only — nothing prunes it."""
+        """Append one event to the audit log, pruning events past retention.
+
+        Retention is time-based (AUDIT_KEEP_DAYS, default two years; 0 keeps
+        forever) — accountability wants age, not a per-item count like
+        revisions. The prune is an indexed range delete, cheap on every append.
+        """
         conn = self._get_conn()
+        now = datetime.now(timezone.utc)
         conn.execute(
             "INSERT INTO audit_log (ts, op, item_type, item_id, namespace, title, "
             "actor, client, ip, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (datetime.now(timezone.utc).isoformat(), op, item_type, item_id, namespace,
+            (now.isoformat(), op, item_type, item_id, namespace,
              title, actor, client, ip, json.dumps(detail) if detail else None),
         )
+        if AUDIT_KEEP_DAYS > 0:
+            cutoff = (now - timedelta(days=AUDIT_KEEP_DAYS)).isoformat()
+            conn.execute("DELETE FROM audit_log WHERE ts < ?", (cutoff,))
         conn.commit()
 
     def list_audit(self, item_type: str | None = None, item_id: str | None = None,

@@ -49,6 +49,27 @@ class TestDbAudit(unittest.TestCase):
     def tearDown(self):
         self.db.close()
 
+    def test_retention_prunes_old_events_on_append(self):
+        import mnemomatic.db as db_module
+        conn = self.db._get_conn()
+        conn.execute(
+            "INSERT INTO audit_log (ts, op) VALUES ('2020-01-01T00:00:00+00:00', 'store')")
+        conn.commit()
+        with patch.object(db_module, "AUDIT_KEEP_DAYS", 365):
+            self.db.append_audit("delete", item_id="x")
+        ops = [e["op"] for e in self.db.list_audit()]
+        self.assertEqual(ops, ["delete"])  # the 2020 event aged out
+
+    def test_retention_zero_keeps_forever(self):
+        import mnemomatic.db as db_module
+        conn = self.db._get_conn()
+        conn.execute(
+            "INSERT INTO audit_log (ts, op) VALUES ('2020-01-01T00:00:00+00:00', 'store')")
+        conn.commit()
+        with patch.object(db_module, "AUDIT_KEEP_DAYS", 0):
+            self.db.append_audit("delete", item_id="x")
+        self.assertEqual(len(self.db.list_audit()), 2)
+
     def test_append_and_list_with_filters(self):
         self.db.append_audit("store", item_type="note", item_id="n1", namespace="a",
                              title="t", actor="matt", client="ua", ip="1.2.3.4",
