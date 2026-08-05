@@ -28,13 +28,27 @@ Mnem-O-matic fixes this by providing a shared, persistent memory that any LLM ca
 
 All types support namespaces (per-project or global), tags, and metadata. Everything is searchable via full-text and semantic search. Large documents are automatically split into chunks at store time, so search returns the most relevant passage rather than the entire file — giving agents focused context without burning their context window.
 
+## A Memory, Not a Filing Cabinet
+
+Content has history, mistakes are reversible, and the store helps keep itself tidy:
+
+- **Temporal facts** — knowledge answers questions whose answers change. When a fact changes, the old entry is superseded rather than overwritten: search returns only the current answer, and `fact_history` shows what was believed before, and until when. [More →](docs/usage.md#temporal-facts)
+- **Undo & recovery** — every update and delete first saves the item's prior state as a revision; `restore` rolls back a bad edit or recreates a deleted item under its original id. [More →](docs/usage.md#usage-tracking--revisions)
+- **Duplicate awareness & consolidation** — storing near-identical content gets flagged in the store response, and `consolidation_report` clusters look-alike items and lists stale, never-retrieved ones. The bundled `consolidate` and `briefing` prompts turn review into one-command workflows — no server-side LLM involved, the connected agent is the judge. [More →](docs/usage.md#memory-hygiene-duplicates-consolidation-prompts)
+- **Usage tracking** — items carry retrieval counters, bumped only when something is genuinely read or surfaced by search. The raw material for spotting what earns its place. [More →](docs/usage.md#usage-tracking--revisions)
+- **Audit trail** — every write lands in an append-only log: what changed, when, from which client and address, and — when clients send an `X-Mnemomatic-Actor` header — who. Two-year retention by default. [More →](docs/usage.md#audit-log)
+
+## Backups & Export
+
+The whole store downloads as a **human-readable zip** — one folder per namespace, one Markdown file per item, metadata in sidecars — via `GET /export`, the web viewer, or the CLI. Your memory stays portable and is never locked in. The server can also write that archive on a schedule with rotation: set `MNEMOMATIC_BACKUP_DIR` and backups happen with no host-side cron. [More →](docs/usage.md#export)
+
 ## Embedding Model
 
 Semantic search runs on a local embedding model bundled into the Docker image — nothing leaves your machine. Three models are selectable at build time via the `EMBED_MODEL` build argument: **MiniLM** (the default) is the smallest and fastest but also the most limited — English only, and the weakest at paraphrased queries; **gte-multilingual-base** adds strong multilingual retrieval at near-MiniLM query speed; **EmbeddingGemma** has the best retrieval quality of the three — it resolves paraphrased queries that share no words with the stored content — at a higher CPU and memory cost. You can also bypass the built-in model and point `MNEMOMATIC_EMBED_URL` at any OpenAI-compatible embedding endpoint. See [choosing the built-in embedding model](docs/installation.md#choosing-the-built-in-embedding-model) for the full comparison.
 
 ## Agent Skill
 
-A sample agent skill file is included at `skills/mnemomatic/SKILL.md`. It teaches an agent how to use Mnem-O-matic effectively — when to search, which search mode to pick, what content type to store, and how to retrieve full content after a search.
+A sample agent skill file is included at `skills/mnemomatic/SKILL.md`. It teaches an agent how to use Mnem-O-matic effectively — when to reach for memory at all, which search mode to pick, what content type to store, how facts supersede, and how to undo mistakes.
 
 The skill is written for Claude Code but can be adapted to any agent framework that supports custom instructions or skill files. Tailor the wording, triggers, and examples to match your agent's terminology and workflow.
 
@@ -73,6 +87,8 @@ docker run -e MNEMOMATIC_UI_TOKEN=your-viewer-secret ...
 ```
 
 Then open `http://your-host:8000/ui` and enter the token once. There are no user accounts — access is a single shared secret, kept separate from the MCP API key. When `MNEMOMATIC_UI_TOKEN` is unset, `/ui` is not served at all.
+
+A **Settings** page shows the configuration the server is running with — embedding model (linked to its model card), dimensions, task prefixes, chunking — and offers the export download.
 
 See the [Usage Guide](docs/usage.md#web-viewer) for details and security notes.
 
