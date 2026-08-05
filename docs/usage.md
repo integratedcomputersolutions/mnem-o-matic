@@ -208,6 +208,36 @@ restore <revision_id>                                       # roll back / undele
 
 Revisions store content and metadata, not embeddings — like the export archive, they stay independent of the embedding model. Note that deleting an item does **not** purge its revisions: recovering exactly that data is what they are for. Set `MNEMOMATIC_REVISIONS_KEEP=0` if items must be gone the moment they are deleted.
 
+## Audit Log
+
+Every successful write operation is recorded in an **append-only audit log** — the event trail that complements revisions: revisions hold what an item *was* (for restore, pruned per item), the audit log holds what *happened* (for accountability, never pruned).
+
+Each event carries the timestamp, operation (`store`, `update`, `supersede`, `delete`, `tag`, `restore`, `rename_namespace`, `delete_namespace`), the item's type/id/namespace/title, op-specific detail (e.g. which fields an update touched, which entry a supersession closed), and three request-identity fields:
+
+| Field | Source | Trust |
+|-------|--------|-------|
+| `actor` | The client's `X-Mnemomatic-Actor` request header, if it sends one | Self-declared — fine among cooperating clients, not authenticated |
+| `client` | The `User-Agent` header | What the connecting software reports |
+| `ip` | The connection's peer address | Behind a reverse proxy this is the proxy's address |
+
+To label a client, add the header to its MCP configuration:
+
+```bash
+claude mcp add --transport http mnemomatic https://your-host/mcp \
+  -H "Authorization: Bearer your-key" \
+  -H "X-Mnemomatic-Actor: matt-laptop"
+```
+
+Query the trail with the `list_audit` tool — filter by item, namespace, or operation:
+
+```
+list_audit(namespace="myproject")                  # recent activity in a project
+list_audit(item_id="abc-123")                      # everything that happened to one item
+list_audit(op="delete")                            # all deletions, store-wide
+```
+
+Reads are deliberately not audited (usage tracking covers retrieval); failed operations are not recorded; and a failing audit write never breaks the operation it describes. With a single shared API key the `actor` is self-reported — per-key authenticated attribution would come with scoped API keys, which the schema already accommodates.
+
 ## Temporal Facts
 
 Knowledge entries answer questions like "what is our auth method?" — and the answer changes over time. So knowledge is **temporal**: when a fact changes, the old entry is *superseded* rather than overwritten. It stays in the store with `valid_until` (when it stopped being the current answer) and `superseded_by` (the id of its replacement), answering "what did we believe before, and until when?"
@@ -384,6 +414,7 @@ Once connected, your LLM has access to these tools:
 | `restore`            | Restore an item to a revision: roll back an update or recreate a deleted item |
 | `fact_history`       | The timeline of a knowledge fact: the current entry, then every superseded version (see Temporal Facts) |
 | `consolidation_report` | Consolidation candidates for a namespace: near-duplicate clusters and stale never-retrieved items (see Memory Hygiene) |
+| `list_audit`         | The append-only audit trail of write operations, newest first — filter by item, namespace, or operation (see Audit Log) |
 
 ### Input Validation & Limits
 

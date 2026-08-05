@@ -13,6 +13,7 @@ from mcp.types import ToolAnnotations
 from pydantic import ValidationError
 
 from mnemomatic import model_config
+from mnemomatic.audit import RequestMetaMiddleware, request_meta
 from mnemomatic.auth import BearerAuthMiddleware
 from mnemomatic.compact import CompactToolsMiddleware
 from mnemomatic.db import (
@@ -426,6 +427,8 @@ def store_document(
     similar = _similar_items("documents", stored.id, namespace, embedding)
     if similar:
         response["similar"] = similar
+    _audit("store", item_type="document", item_id=stored.id, namespace=stored.namespace,
+           title=stored.title, created=created)
     return response
 
 
@@ -492,6 +495,9 @@ def store_knowledge(
     similar = _similar_items("knowledge", stored.id, namespace, embedding)
     if similar:
         response["similar"] = similar
+    _audit("store", item_type="knowledge", item_id=stored.id, namespace=stored.namespace,
+           title=stored.subject, created=created,
+           **({"superseded": superseded} if superseded else {}))
     return response
 
 
@@ -585,6 +591,8 @@ def _handle_update(item_type: str, id: str, fields: dict) -> dict:
     updated = cfg["updater"](db, id, embedding, fields)
     if updated is None:
         return {"error": f"{item_type.capitalize()} {id} not found"}
+    _audit("update", item_type=item_type, item_id=updated.id, namespace=updated.namespace,
+           title=getattr(updated, cfg["key"]), fields=sorted(fields))
     return {"id": updated.id, cfg["key"]: getattr(updated, cfg["key"]), "updated": True}
 
 
@@ -604,6 +612,8 @@ def _supersede_update(existing: Knowledge, fields: dict) -> dict:
                            f"in namespace {successor.namespace!r}"}
     if stored is None:
         return {"error": f"Knowledge {existing.id} not found"}
+    _audit("supersede", item_type="knowledge", item_id=stored.id, namespace=stored.namespace,
+           title=stored.subject, superseded=existing.id)
     return {"id": stored.id, "subject": stored.subject, "updated": True, "superseded": existing.id}
 
 
@@ -681,7 +691,13 @@ def delete_document(id: str) -> dict:
     Args:
         id: The document ID to delete.
     """
-    return {"id": id, "deleted": _db().delete_document(id)}
+    existing = _db().get_document(id)
+    deleted = _db().delete_document(id)
+    if deleted:
+        _audit("delete", item_type="document", item_id=id,
+               namespace=existing.namespace if existing else None,
+               title=getattr(existing, "title", None) if existing else None)
+    return {"id": id, "deleted": deleted}
 
 
 @mcp.tool(annotations=_ANN_DELETE)
@@ -696,7 +712,13 @@ def delete_knowledge(id: str) -> dict:
     Args:
         id: The knowledge entry ID to delete.
     """
-    return {"id": id, "deleted": _db().delete_knowledge(id)}
+    existing = _db().get_knowledge(id)
+    deleted = _db().delete_knowledge(id)
+    if deleted:
+        _audit("delete", item_type="knowledge", item_id=id,
+               namespace=existing.namespace if existing else None,
+               title=getattr(existing, "subject", None) if existing else None)
+    return {"id": id, "deleted": deleted}
 
 
 @mcp.tool(annotations=_ANN_STORE)
@@ -752,6 +774,8 @@ def store_note(
     similar = _similar_items("notes", stored.id, namespace, embedding)
     if similar:
         response["similar"] = similar
+    _audit("store", item_type="note", item_id=stored.id, namespace=stored.namespace,
+           title=stored.title, created=created)
     return response
 
 
@@ -796,7 +820,13 @@ def delete_note(id: str) -> dict:
     Args:
         id: The note ID to delete.
     """
-    return {"id": id, "deleted": _db().delete_note(id)}
+    existing = _db().get_note(id)
+    deleted = _db().delete_note(id)
+    if deleted:
+        _audit("delete", item_type="note", item_id=id,
+               namespace=existing.namespace if existing else None,
+               title=getattr(existing, "title", None) if existing else None)
+    return {"id": id, "deleted": deleted}
 
 
 @mcp.tool(annotations=_ANN_TAG)
@@ -820,6 +850,8 @@ def tag(
     """
     try:
         tags = _db().update_tags(item_id, item_type, add_tags=add_tags, remove_tags=remove_tags)
+        _audit("tag", item_type=item_type, item_id=item_id,
+               added=add_tags or [], removed=remove_tags or [])
         return {"id": item_id, "tags": tags}
     except ValueError as e:
         return {"error": str(e)}
@@ -936,6 +968,23 @@ def _record_access(refs: list[tuple[str, str]]) -> None:
         _db().record_access(refs)
     except Exception as e:
         logger.warning("Recording item access failed: %s: %s", type(e).__name__, e)
+
+
+def _audit(op: str, *, item_type: str | None = None, item_id: str | None = None,
+           namespace: str | None = None, title: str | None = None, **detail) -> None:
+    """Append an audit event, enriched with the request's identity fields.
+
+    Called from the write tools' success paths only; a failing audit write is
+    logged and never breaks the operation it describes.
+    """
+    try:
+        meta = request_meta()
+        _db().append_audit(op, item_type=item_type, item_id=item_id,
+                           namespace=namespace, title=title,
+                           actor=meta["actor"], client=meta["client"], ip=meta["ip"],
+                           detail=detail or None)
+    except Exception as e:
+        logger.warning("Audit write failed: %s: %s", type(e).__name__, e)
 
 
 def _get_resource(item_type: str, id: str) -> str:
@@ -1065,6 +1114,42 @@ def list_revisions(
     return {"revisions": revisions, "limit": limit}
 
 
+@mcp.tool(annotations=_ANN_READ_ONLY)
+def list_audit(
+    item_type: str | None = None,
+    item_id: str | None = None,
+    namespace: str | None = None,
+    op: str | None = None,
+    limit: int = 50,
+) -> dict:
+    """List the audit trail — one event per write operation, newest first.
+
+    Use this to review recent activity ("what changed in this namespace and
+    when?"), trace what happened to a specific item, or see where a change
+    came from. Complements revisions: revisions hold the content an item had
+    (for restore), the audit log holds the events (who did what, when).
+
+    Each event carries: ts, op (store/update/supersede/delete/tag/restore/
+    rename_namespace/delete_namespace), item_type/item_id/namespace/title,
+    actor (the client's self-declared X-Mnemomatic-Actor header, if any),
+    client (user-agent), ip, and op-specific detail. With a shared API key
+    the actor is self-reported, not authenticated.
+
+    Args:
+        item_type: Filter by type — "document", "knowledge", or "note" (optional).
+        item_id: Filter to one item's events (optional).
+        namespace: Filter by namespace (optional).
+        op: Filter by operation name (optional).
+        limit: Maximum events to return, newest first (default 50, max 200).
+    """
+    if item_type is not None and item_type not in _READ_GETTERS:
+        return {"error": "Invalid item_type", "details": f"Must be one of: {', '.join(sorted(_READ_GETTERS))}"}
+    limit = max(1, min(int(limit), MAX_LIST_LIMIT))
+    events = _db().list_audit(item_type=item_type, item_id=item_id,
+                              namespace=namespace, op=op, limit=limit)
+    return {"events": events, "limit": limit}
+
+
 @mcp.tool(annotations=_ANN_UPDATE)
 def restore(revision_id: int) -> dict:
     """Restore an item to a saved revision — undo an update or recover a deleted item.
@@ -1097,6 +1182,9 @@ def restore(revision_id: int) -> dict:
         result = _handle_update(item_type, rev["item_id"], fields)
         if "error" in result:
             return result
+        _audit("restore", item_type=item_type, item_id=rev["item_id"],
+               namespace=rev["namespace"], title=rev["title"],
+               revision_id=revision_id, recreated=False)
         return {**result, "restored_revision": revision_id, "recreated": False}
 
     # The item is gone — recreate it, unless its key now belongs to another item.
@@ -1118,6 +1206,8 @@ def restore(revision_id: int) -> dict:
         stored, _, _ = _db().store_knowledge(item, _embed_content(_knowledge_embed_text(item.subject, item.fact)))
     else:
         stored, _ = _db().store_note(item, _embed_content(_note_embed_text(item.title, item.content)))
+    _audit("restore", item_type=item_type, item_id=stored.id, namespace=stored.namespace,
+           title=getattr(stored, key), revision_id=revision_id, recreated=True)
     return {"id": stored.id, key: getattr(stored, key), "namespace": stored.namespace,
             "restored_revision": revision_id, "recreated": True}
 
@@ -1378,6 +1468,7 @@ def delete_namespace(namespace: str) -> dict:
         namespace: The namespace to delete.
     """
     counts = _db().delete_namespace(namespace)
+    _audit("delete_namespace", namespace=namespace, deleted=sum(counts.values()))
     return {
         "namespace": namespace,
         "deleted": counts,
@@ -1403,6 +1494,8 @@ def rename_namespace(old_namespace: str, new_namespace: str) -> dict:
         counts, replaced = _db().rename_namespace(old_namespace, new_namespace)
     except ValueError as e:
         return {"error": str(e)}
+    _audit("rename_namespace", namespace=old_namespace, new_namespace=new_namespace,
+           moved=sum(counts.values()), replaced=sum(replaced.values()))
     return {
         "old_namespace": old_namespace,
         "new_namespace": new_namespace,
@@ -1517,6 +1610,9 @@ def main():
         logger.info("Web viewer disabled (set MNEMOMATIC_UI_TOKEN to enable)")
 
     app = CompactToolsMiddleware(app)
+
+    # Capture actor/client/ip per request for the audit log.
+    app = RequestMetaMiddleware(app)
 
     # Middleware handles both authenticated and non-authenticated modes
     # If API_KEY is empty, auth is disabled but logging still tracks requests.
