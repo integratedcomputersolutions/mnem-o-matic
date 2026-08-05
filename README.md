@@ -26,7 +26,7 @@ Mnem-O-matic fixes this by providing a shared, persistent memory that any LLM ca
 
 **Notes** — quick thoughts, ideas, observations, and voice transcripts. Informal content that LLMs should be aware of but that isn't structured enough to be a document or atomic enough to be a knowledge entry.
 
-All types support namespaces (per-project or global), tags, and metadata. Everything is searchable via full-text and semantic search. Large documents are automatically split into chunks at store time, so search returns the most relevant passage rather than the entire file — giving agents focused context without burning their context window.
+All types support namespaces (per-project or global), tags, and metadata. Everything is searchable via full-text and semantic search, narrowed when you need it by tag or by "updated since". Large documents are automatically split into chunks at store time, so search returns the most relevant passage rather than the entire file — giving agents focused context without burning their context window.
 
 ## A Memory, Not a Filing Cabinet
 
@@ -35,6 +35,7 @@ Content has history, mistakes are reversible, and the store helps keep itself ti
 - **Temporal facts** — knowledge answers questions whose answers change. When a fact changes, the old entry is superseded rather than overwritten: search returns only the current answer, and `fact_history` shows what was believed before, and until when. [More →](docs/usage.md#temporal-facts)
 - **Undo & recovery** — every update and delete first saves the item's prior state as a revision; `restore` rolls back a bad edit or recreates a deleted item under its original id. [More →](docs/usage.md#usage-tracking--revisions)
 - **Duplicate awareness & consolidation** — storing near-identical content gets flagged in the store response, and `consolidation_report` clusters look-alike items and lists stale, never-retrieved ones. The bundled `consolidate` and `briefing` prompts turn review into one-command workflows — no server-side LLM involved, the connected agent is the judge. [More →](docs/usage.md#memory-hygiene-duplicates-consolidation-prompts)
+- **Associative recall** — `related` returns an item's nearest neighbors across all content types, so an agent that just read one thing can pull in the surrounding context it didn't know to search for. [More →](docs/usage.md#related-items)
 - **Usage tracking** — items carry retrieval counters, bumped only when something is genuinely read or surfaced by search. The raw material for spotting what earns its place. [More →](docs/usage.md#usage-tracking--revisions)
 - **Audit trail** — every write lands in an append-only log: what changed, when, from which client and address, and — when clients send an `X-Mnemomatic-Actor` header — who. Two-year retention by default. [More →](docs/usage.md#audit-log)
 
