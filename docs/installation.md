@@ -162,11 +162,12 @@ The first build takes a few minutes — it downloads the embedding model (checks
 
 ### Choosing the built-in embedding model
 
-The `full` image bundles one of three embedding models, selected with the `EMBED_MODEL` build argument:
+The `full` image bundles one of four embedding models, selected with the `EMBED_MODEL` build argument:
 
 | `EMBED_MODEL` | Dimensions | Languages | Query embed (CPU) | Model size | RAM (running) | Notes |
 | ------------- | ---------- | --------- | ----------------- | ---------- | ------------- | ----- |
 | `minilm` (default) | 384 | English | ~10–15 ms | ~23 MB | ~240 MB | `all-MiniLM-L6-v2` — fastest and smallest; compatible with databases created by earlier releases |
+| `amaretto-embed-148m` | 768 | 8 Latin-script + code | ~130 ms | ~297 MB | ~470 MB | A vocabulary-sliced distillation of EmbeddingGemma — most of its retrieval quality at ~40% of the RAM; 2048-token context; weights under the [Gemma Terms of Use](https://ai.google.dev/gemma/terms) |
 | `gte-multilingual-base` | 768 | ~70 | ~12 ms | ~325 MB | ~880 MB | Strong multilingual retrieval at near-MiniLM query speed; 8192-token context; no task prefixes |
 | `embeddinggemma` | 768 | 100+ | ~160–225 ms | ~330 MB | ~1.2 GB | EmbeddingGemma-300m — best retrieval quality, 2048-token context; weights under the [Gemma Terms of Use](https://ai.google.dev/gemma/terms) |
 
@@ -176,7 +177,8 @@ RAM figures are steady-state container usage measured on the same production dep
 
 The models were compared on the same real-world corpus (~90 items of technical notes and documents) on a modest x86 server, measuring end-to-end MCP search latency and ranking quality on probe queries:
 
-- **`minilm` — English content, smallest image.** Semantic search completes in ~30 ms end to end. On English technical content it ranked the correct result first with solid margins in every probe. Its limits: English only, and as a symmetric 2021-era model it is the weakest of the three at paraphrase-style queries where the query shares no vocabulary with the stored text.
+- **`minilm` — English content, smallest image.** Semantic search completes in ~30 ms end to end. On English technical content it ranked the correct result first with solid margins in every probe. Its limits: English only, and as a symmetric 2021-era model it is the weakest of the four at paraphrase-style queries where the query shares no vocabulary with the stored text.
+- **`amaretto-embed-148m` — near-EmbeddingGemma quality on a smaller budget.** A vocabulary-sliced distillation of EmbeddingGemma (262k → 60.5k token vocabulary, 148M encoder parameters) that retains ~99.5% of the teacher's retrieval nDCG@10 while using roughly 40% of its RAM and about half its query latency. It takes the same task prefixes as EmbeddingGemma and, having been distilled to preserve the teacher's vector space, ranks much like it: on technical content probes it put the correct chunk first with clear margins, and Italian queries retrieved English content at least as well as the English equivalents did. Two limits worth knowing: coverage is 8 Latin-script languages plus code — non-Latin scripts fall back to byte-level tokens and degrade badly — and on generic, low-jargon queries its score range compresses, so rank order among near-ties is less dependable than EmbeddingGemma's.
 - **`gte-multilingual-base` — multilingual content without the latency cost.** Queries embed in ~12 ms — as fast as MiniLM — because most of its parameters sit in the vocabulary matrix, which costs little for short inputs (longer chunks take ~150 ms each at store time). Cross-lingual retrieval is strong: in probes, an Italian query separated the correct English answer from a distractor *better* than the equivalent English query did (0.71 vs 0.32). No task prefixes needed. Its trade-off is image size (~325 MB, Gemma-class). *(`multilingual-e5-small` was evaluated for this slot and dropped: it underperformed MiniLM on English content and its compressed score range made rankings unreliable.)*
 - **`embeddinggemma` — best retrieval quality, paraphrase-robust.** The quality winner: it separates relevant from irrelevant results by an order of magnitude larger margins and reliably resolves zero-word-overlap queries ("how do I get back into my account?" → password-reset content) that smaller models rank flat or miss. The cost is CPU time: ~200 ms per query embedding (imperceptible in agent workflows) and ~0.5–1 s per chunk when storing large documents — a 20-chunk document takes ~10–20 s to store. Pick it unless storage throughput or very weak hardware is a concern.
 
