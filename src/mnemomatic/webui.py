@@ -306,6 +306,17 @@ def build_routes(db_getter, token: str, settings_info=None, make_export=None) ->
                 "and re-embed all content.</div>"
             )
 
+        model_cfg, model_db = info.get("model"), info.get("model_database")
+        if model_cfg and model_db and model_cfg != model_db:
+            alert += (
+                '<div class="alert alert-warning">The vector index was built by '
+                f"<strong>{_esc(model_db)}</strong> but the server is configured for "
+                f"<strong>{_esc(model_cfg)}</strong>. Queries embedded by one model and "
+                "searched against another model's vectors return wrong results with no "
+                "error — restart once with <code>MNEMOMATIC_REINDEX=1</code> to rebuild "
+                "the index and re-embed all content.</div>"
+            )
+
         model_html = val("model")
         if info.get("model") and info.get("model_url"):
             model_html = (
@@ -317,6 +328,7 @@ def build_routes(db_getter, token: str, settings_info=None, make_export=None) ->
             ("Model", model_html),
             ("Embedding dimension", val("dim_configured")),
             ("Index built at dimension", val("dim_database")),
+            ("Index built by model", val("model_database")),
         ]
         if info.get("endpoint_url"):
             embed_rows += [

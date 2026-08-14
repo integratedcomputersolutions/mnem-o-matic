@@ -111,11 +111,11 @@ class TestDimChangeDeferral(unittest.TestCase):
 
     def test_mismatch_with_flag_defers_to_reindex(self):
         with patch.object(mnemomatic.db, "EMBEDDING_DIM", 8):
-            db = Database(self.path, allow_dim_change=True)
+            db = Database(self.path, allow_reindex=True)
             try:
-                self.assertTrue(db.dim_change_pending)
+                self.assertTrue(db.reindex_pending)
                 db.rebuild_vec_tables()
-                self.assertFalse(db.dim_change_pending)
+                self.assertFalse(db.reindex_pending)
                 conn = db._get_conn()
                 meta = conn.execute("SELECT value FROM schema_meta WHERE key='embed_dim'").fetchone()
                 self.assertEqual(int(meta["value"]), 8)
@@ -186,7 +186,7 @@ class TestRunReindex(unittest.TestCase):
         small_embedder = FakeEmbedder(dim=8)
         with patch.object(mnemomatic.db, "EMBEDDING_DIM", 8), \
              patch.object(server, "_embedder", return_value=small_embedder):
-            self.db.dim_change_pending = True
+            self.db.reindex_pending = True
             server._run_reindex()
             emb = small_embedder.embed("s: f")
             results = self.db.search_vec(emb, table="knowledge", namespace="other")
@@ -199,7 +199,7 @@ class TestRunReindex(unittest.TestCase):
         self.assertEqual(self._vec_count("vec_documents"), 0)
 
     def test_reindex_no_embedder_with_dim_change_is_fatal(self):
-        self.db.dim_change_pending = True
+        self.db.reindex_pending = True
         with patch.object(server, "_embedder", return_value=None):
             with self.assertRaises(RuntimeError):
                 server._run_reindex()
