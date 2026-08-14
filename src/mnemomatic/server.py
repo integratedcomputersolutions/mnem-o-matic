@@ -1,20 +1,16 @@
 import json
 import logging
-import os
-import re
 import sqlite3
-import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from importlib.metadata import PackageNotFoundError, version
 
 import uvicorn
-from mcp.server.fastmcp import FastMCP
 from pydantic import ValidationError
 
 from mnemomatic import config
-from mnemomatic.audit import RequestMetaMiddleware, request_meta
+from mnemomatic.audit import RequestMetaMiddleware
 from mnemomatic.auth import BearerAuthMiddleware
 from mnemomatic.compact import CompactToolsMiddleware
 from mnemomatic.db import (
@@ -23,246 +19,26 @@ from mnemomatic.db import (
     CHUNK_THRESHOLD,
     EMBEDDING_DIM,
     Database,
-    _chunk_text,
     _SPEC_BY_ITEM_TYPE,
     _SPECS,
 )
 from mnemomatic.models import Document, Knowledge, Note
-
-logger = logging.getLogger("mnemomatic")
-
-
-mcp = FastMCP(
-    "Mnem-O-matic",
-    json_response=True,
-    host=config.HOST,
-    port=config.PORT,
+from mnemomatic import runtime
+from mnemomatic.runtime import (
+    _audit,
+    _embed_content,
+    _embed_document_body,
+    _embed_query,
+    _escape_fts_query,
+    _format_validation_error,
+    _knowledge_embed_text,
+    _note_embed_text,
+    _record_access,
+    _similar_items,
+    mcp,
 )
 
-db: Database | None = None
-_db_lock = threading.Lock()
-
-_embedder_instance = None   # None means "no embedder available"
-_embedder_initialized = False
-_embedder_lock = threading.Lock()
-
-
-def _db() -> Database:
-    global db
-    if db is None:
-        with _db_lock:
-            # Double-check pattern: verify again inside lock
-            if db is None:
-                os.makedirs(os.path.dirname(config.DB_PATH) or ".", exist_ok=True)
-                db = Database(
-                    config.DB_PATH, allow_reindex=config.REINDEX, embed_identity=config.embed_identity()
-                )
-    return db
-
-
-def _resolve_embedder():
-    """Initialize and return the appropriate embedder, or None for FTS-only mode."""
-    if config.EMBED_URL:
-        try:
-            from mnemomatic.embeddings import HttpEmbedder
-            embedder = HttpEmbedder(config.EMBED_URL, config.EMBED_MODEL)
-            logger.info("Embedder: %s endpoint %s (model=%r)", embedder.mode, config.EMBED_URL, config.EMBED_MODEL)
-            _validate_embedding_dimension(embedder)
-            return embedder
-        except ValueError as e:
-            logger.error("Invalid embedder configuration: %s", e)
-        except Exception as e:
-            logger.error("Failed to initialize HTTP embedder: %s: %s", type(e).__name__, e)
-        return None
-
-    model_path = os.environ.get("MNEMOMATIC_MODEL_PATH", "/app/model/model.onnx")
-    if os.path.exists(model_path):
-        try:
-            from mnemomatic.embeddings import OnnxEmbedder
-            embedder = OnnxEmbedder()
-            logger.info("Embedder: %s (%s)", embedder.mode, model_path)
-            _validate_embedding_dimension(embedder)
-            return embedder
-        except ImportError:
-            logger.warning("onnxruntime not installed — starting in FTS-only mode")
-        except (FileNotFoundError, RuntimeError) as e:
-            logger.error("Failed to load embedding model: %s", e)
-        except Exception as e:
-            logger.error("Unexpected error initializing embedder: %s: %s", type(e).__name__, e)
-    else:
-        logger.warning("No embedding model found at %s — starting in FTS-only mode", model_path)
-    return None
-
-
-def _embedder():
-    global _embedder_instance, _embedder_initialized
-    if _embedder_initialized:
-        return _embedder_instance
-    with _embedder_lock:
-        if _embedder_initialized:
-            return _embedder_instance
-        _embedder_instance = _resolve_embedder()
-        _embedder_initialized = True
-    return _embedder_instance
-
-
-def _format_validation_error(e: ValidationError) -> str:
-    """Format Pydantic ValidationError into a user-friendly message."""
-    errors = []
-    for error in e.errors():
-        field = ".".join(str(x) for x in error["loc"])
-        msg = error["msg"]
-        errors.append(f"{field}: {msg}")
-    return "; ".join(errors)
-
-
-def _validate_embedding_dimension(embedder) -> None:
-    """Validate that configured embedding dimension matches actual embeddings.
-
-    Computes a test embedding and checks its length matches MNEMOMATIC_EMBED_DIM.
-    Logs a warning if there's a mismatch (could cause silent data corruption).
-    """
-    from mnemomatic.db import EMBEDDING_DIM
-    try:
-        test_embedding = embedder.embed("test")
-        actual_dim = len(test_embedding)
-        if actual_dim != EMBEDDING_DIM:
-            logger.warning(
-                "Embedding dimension mismatch: configured=%d, actual=%d. "
-                "Set MNEMOMATIC_EMBED_DIM=%d to match your embedder.",
-                EMBEDDING_DIM, actual_dim, actual_dim
-            )
-    except Exception as e:
-        logger.debug("Could not validate embedding dimension: %s", e)
-
-
-def _escape_fts_query(query: str) -> str:
-    """Escape special characters in FTS5 queries.
-
-    FTS5 gives punctuation syntactic meaning — AND/OR/NOT/NEAR operators,
-    ``()`` grouping, ``*`` prefix match, ``-`` and ``:`` column filters,
-    ``^`` initial-token match, ``"`` phrases — and anything else it can't
-    tokenize is a syntax error (e.g. a trailing ``?``). So instead of
-    blacklisting known operators, allow a query through bare only when it is
-    entirely plain words; everything else is quoted into a literal phrase.
-
-    Examples:
-        "import AND" → '"import AND"'
-        "std::vector" → '"std::vector"'
-        "remains open?" → '"remains open?"'
-    """
-    is_bare_words = bool(re.fullmatch(r"[\w\s]+", query))
-    has_operators = bool(re.search(r"\b(AND|OR|NOT|NEAR)\b", query, re.IGNORECASE))
-
-    if is_bare_words and not has_operators:
-        return query
-    # Quote the entire query to make it a phrase search. This treats the whole
-    # query as a literal phrase, preventing operator interpretation.
-    escaped = query.replace('"', '""')
-    return f'"{escaped}"'
-
-
-def _safe_embed(text: str) -> list[float] | None:
-    """Safely compute embedding for text, returning None if embedding fails.
-
-    Falls back to FTS-only search if embedder is unavailable or fails.
-    Logs errors for debugging.
-    """
-    emb = _embedder()
-    if emb is None:
-        return None
-
-    try:
-        return emb.embed(text)
-    except RuntimeError as e:
-        logger.error("Embedding failed (will use FTS-only search): %s", e)
-        return None
-    except Exception as e:
-        logger.error("Unexpected error during embedding: %s: %s", type(e).__name__, e)
-        return None
-
-
-def _safe_embed_batch(texts: list[str]) -> list[list[float] | None]:
-    """Embed many texts at once, one None per failed item.
-
-    Uses the embedder's embed_batch (single padded inference for ONNX,
-    concurrent requests for HTTP) and falls back to sequential _safe_embed
-    for embedders that don't provide one.
-    """
-    emb = _embedder()
-    if emb is None or not texts:
-        return [None] * len(texts)
-    batch = getattr(emb, "embed_batch", None)
-    if batch is None:
-        return [_safe_embed(t) for t in texts]
-    try:
-        return batch(texts)
-    except Exception as e:
-        logger.error("Batch embedding failed: %s: %s", type(e).__name__, e)
-        return [None] * len(texts)
-
-
-def _embed_query(text: str) -> list[float] | None:
-    """Embedding for a search query, with the configured query prefix applied."""
-    return _safe_embed(config.EMBED_QUERY_PREFIX + text)
-
-
-def _embed_content(text: str) -> list[float] | None:
-    """Embedding for stored content, with the configured document prefix applied."""
-    return _safe_embed(config.EMBED_DOC_PREFIX + text)
-
-
-def _similar_items(table: str, item_id: str, namespace: str,
-                   embedding: list[float] | None) -> list[dict]:
-    """Near-duplicates of a just-stored item, for the agent mid-write to judge.
-
-    The server only flags — merging, superseding, or ignoring is the caller's
-    decision. Empty when there is nothing above config.SIMILAR_THRESHOLD, no
-    embedding (FTS-only mode, chunked documents), or the check is disabled.
-    Never breaks the store that triggered it.
-    """
-    if embedding is None or config.SIMILAR_THRESHOLD <= 0:
-        return []
-    try:
-        results = _db().search_vec(embedding, table=table, namespace=namespace,
-                                   limit=config.SIMILAR_LIMIT + 1)
-    except Exception as e:
-        logger.warning("Similar-item check failed: %s: %s", type(e).__name__, e)
-        return []
-    return [
-        {"id": r.id, "title": r.title, "score": round(r.score, 3)}
-        for r in results if r.id != item_id and r.score >= config.SIMILAR_THRESHOLD
-    ][:config.SIMILAR_LIMIT]
-
-
-def _knowledge_embed_text(subject: str, fact: str) -> str:
-    """Text embedded for a knowledge entry. Shared by store and update so they never drift."""
-    return f"{subject}: {fact}"
-
-
-def _note_embed_text(title: str, content: str) -> str:
-    """Text embedded for a note. Shared by store and update so they never drift."""
-    return f"{title}\n{content}"
-
-
-def _embed_document_body(title: str, content: str) -> tuple[list[float] | None, list[tuple[str, list[float]]] | None]:
-    """Compute the search representation for a document body.
-
-    Documents at or above CHUNK_THRESHOLD are split into overlapping chunks, each
-    embedded independently, so search can surface the most relevant passage. Smaller
-    documents get a single whole-document embedding of "{title}\n{content}".
-
-    Returns (embedding, chunks): exactly one is non-None. Chunks with failed
-    embeddings are dropped; if none survive, chunks is None.
-    """
-    if len(content) >= CHUNK_THRESHOLD:
-        texts = _chunk_text(content, CHUNK_SIZE, CHUNK_OVERLAP)
-        # The document prefix is applied for embedding only; stored chunk
-        # content stays raw so snippets never leak the prefix.
-        embeddings = _safe_embed_batch([config.EMBED_DOC_PREFIX + t for t in texts])
-        chunks = [(c, e) for c, e in zip(texts, embeddings) if e is not None]
-        return None, (chunks or None)
-    return _embed_content(f"{title}\n{content}"), None
+logger = logging.getLogger("mnemomatic")
 
 
 def _run_reindex() -> None:
@@ -274,8 +50,8 @@ def _run_reindex() -> None:
     included); only vectors and document chunks are recomputed. Items whose
     embedding fails are logged and left FTS-only.
     """
-    database = _db()
-    if _embedder() is None:
+    database = runtime._db()
+    if runtime._embedder() is None:
         if database.reindex_pending:
             # Never drop vectors that cannot be rebuilt: the rebuild empties the
             # index first, so without an embedder this would leave the store with
@@ -395,7 +171,7 @@ def store_document(
 
     embedding, chunks = _embed_document_body(title, content)
 
-    stored, created = _db().store_document(doc, embedding, chunks)
+    stored, created = runtime._db().store_document(doc, embedding, chunks)
     response = {"id": stored.id, "namespace": stored.namespace, "title": stored.title, "created": created}
     similar = _similar_items("documents", stored.id, namespace, embedding)
     if similar:
@@ -461,7 +237,7 @@ def store_knowledge(
         return {"error": "Invalid knowledge entry", "details": _format_validation_error(e)}
 
     embedding = _embed_content(_knowledge_embed_text(subject, fact))
-    stored, created, superseded = _db().store_knowledge(k, embedding)
+    stored, created, superseded = runtime._db().store_knowledge(k, embedding)
     response = {"id": stored.id, "namespace": stored.namespace, "subject": stored.subject, "created": created}
     if superseded:
         response["superseded"] = superseded
@@ -487,7 +263,7 @@ def _document_update_embedding(id: str, existing: Document, fields: dict) -> lis
     if "content" in fields:
         new_title = fields.get("title", existing.title)
         embedding, chunks = _embed_document_body(new_title, fields["content"])
-        _db().replace_document_chunks(id, chunks)
+        runtime._db().replace_document_chunks(id, chunks)
         return embedding
     if "title" in fields and len(existing.content) < CHUNK_THRESHOLD:
         embedding, _ = _embed_document_body(fields["title"], existing.content)
@@ -559,7 +335,7 @@ def _handle_update(item_type: str, id: str, fields: dict) -> dict:
     a successor) instead of overwriting.
     """
     ops, spec = _OPS[item_type], _SPEC_BY_ITEM_TYPE[item_type]
-    db = _db()
+    db = runtime._db()
     existing = ops.get(db, id)
     if existing is None:
         return {"error": f"{item_type.capitalize()} {id} not found"}
@@ -593,7 +369,7 @@ def _handle_delete(item_type: str, id: str) -> dict:
     namespace and title it had — the row is gone by the time the event is
     written. A delete that removed nothing is not an event.
     """
-    db = _db()
+    db = runtime._db()
     existing = _OPS[item_type].get(db, id)
     deleted = _OPS[item_type].delete(db, id)
     if deleted:
@@ -613,7 +389,7 @@ def _supersede_update(existing: Knowledge, fields: dict) -> dict:
     successor = Knowledge(**data)  # fresh id and timestamps; merged fields pre-validated
     embedding = _embed_content(_knowledge_embed_text(successor.subject, successor.fact))
     try:
-        stored = _db().supersede_knowledge(existing.id, successor, embedding)
+        stored = runtime._db().supersede_knowledge(existing.id, successor, embedding)
     except sqlite3.IntegrityError:
         return {"error": "Subject conflict",
                 "details": f"Another current fact already holds subject {successor.subject!r} "
@@ -765,7 +541,7 @@ def store_note(
         return {"error": "Invalid note", "details": _format_validation_error(e)}
 
     embedding = _embed_content(_note_embed_text(title, content))
-    stored, created = _db().store_note(note, embedding)
+    stored, created = runtime._db().store_note(note, embedding)
     response = {"id": stored.id, "namespace": stored.namespace, "title": stored.title, "created": created}
     similar = _similar_items("notes", stored.id, namespace, embedding)
     if similar:
@@ -839,7 +615,7 @@ def tag(
         remove_tags: Tags to remove. Tags not present are ignored (no error).
     """
     try:
-        tags = _db().update_tags(item_id, item_type, add_tags=add_tags, remove_tags=remove_tags)
+        tags = runtime._db().update_tags(item_id, item_type, add_tags=add_tags, remove_tags=remove_tags)
         _audit("tag", item_type=item_type, item_id=item_id,
                added=add_tags or [], removed=remove_tags or [])
         return {"id": item_id, "tags": tags}
@@ -910,7 +686,7 @@ def search(
     fts_query = _escape_fts_query(query)
 
     table = content_type
-    emb = _embedder()
+    emb = runtime._embedder()
     degraded = False
 
     if mode == "semantic" and emb is None:
@@ -920,23 +696,23 @@ def search(
     try:
         # hybrid silently degrades to fulltext when no embedder is available
         if mode == "fulltext" or (mode == "hybrid" and emb is None):
-            results = _db().search_fts(fts_query, table=table, namespace=namespace, limit=limit, **filters)
+            results = runtime._db().search_fts(fts_query, table=table, namespace=namespace, limit=limit, **filters)
             if mode == "hybrid" and emb is None:
                 degraded = True
         elif mode == "semantic":
             embedding = _embed_query(query)
             if embedding is None:
                 return [{"error": "Semantic search failed", "details": "Embedding service is unavailable. Try fulltext mode."}]
-            results = _db().search_vec(embedding, table=table, namespace=namespace, limit=limit, **filters)
+            results = runtime._db().search_vec(embedding, table=table, namespace=namespace, limit=limit, **filters)
         else:  # hybrid with embedder
             embedding = _embed_query(query)
             # If embedding fails, degrade to fulltext search
             if embedding is None:
                 logger.info("Hybrid search degrading to fulltext due to embedding failure")
-                results = _db().search_fts(fts_query, table=table, namespace=namespace, limit=limit, **filters)
+                results = runtime._db().search_fts(fts_query, table=table, namespace=namespace, limit=limit, **filters)
                 degraded = True
             else:
-                results = _db().search_hybrid(fts_query, embedding, table=table, namespace=namespace, limit=limit, **filters)
+                results = runtime._db().search_hybrid(fts_query, embedding, table=table, namespace=namespace, limit=limit, **filters)
     except sqlite3.Error as e:
         # Escaping should keep FTS5 syntax errors out, but any residual DB
         # error must come back as a tool-level error, not a protocol failure.
@@ -959,34 +735,9 @@ def search(
     return response
 
 
-def _record_access(refs: list[tuple[str, str]]) -> None:
-    """Usage bookkeeping for items surfaced to a client — never breaks the request."""
-    try:
-        _db().record_access(refs)
-    except Exception as e:
-        logger.warning("Recording item access failed: %s: %s", type(e).__name__, e)
-
-
-def _audit(op: str, *, item_type: str | None = None, item_id: str | None = None,
-           namespace: str | None = None, title: str | None = None, **detail) -> None:
-    """Append an audit event, enriched with the request's identity fields.
-
-    Called from the write tools' success paths only; a failing audit write is
-    logged and never breaks the operation it describes.
-    """
-    try:
-        meta = request_meta()
-        _db().append_audit(op, item_type=item_type, item_id=item_id,
-                           namespace=namespace, title=title,
-                           actor=meta["actor"], client=meta["client"], ip=meta["ip"],
-                           detail=detail or None)
-    except Exception as e:
-        logger.warning("Audit write failed: %s: %s", type(e).__name__, e)
-
-
 def _get_resource(item_type: str, id: str) -> str:
     """Shared body for the get_* MCP resources: fetch by id, return JSON or a not-found error."""
-    obj = _OPS[item_type].get(_db(), id)
+    obj = _OPS[item_type].get(runtime._db(), id)
     if obj is None:
         return json.dumps({"error": f"{item_type.capitalize()} {id} not found"})
     _record_access([(item_type, id)])
@@ -1016,7 +767,7 @@ def list_items(item_type: str, namespace: str, limit: int = 50, offset: int = 0)
     try:
         limit = max(1, min(int(limit), config.MAX_LIST_LIMIT))
         offset = max(0, int(offset))
-        items, total = _db().list_page(item_type, namespace, limit, offset)
+        items, total = runtime._db().list_page(item_type, namespace, limit, offset)
     except ValueError as e:
         return {"error": str(e)}
     return {
@@ -1043,7 +794,7 @@ def read(item_type: str, id: str) -> dict:
     ops = _OPS.get(item_type)
     if ops is None:
         return {"error": "Invalid item_type", "details": f"Must be one of: {', '.join(sorted(_OPS))}"}
-    item = ops.get(_db(), id)
+    item = ops.get(runtime._db(), id)
     if item is None:
         return {"error": f"{item_type} not found", "id": id}
     _record_access([(item_type, id)])
@@ -1073,16 +824,16 @@ def related(item_type: str, id: str, namespace: str | None = None, limit: int = 
         return {"error": "Invalid item_type", "details": f"Must be one of: {', '.join(sorted(_OPS))}"}
     limit = max(1, min(int(limit), config.MAX_SEARCH_LIMIT))
 
-    if _OPS[item_type].get(_db(), id) is None:
+    if _OPS[item_type].get(runtime._db(), id) is None:
         return {"error": f"{item_type} not found", "id": id}
-    embedding = _db().item_embedding(item_type, id)
+    embedding = runtime._db().item_embedding(item_type, id)
     if embedding is None:
         return {"error": "No embedding for this item",
                 "details": "The item has no stored vector (FTS-only mode, or stored before "
                            "an embedder was configured — a MNEMOMATIC_REINDEX=1 restart embeds it)."}
 
     try:
-        results = _db().search_vec(embedding, table="all", namespace=namespace, limit=limit + 1)
+        results = runtime._db().search_vec(embedding, table="all", namespace=namespace, limit=limit + 1)
     except sqlite3.Error as e:
         logger.warning("Related-items search failed for %s %s: %s", item_type, id, e)
         return {"error": "Related search failed", "details": str(e)}
@@ -1110,7 +861,7 @@ def fact_history(namespace: str, subject: str) -> dict:
         namespace: The fact's namespace.
         subject: The fact's subject (the deduplication key).
     """
-    history = _db().knowledge_history(namespace, subject)
+    history = runtime._db().knowledge_history(namespace, subject)
     _record_access([("knowledge", k.id) for k in history])
     return {
         "namespace": namespace,
@@ -1148,7 +899,7 @@ def list_revisions(
     if item_type is not None and item_type not in _OPS:
         return {"error": "Invalid item_type", "details": f"Must be one of: {', '.join(sorted(_OPS))}"}
     limit = max(1, min(int(limit), config.MAX_LIST_LIMIT))
-    revisions = _db().list_revisions(item_type=item_type, item_id=item_id,
+    revisions = runtime._db().list_revisions(item_type=item_type, item_id=item_id,
                                      namespace=namespace, limit=limit)
     return {"revisions": revisions, "limit": limit}
 
@@ -1185,7 +936,7 @@ def list_audit(
     if item_type is not None and item_type not in _OPS:
         return {"error": "Invalid item_type", "details": f"Must be one of: {', '.join(sorted(_OPS))}"}
     limit = max(1, min(int(limit), config.MAX_LIST_LIMIT))
-    events = _db().list_audit(item_type=item_type, item_id=item_id,
+    events = runtime._db().list_audit(item_type=item_type, item_id=item_id,
                               namespace=namespace, op=op, limit=limit)
     return {"events": events, "limit": limit}
 
@@ -1206,7 +957,7 @@ def restore(revision_id: int) -> dict:
         revision_id: The revision to restore, from list_revisions.
     """
     try:
-        rev = _db().get_revision(revision_id)
+        rev = runtime._db().get_revision(revision_id)
     except ValidationError as e:
         return {"error": "Revision payload no longer validates", "details": _format_validation_error(e)}
     if rev is None:
@@ -1215,7 +966,7 @@ def restore(revision_id: int) -> dict:
     item_type, item = rev["item_type"], rev["item"]
     key = _SPEC_BY_ITEM_TYPE[item_type].title_field
 
-    if _OPS[item_type].get(_db(), rev["item_id"]) is not None:
+    if _OPS[item_type].get(runtime._db(), rev["item_id"]) is not None:
         # Roll the live item back through the normal update path — it captures
         # the current state as a revision and re-embeds what changed.
         fields = {f: getattr(item, f) for f in _SPEC_BY_ITEM_TYPE[item_type].update_fields}
@@ -1232,7 +983,7 @@ def restore(revision_id: int) -> dict:
         return {"error": "Cannot restore a superseded fact",
                 "details": "This revision is of a history entry; restore or re-store "
                            "the current fact for the subject instead."}
-    occupant = _db().find_by_key(item_type, item.namespace, getattr(item, key))
+    occupant = runtime._db().find_by_key(item_type, item.namespace, getattr(item, key))
     if occupant is not None:
         return {"error": "Cannot restore: key is taken",
                 "details": f"{item_type} {occupant} now occupies "
@@ -1241,11 +992,11 @@ def restore(revision_id: int) -> dict:
     item = item.model_copy(update={"updated_at": datetime.now(timezone.utc)})
     if item_type == "document":
         embedding, chunks = _embed_document_body(item.title, item.content)
-        stored, _ = _db().store_document(item, embedding, chunks)
+        stored, _ = runtime._db().store_document(item, embedding, chunks)
     elif item_type == "knowledge":
-        stored, _, _ = _db().store_knowledge(item, _embed_content(_knowledge_embed_text(item.subject, item.fact)))
+        stored, _, _ = runtime._db().store_knowledge(item, _embed_content(_knowledge_embed_text(item.subject, item.fact)))
     else:
-        stored, _ = _db().store_note(item, _embed_content(_note_embed_text(item.title, item.content)))
+        stored, _ = runtime._db().store_note(item, _embed_content(_note_embed_text(item.title, item.content)))
     _audit("restore", item_type=item_type, item_id=stored.id, namespace=stored.namespace,
            title=getattr(stored, key), revision_id=revision_id, recreated=True)
     return {"id": stored.id, key: getattr(stored, key), "namespace": stored.namespace,
@@ -1320,12 +1071,12 @@ def consolidation_report(namespace: str, similarity_threshold: float | None = No
 
     clusters = []
     for table, spec in _SPECS.items():
-        vectors = _db().item_vectors(table, namespace)
+        vectors = runtime._db().item_vectors(table, namespace)
         clusters.extend(_duplicate_clusters(spec.item_type, vectors, threshold))
     clusters.sort(key=lambda c: c["similarity"], reverse=True)
 
     cutoff = (datetime.now(timezone.utc) - timedelta(days=max(0, int(stale_days)))).isoformat()
-    stale = _db().stale_items(namespace, cutoff)
+    stale = runtime._db().stale_items(namespace, cutoff)
 
     return {
         "namespace": namespace,
@@ -1333,7 +1084,7 @@ def consolidation_report(namespace: str, similarity_threshold: float | None = No
         "stale_days": stale_days,
         "duplicate_clusters": clusters,
         "stale": stale,
-        "counts": _db().namespace_counts().get(namespace, {}),
+        "counts": runtime._db().namespace_counts().get(namespace, {}),
     }
 
 
@@ -1402,7 +1153,7 @@ confidence and freshness).
 @mcp.resource("mnemomatic://health")
 def health() -> str:
     """Health check endpoint. Returns server status and configuration."""
-    embedder = _embedder()
+    embedder = runtime._embedder()
     embedding_mode = embedder.mode if embedder is not None else "FTS-only (no embedder)"
 
     return json.dumps({
@@ -1426,7 +1177,7 @@ def _make_export(namespace: str | None) -> tuple[bytes, str]:
     """Build the export archive; shared by /export and the web viewer."""
     from mnemomatic.export import build_export_zip
 
-    return build_export_zip(_db(), namespace, server_version=_server_version())
+    return build_export_zip(runtime._db(), namespace, server_version=_server_version())
 
 
 async def _export_route(request):
@@ -1434,7 +1185,7 @@ async def _export_route(request):
     from starlette.responses import JSONResponse, Response
 
     namespace = request.query_params.get("namespace") or None
-    if namespace and namespace not in _db().list_namespaces():
+    if namespace and namespace not in runtime._db().list_namespaces():
         return JSONResponse(
             {"error": "Namespace not found", "details": f"No items in namespace {namespace!r}"},
             status_code=404,
@@ -1468,7 +1219,7 @@ def _settings_info() -> dict:
     from mnemomatic import db as db_module
     from mnemomatic.embeddings import EMBED_API, MODEL_MAX_TOKENS
 
-    embedder = _embedder()
+    embedder = runtime._embedder()
     model_name = config.embed_identity()["embed_model"] or None
     info = {
         "version": _server_version(),
@@ -1476,8 +1227,8 @@ def _settings_info() -> dict:
         "model": model_name,
         "model_url": _HF_MODEL_PAGES.get(model_name),
         "dim_configured": db_module.EMBEDDING_DIM,
-        "dim_database": _db().stored_embed_dim(),
-        "model_database": _db().stored_embed_identity().get("embed_model") or None,
+        "dim_database": runtime._db().stored_embed_dim(),
+        "model_database": runtime._db().stored_embed_identity().get("embed_model") or None,
         "query_prefix": config.EMBED_QUERY_PREFIX,
         "doc_prefix": config.EMBED_DOC_PREFIX,
         "chunk_threshold": CHUNK_THRESHOLD,
@@ -1505,7 +1256,7 @@ def delete_namespace(namespace: str) -> dict:
     Args:
         namespace: The namespace to delete.
     """
-    counts = _db().delete_namespace(namespace)
+    counts = runtime._db().delete_namespace(namespace)
     _audit("delete_namespace", namespace=namespace, deleted=sum(counts.values()))
     return {
         "namespace": namespace,
@@ -1529,7 +1280,7 @@ def rename_namespace(old_namespace: str, new_namespace: str) -> dict:
         new_namespace: The new name for the namespace. Must differ from old_namespace.
     """
     try:
-        counts, replaced = _db().rename_namespace(old_namespace, new_namespace)
+        counts, replaced = runtime._db().rename_namespace(old_namespace, new_namespace)
     except ValueError as e:
         return {"error": str(e)}
     _audit("rename_namespace", namespace=old_namespace, new_namespace=new_namespace,
@@ -1546,7 +1297,7 @@ def rename_namespace(old_namespace: str, new_namespace: str) -> dict:
 @mcp.resource("mnemomatic://namespaces")
 def list_namespaces() -> str:
     """List all namespaces in Mnem-O-matic."""
-    namespaces = _db().list_namespaces()
+    namespaces = runtime._db().list_namespaces()
     return json.dumps(namespaces)
 
 
@@ -1559,7 +1310,7 @@ def _list_resource(item_type: str, namespace: str) -> str:
     """Shared body for the per-namespace list resources: summaries only, with
     the projection taken from the table spec so it tracks the schema."""
     fields = _SPEC_BY_ITEM_TYPE[item_type].resource_fields
-    items = _OPS[item_type].list(_db(), namespace)
+    items = _OPS[item_type].list(runtime._db(), namespace)
     return json.dumps([
         {f: _json_scalar(getattr(item, f)) for f in fields} for item in items
     ])
@@ -1609,15 +1360,15 @@ def main():
 
     # Pre-warm db and resolve embedder so the first request doesn't pay setup costs
     logger.info("Initializing database...")
-    _db()
+    runtime._db()
     logger.info("Initializing embedder...")
-    _embedder()
+    runtime._embedder()
 
     # Opt-in full re-embed (model/dim/prefix changes) before serving traffic.
     # Under "auto" the database has already compared the recorded embedding
     # identity against the configured one, so reindex_pending is the whole
     # question: nothing changed, nothing to do.
-    if config.REINDEX_MODE == "force" or (config.REINDEX_MODE == "auto" and _db().reindex_pending):
+    if config.REINDEX_MODE == "force" or (config.REINDEX_MODE == "auto" and runtime._db().reindex_pending):
         _run_reindex()
     elif config.REINDEX_MODE == "auto":
         logger.info("Embedder matches the stored index — no reindex needed")
@@ -1628,7 +1379,7 @@ def main():
         from pathlib import Path
 
         from mnemomatic.backup import start_backup_thread
-        start_backup_thread(_db, Path(config.BACKUP_DIR), interval_hours=config.BACKUP_INTERVAL_HOURS,
+        start_backup_thread(runtime._db, Path(config.BACKUP_DIR), interval_hours=config.BACKUP_INTERVAL_HOURS,
                             keep=config.BACKUP_KEEP, server_version=_server_version())
         logger.info("Scheduled backups: every %gh to %s (keeping %d)",
                     config.BACKUP_INTERVAL_HOURS, config.BACKUP_DIR, config.BACKUP_KEEP)
@@ -1647,7 +1398,7 @@ def main():
     # Disabled unless MNEMOMATIC_UI_TOKEN is set, so it never exposes data by default.
     if config.UI_TOKEN:
         from mnemomatic.webui import register_webui
-        register_webui(app, _db, config.UI_TOKEN, settings_info=_settings_info, make_export=_make_export)
+        register_webui(app, runtime._db, config.UI_TOKEN, settings_info=_settings_info, make_export=_make_export)
         logger.info("Web viewer enabled at /ui")
     else:
         logger.info("Web viewer disabled (set MNEMOMATIC_UI_TOKEN to enable)")

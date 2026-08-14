@@ -14,6 +14,7 @@ from unittest.mock import patch
 import mnemomatic.server as server
 from mnemomatic.audit import RequestMetaMiddleware, request_meta
 from mnemomatic.db import Database
+from mnemomatic import runtime
 
 
 class TestMigrationV4(unittest.TestCase):
@@ -91,8 +92,8 @@ class ToolTestCase(unittest.TestCase):
     def setUp(self):
         self.db = Database(":memory:")
         self._patches = [
-            patch.object(server, "_db", return_value=self.db),
-            patch.object(server, "_embedder", return_value=None),
+            patch.object(runtime, "_db", return_value=self.db),
+            patch.object(runtime, "_embedder", return_value=None),
         ]
         for p in self._patches:
             p.start()

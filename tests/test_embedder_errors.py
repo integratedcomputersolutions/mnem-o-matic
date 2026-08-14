@@ -17,6 +17,7 @@ import socket
 
 # Add src to path for imports
 
+from mnemomatic import runtime
 from mnemomatic.embeddings import HttpEmbedder
 
 
@@ -201,60 +202,56 @@ class TestEmbedderFallback(unittest.TestCase):
 
     def test_missing_model_file_gives_none(self):
         """_embedder() returns None if model file is missing."""
-        from mnemomatic import server
 
         # Reset the cached embedder
-        server._embedder_initialized = False
+        runtime._embedder_initialized = False
 
         # Patch os.path.exists to simulate missing model file
         with patch("os.path.exists", return_value=False):
-            result = server._embedder()
+            result = runtime._embedder()
 
         self.assertIsNone(result)
-        self.assertEqual(server._embedder_instance, None)
+        self.assertEqual(runtime._embedder_instance, None)
 
     def test_onnx_init_failure_gives_none(self):
         """_embedder() returns None if OnnxEmbedder.__init__ fails."""
-        from mnemomatic import server
 
         # Reset the cached embedder
-        server._embedder_initialized = False
+        runtime._embedder_initialized = False
 
         # Patch os.path.exists to simulate model file exists
         # But patch OnnxEmbedder (in embeddings module) to fail during init
         with patch("os.path.exists", return_value=True), \
              patch("mnemomatic.embeddings.OnnxEmbedder", side_effect=RuntimeError("Model load failed")):
-            result = server._embedder()
+            result = runtime._embedder()
 
         self.assertIsNone(result)
-        self.assertEqual(server._embedder_instance, None)
+        self.assertEqual(runtime._embedder_instance, None)
 
     def test_onnx_import_error_gives_none(self):
         """_embedder() returns None if onnxruntime is not installed."""
-        from mnemomatic import server
 
         # Reset the cached embedder
-        server._embedder_initialized = False
+        runtime._embedder_initialized = False
 
         # Patch os.path.exists to simulate model file exists
         # But patch the OnnxEmbedder import to fail
         with patch("os.path.exists", return_value=True):
             with patch("mnemomatic.embeddings.OnnxEmbedder", side_effect=ImportError("No module named 'onnxruntime'")):
-                result = server._embedder()
+                result = runtime._embedder()
 
         self.assertIsNone(result)
-        self.assertEqual(server._embedder_instance, None)
+        self.assertEqual(runtime._embedder_instance, None)
 
     def test_safe_embed_returns_none_when_embedder_is_none(self):
         """_safe_embed(text) returns None when embedder is unavailable."""
-        from mnemomatic import server
 
         # Reset the cached embedder to None (simulating FTS-only mode)
-        server._embedder_initialized = True
-        server._embedder_instance = None
+        runtime._embedder_initialized = True
+        runtime._embedder_instance = None
 
         # Call _safe_embed - it should return None since embedder is None
-        result = server._safe_embed("test text")
+        result = runtime._safe_embed("test text")
         self.assertIsNone(result)
 
 
@@ -387,40 +384,35 @@ class TestOpenAIWireFormat(unittest.TestCase):
 
 
 class TestSafeEmbedBatch(unittest.TestCase):
-    """server._safe_embed_batch dispatch: batch when available, safe fallbacks."""
+    """runtime._safe_embed_batch dispatch: batch when available, safe fallbacks."""
 
     def _with_embedder(self, embedder):
-        from mnemomatic import server
-        return patch.object(server, "_embedder", return_value=embedder)
+        return patch.object(runtime, "_embedder", return_value=embedder)
 
     def test_no_embedder_returns_all_none(self):
-        from mnemomatic import server
         with self._with_embedder(None):
-            self.assertEqual(server._safe_embed_batch(["a", "b"]), [None, None])
+            self.assertEqual(runtime._safe_embed_batch(["a", "b"]), [None, None])
 
     def test_embedder_with_batch_called_once(self):
-        from mnemomatic import server
         embedder = MagicMock()
         embedder.embed_batch.return_value = [[0.1], [0.2]]
         with self._with_embedder(embedder):
-            results = server._safe_embed_batch(["a", "b"])
+            results = runtime._safe_embed_batch(["a", "b"])
         embedder.embed_batch.assert_called_once_with(["a", "b"])
         self.assertEqual(results, [[0.1], [0.2]])
 
     def test_embedder_without_batch_falls_back_to_sequential(self):
-        from mnemomatic import server
         embedder = Mock(spec=["embed"])  # no embed_batch attribute
         embedder.embed.side_effect = lambda t: [float(len(t))]
         with self._with_embedder(embedder):
-            results = server._safe_embed_batch(["a", "bb"])
+            results = runtime._safe_embed_batch(["a", "bb"])
         self.assertEqual(results, [[1.0], [2.0]])
 
     def test_batch_exception_degrades_to_all_none(self):
-        from mnemomatic import server
         embedder = MagicMock()
         embedder.embed_batch.side_effect = RuntimeError("embedder down")
         with self._with_embedder(embedder):
-            self.assertEqual(server._safe_embed_batch(["a", "b"]), [None, None])
+            self.assertEqual(runtime._safe_embed_batch(["a", "b"]), [None, None])
 
     def test_document_body_chunks_embed_as_one_batch(self):
         # A chunked document must produce exactly one embed_batch call, with

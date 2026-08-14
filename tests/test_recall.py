@@ -13,6 +13,7 @@ from unittest.mock import patch
 import mnemomatic.server as server
 from mnemomatic.db import CHUNK_THRESHOLD, Database
 from mnemomatic.models import Document, Knowledge, Note
+from mnemomatic import runtime
 from tests._support import axis, mix
 
 
@@ -149,8 +150,8 @@ class ToolTestCase(DbTestCase):
     def setUp(self):
         super().setUp()
         self._patches = [
-            patch.object(server, "_db", return_value=self.db),
-            patch.object(server, "_embedder", return_value=object()),
+            patch.object(runtime, "_db", return_value=self.db),
+            patch.object(runtime, "_embedder", return_value=object()),
         ]
         for p in self._patches:
             p.start()
@@ -216,7 +217,7 @@ class TestSearchToolFilters(ToolTestCase):
             Note(namespace="proj", title="old", content="topic", tags=["keep"]), axis(0))
         self._age("notes", old.id, 90)
 
-        with patch.object(server, "_safe_embed", return_value=axis(0)):
+        with patch.object(runtime, "_safe_embed", return_value=axis(0)):
             tagged = server.search("topic", tags=["keep"], mode="fulltext")
             cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).date().isoformat()
             fresh = server.search("topic", updated_after=cutoff, mode="hybrid")

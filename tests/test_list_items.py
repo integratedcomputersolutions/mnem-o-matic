@@ -11,6 +11,7 @@ import mnemomatic.server as server
 from mnemomatic import config
 from mnemomatic.db import Database
 from mnemomatic.models import Document
+from mnemomatic import runtime
 
 
 class TestListItemsTool(unittest.TestCase):
@@ -20,7 +21,7 @@ class TestListItemsTool(unittest.TestCase):
             self.db.store_document(
                 Document(namespace="proj", title=f"doc {i}", content="body"), None
             )
-        self._patch = patch.object(server, "_db", return_value=self.db)
+        self._patch = patch.object(runtime, "_db", return_value=self.db)
         self._patch.start()
 
     def tearDown(self):

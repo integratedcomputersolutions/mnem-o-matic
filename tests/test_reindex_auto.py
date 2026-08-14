@@ -6,6 +6,7 @@ when it differs, do nothing when it does not, and never destroy an index that
 cannot be rebuilt.
 """
 
+import os
 import unittest
 from unittest.mock import patch
 
@@ -13,6 +14,7 @@ import mnemomatic.server as server
 from mnemomatic import config
 from mnemomatic.db import Database
 from mnemomatic.models import Document
+from mnemomatic import runtime
 from tests._support import FakeEmbedder, axis
 
 GEMMA = {
@@ -26,9 +28,9 @@ AMARETTO = {**GEMMA, "embed_model": "amaretto-embed-148m"}
 class TestModeParsing(unittest.TestCase):
     def _mode(self, value):
         env = {} if value is None else {"MNEMOMATIC_REINDEX": value}
-        with patch.dict(server.os.environ, env, clear=False):
+        with patch.dict(os.environ, env, clear=False):
             if value is None:
-                server.os.environ.pop("MNEMOMATIC_REINDEX", None)
+                os.environ.pop("MNEMOMATIC_REINDEX", None)
             return config._reindex_mode()
 
     def test_unset_is_off(self):
@@ -112,8 +114,8 @@ class TestRunReindexUnderAuto(unittest.TestCase):
             Document(namespace="ns", title="d", content="body"), None)
         self.embedder = FakeEmbedder()
         self._patches = [
-            patch.object(server, "_db", return_value=self.db),
-            patch.object(server, "_embedder", return_value=self.embedder),
+            patch.object(runtime, "_db", return_value=self.db),
+            patch.object(runtime, "_embedder", return_value=self.embedder),
         ]
         for p in self._patches:
             p.start()
@@ -169,16 +171,16 @@ class TestNeverDestroyWhatCannotBeRebuilt(unittest.TestCase):
 
     def test_pending_reindex_without_an_embedder_raises(self):
         self.db.reindex_pending = True
-        with patch.object(server, "_db", return_value=self.db), \
-             patch.object(server, "_embedder", return_value=None):
+        with patch.object(runtime, "_db", return_value=self.db), \
+             patch.object(runtime, "_embedder", return_value=None):
             with self.assertRaises(RuntimeError) as ctx:
                 server._run_reindex()
         self.assertIn("no embedder is available", str(ctx.exception))
 
     def test_existing_vectors_survive_the_refusal(self):
         self.db.reindex_pending = True
-        with patch.object(server, "_db", return_value=self.db), \
-             patch.object(server, "_embedder", return_value=None):
+        with patch.object(runtime, "_db", return_value=self.db), \
+             patch.object(runtime, "_embedder", return_value=None):
             with self.assertRaises(RuntimeError):
                 server._run_reindex()
         count = self.db._get_conn().execute(
@@ -186,8 +188,8 @@ class TestNeverDestroyWhatCannotBeRebuilt(unittest.TestCase):
         self.assertEqual(count, 1)
 
     def test_no_pending_change_without_an_embedder_just_skips(self):
-        with patch.object(server, "_db", return_value=self.db), \
-             patch.object(server, "_embedder", return_value=None):
+        with patch.object(runtime, "_db", return_value=self.db), \
+             patch.object(runtime, "_embedder", return_value=None):
             server._run_reindex()  # logs and returns; nothing dropped
         count = self.db._get_conn().execute(
             "SELECT COUNT(*) AS n FROM vec_documents").fetchone()["n"]

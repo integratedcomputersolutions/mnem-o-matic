@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import mnemomatic.server as server
 from mnemomatic import config
+from mnemomatic import runtime
 
 EMBEDDING = [0.1, 0.2]
 
@@ -30,8 +31,8 @@ class PrefixTestBase(unittest.TestCase):
         self._patches = [
             patch.object(config, "EMBED_QUERY_PREFIX", "Q>> "),
             patch.object(config, "EMBED_DOC_PREFIX", "D>> "),
-            patch.object(server, "_safe_embed", side_effect=record),
-            patch.object(server, "_embedder", return_value=object()),
+            patch.object(runtime, "_safe_embed", side_effect=record),
+            patch.object(runtime, "_embedder", return_value=object()),
         ]
         for p in self._patches:
             p.start()
@@ -45,14 +46,14 @@ class TestQueryPrefix(PrefixTestBase):
     def test_semantic_search_prefixes_query(self):
         fake_db = MagicMock()
         fake_db.search_vec.return_value = []
-        with patch.object(server, "_db", return_value=fake_db):
+        with patch.object(runtime, "_db", return_value=fake_db):
             server.search(query="hello world", mode="semantic")
         self.assertEqual(self.embedded, ["Q>> hello world"])
 
     def test_hybrid_search_prefixes_query_but_not_fts(self):
         fake_db = MagicMock()
         fake_db.search_hybrid.return_value = []
-        with patch.object(server, "_db", return_value=fake_db):
+        with patch.object(runtime, "_db", return_value=fake_db):
             server.search(query="hello world", mode="hybrid")
         self.assertEqual(self.embedded, ["Q>> hello world"])
         # FTS receives the raw (escaped) query, never the embedding prefix.
@@ -71,17 +72,17 @@ class TestDocumentPrefix(PrefixTestBase):
         return fake_db
 
     def test_store_knowledge_prefixes_content(self):
-        with patch.object(server, "_db", return_value=self._fake_db()):
+        with patch.object(runtime, "_db", return_value=self._fake_db()):
             server.store_knowledge(namespace="ns", subject="auth", fact="JWT")
         self.assertEqual(self.embedded, ["D>> auth: JWT"])
 
     def test_store_note_prefixes_content(self):
-        with patch.object(server, "_db", return_value=self._fake_db()):
+        with patch.object(runtime, "_db", return_value=self._fake_db()):
             server.store_note(namespace="ns", title="n", content="c")
         self.assertEqual(self.embedded, ["D>> n\nc"])
 
     def test_store_small_document_prefixes_content(self):
-        with patch.object(server, "_db", return_value=self._fake_db()):
+        with patch.object(runtime, "_db", return_value=self._fake_db()):
             server.store_document(namespace="ns", title="T", content="small body")
         self.assertEqual(self.embedded, ["D>> T\nsmall body"])
 
@@ -93,7 +94,7 @@ class TestDocumentPrefix(PrefixTestBase):
             return [EMBEDDING] * len(texts)
 
         content = ("chunk sentence. " * 40 + "\n\n") * 5  # over CHUNK_THRESHOLD
-        with patch.object(server, "_safe_embed_batch", side_effect=fake_batch):
+        with patch.object(runtime, "_safe_embed_batch", side_effect=fake_batch):
             embedding, chunks = server._embed_document_body("T", content)
         self.assertIsNone(embedding)
         self.assertTrue(all(t.startswith("D>> ") for t in batch_calls[0]))
@@ -109,7 +110,7 @@ class TestPrefixDefaults(unittest.TestCase):
         self.assertEqual(config.EMBED_QUERY_PREFIX, "")
         self.assertEqual(config.EMBED_DOC_PREFIX, "")
         recorded = []
-        with patch.object(server, "_safe_embed", side_effect=lambda t: recorded.append(t) or EMBEDDING):
+        with patch.object(runtime, "_safe_embed", side_effect=lambda t: recorded.append(t) or EMBEDDING):
             server._embed_query("hello")
             server._embed_content("world")
         self.assertEqual(recorded, ["hello", "world"])

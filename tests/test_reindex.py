@@ -15,6 +15,7 @@ import mnemomatic.server as server
 from mnemomatic import config
 from mnemomatic.db import SCHEMA_VERSION, Database
 from mnemomatic.models import Document, Knowledge, Note
+from mnemomatic import runtime
 from tests._support import EMBEDDING_DIM, FakeEmbedder, axis
 
 
@@ -116,8 +117,8 @@ class TestRunReindex(unittest.TestCase):
             Note(namespace="ns", title="n", content="c"), None)
         self.embedder = FakeEmbedder()
         self._patches = [
-            patch.object(server, "_db", return_value=self.db),
-            patch.object(server, "_embedder", return_value=self.embedder),
+            patch.object(runtime, "_db", return_value=self.db),
+            patch.object(runtime, "_embedder", return_value=self.embedder),
         ]
         for p in self._patches:
             p.start()
@@ -162,7 +163,7 @@ class TestRunReindex(unittest.TestCase):
         # reindex, dim-8 semantic search works against the rebuilt index.
         small_embedder = FakeEmbedder(dim=8)
         with patch.object(mnemomatic.db, "EMBEDDING_DIM", 8), \
-             patch.object(server, "_embedder", return_value=small_embedder):
+             patch.object(runtime, "_embedder", return_value=small_embedder):
             self.db.reindex_pending = True
             server._run_reindex()
             emb = small_embedder.embed("s: f")
@@ -170,14 +171,14 @@ class TestRunReindex(unittest.TestCase):
             self.assertEqual([r.id for r in results], [self.k.id])
 
     def test_reindex_no_embedder_skips_without_dim_change(self):
-        with patch.object(server, "_embedder", return_value=None):
+        with patch.object(runtime, "_embedder", return_value=None):
             server._run_reindex()  # must not raise
         # Index untouched — nothing was rebuilt or embedded.
         self.assertEqual(self._vec_count("vec_documents"), 0)
 
     def test_reindex_no_embedder_with_dim_change_is_fatal(self):
         self.db.reindex_pending = True
-        with patch.object(server, "_embedder", return_value=None):
+        with patch.object(runtime, "_embedder", return_value=None):
             with self.assertRaises(RuntimeError):
                 server._run_reindex()
 
@@ -191,7 +192,7 @@ class TestRunReindex(unittest.TestCase):
             return original(text)
 
         flaky.embed = sometimes_fail
-        with patch.object(server, "_embedder", return_value=flaky):
+        with patch.object(runtime, "_embedder", return_value=flaky):
             server._run_reindex()  # must not raise
         self.assertEqual(self._vec_count("vec_knowledge"), 0)  # the failed one
         self.assertEqual(self._vec_count("vec_notes"), 1)      # others proceeded

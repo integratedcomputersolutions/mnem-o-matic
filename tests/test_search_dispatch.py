@@ -27,6 +27,7 @@ import mnemomatic.server as server
 from mnemomatic import config
 from mnemomatic.db import Database
 from mnemomatic.models import Document
+from mnemomatic import runtime
 
 # A non-None stand-in for "an embedder is configured". search() only checks the
 # embedder for None-ness; the actual embedding is produced by _safe_embed, which
@@ -86,9 +87,9 @@ class SearchDispatchTest(unittest.TestCase):
         embedder:     object returned by _embedder() — SENTINEL_EMBEDDER or None.
         embed_result: value returned by _safe_embed() — an embedding list or None.
         """
-        with patch.object(server, "_db", return_value=self.fake_db), \
-             patch.object(server, "_embedder", return_value=embedder), \
-             patch.object(server, "_safe_embed", return_value=embed_result):
+        with patch.object(runtime, "_db", return_value=self.fake_db), \
+             patch.object(runtime, "_embedder", return_value=embedder), \
+             patch.object(runtime, "_safe_embed", return_value=embed_result):
             return server.search(**kwargs)
 
     def _backends(self):
@@ -209,9 +210,9 @@ class SearchDispatchTest(unittest.TestCase):
         # embedder must receive the original, unescaped query (plus the
         # configured query prefix — never the FTS escaping).
         safe = MagicMock(return_value=EMBEDDING)
-        with patch.object(server, "_db", return_value=self.fake_db), \
-             patch.object(server, "_embedder", return_value=SENTINEL_EMBEDDER), \
-             patch.object(server, "_safe_embed", safe):
+        with patch.object(runtime, "_db", return_value=self.fake_db), \
+             patch.object(runtime, "_embedder", return_value=SENTINEL_EMBEDDER), \
+             patch.object(runtime, "_safe_embed", safe):
             server.search(query="a AND b", mode="hybrid")
         safe.assert_called_once_with(config.EMBED_QUERY_PREFIX + "a AND b")
         backend, fts_arg, embedding, _table, _ns, _limit = self.fake_db.calls[0]
@@ -224,8 +225,8 @@ class SearchDispatchTest(unittest.TestCase):
         # to MCP clients; it must come back as the tool's own error shape.
         failing_db = MagicMock()
         failing_db.search_fts.side_effect = sqlite3.OperationalError('fts5: syntax error near "?"')
-        with patch.object(server, "_db", return_value=failing_db), \
-             patch.object(server, "_embedder", return_value=None):
+        with patch.object(runtime, "_db", return_value=failing_db), \
+             patch.object(runtime, "_embedder", return_value=None):
             res = server.search(query="hello", mode="fulltext")
         self.assertEqual(len(res), 1)
         self.assertEqual(res[0]["error"], "Search failed")
