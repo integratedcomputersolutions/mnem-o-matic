@@ -23,8 +23,8 @@ from mnemomatic.db import (
     EMBEDDING_DIM,
     Database,
     _chunk_text,
-    _ITEM_TYPE_TO_TABLE,
-    _TABLE_UPDATE_FIELDS,
+    _SPEC_BY_ITEM_TYPE,
+    _SPECS,
 )
 from mnemomatic.models import Document, Knowledge, Note
 
@@ -1252,7 +1252,7 @@ def restore(revision_id: int) -> dict:
     if _READ_GETTERS[item_type](_db(), rev["item_id"]) is not None:
         # Roll the live item back through the normal update path — it captures
         # the current state as a revision and re-embeds what changed.
-        fields = {f: getattr(item, f) for f in _TABLE_UPDATE_FIELDS[_ITEM_TYPE_TO_TABLE[item_type]]}
+        fields = {f: getattr(item, f) for f in _SPEC_BY_ITEM_TYPE[item_type].update_fields}
         result = _handle_update(item_type, rev["item_id"], fields)
         if "error" in result:
             return result
@@ -1284,9 +1284,6 @@ def restore(revision_id: int) -> dict:
            title=getattr(stored, key), revision_id=revision_id, recreated=True)
     return {"id": stored.id, key: getattr(stored, key), "namespace": stored.namespace,
             "restored_revision": revision_id, "recreated": True}
-
-
-_ITEM_TYPE_TO_TABLE_INV = {table: item_type for item_type, table in _ITEM_TYPE_TO_TABLE.items()}
 
 
 def _duplicate_clusters(item_type: str, vectors: list[tuple[str, str, list[float]]],
@@ -1356,9 +1353,9 @@ def consolidation_report(namespace: str, similarity_threshold: float | None = No
         return {"error": "Invalid similarity_threshold", "details": "Must be positive (cosine similarity)"}
 
     clusters = []
-    for table in ("documents", "knowledge", "notes"):
+    for table, spec in _SPECS.items():
         vectors = _db().item_vectors(table, namespace)
-        clusters.extend(_duplicate_clusters(_ITEM_TYPE_TO_TABLE_INV[table], vectors, threshold))
+        clusters.extend(_duplicate_clusters(spec.item_type, vectors, threshold))
     clusters.sort(key=lambda c: c["similarity"], reverse=True)
 
     cutoff = (datetime.now(timezone.utc) - timedelta(days=max(0, int(stale_days)))).isoformat()
