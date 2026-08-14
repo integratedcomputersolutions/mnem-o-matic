@@ -24,6 +24,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import mnemomatic.server as server
+from mnemomatic import config
 from mnemomatic.db import Database
 from mnemomatic.models import Document
 
@@ -184,7 +185,7 @@ class SearchDispatchTest(unittest.TestCase):
 
     def test_limit_clamped_to_range(self):
         # (requested, expected) — below range, above range, and in range.
-        cases = [(0, 1), (10_000, server.MAX_SEARCH_LIMIT), (25, 25)]
+        cases = [(0, 1), (10_000, config.MAX_SEARCH_LIMIT), (25, 25)]
         for requested, expected in cases:
             with self.subTest(limit=requested):
                 self.fake_db.calls.clear()
@@ -212,7 +213,7 @@ class SearchDispatchTest(unittest.TestCase):
              patch.object(server, "_embedder", return_value=SENTINEL_EMBEDDER), \
              patch.object(server, "_safe_embed", safe):
             server.search(query="a AND b", mode="hybrid")
-        safe.assert_called_once_with(server.EMBED_QUERY_PREFIX + "a AND b")
+        safe.assert_called_once_with(config.EMBED_QUERY_PREFIX + "a AND b")
         backend, fts_arg, embedding, _table, _ns, _limit = self.fake_db.calls[0]
         self.assertEqual(backend, "hybrid")
         self.assertEqual(fts_arg, '"a AND b"')           # FTS arg escaped

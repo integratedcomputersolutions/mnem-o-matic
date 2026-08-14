@@ -11,10 +11,9 @@ from importlib.metadata import PackageNotFoundError, version
 
 import uvicorn
 from mcp.server.fastmcp import FastMCP
-from mcp.types import ToolAnnotations
 from pydantic import ValidationError
 
-from mnemomatic import model_config
+from mnemomatic import config
 from mnemomatic.audit import RequestMetaMiddleware, request_meta
 from mnemomatic.auth import BearerAuthMiddleware
 from mnemomatic.compact import CompactToolsMiddleware
@@ -32,100 +31,12 @@ from mnemomatic.models import Document, Knowledge, Note
 
 logger = logging.getLogger("mnemomatic")
 
-DB_PATH = os.environ.get("MNEMOMATIC_DB_PATH", "/data/mnemomatic.db")
-HOST = os.environ.get("MNEMOMATIC_HOST", "0.0.0.0")
-PORT = int(os.environ.get("MNEMOMATIC_PORT", "8000"))
-API_KEY = os.environ.get("MNEMOMATIC_API_KEY", "")
-CORS_ORIGINS = os.environ.get("MNEMOMATIC_CORS_ORIGINS", "")
-EMBED_URL = os.environ.get("MNEMOMATIC_EMBED_URL", "")
-EMBED_MODEL = os.environ.get("MNEMOMATIC_EMBED_MODEL", "")
-UI_TOKEN = os.environ.get("MNEMOMATIC_UI_TOKEN", "").strip()
-MAX_SEARCH_LIMIT = 100
-MAX_LIST_LIMIT = 200
-
-# Scheduled backups of the export archive — disabled unless a directory is set.
-BACKUP_DIR = os.environ.get("MNEMOMATIC_BACKUP_DIR", "").strip()
-BACKUP_INTERVAL_HOURS = float(os.environ.get("MNEMOMATIC_BACKUP_INTERVAL", "24"))
-BACKUP_KEEP = int(os.environ.get("MNEMOMATIC_BACKUP_KEEP", "7"))
-
-# Cosine similarity at or above which two items count as near-duplicates —
-# used by the `similar` field on store responses and by consolidation_report's
-# clustering. Correct-but-distinct search hits typically score 0.3–0.6 across
-# the bundled models, near-duplicates well above 0.8. 0 disables the store-time
-# check entirely.
-SIMILAR_THRESHOLD = float(os.environ.get("MNEMOMATIC_SIMILAR_THRESHOLD", "0.8"))
-_SIMILAR_LIMIT = 3
-
-# Task prefixes for asymmetric embedding models. When the bundled model is
-# trained with task prompts (e.g. EmbeddingGemma, multilingual-e5), the Docker
-# build records them in model_config.json and they apply by default when
-# embedding locally. External endpoints (MNEMOMATIC_EMBED_URL) default to no
-# prefix since their model is unknown. Explicit env vars always win. Prefixes
-# are baked into stored vectors, so changing them (like changing models)
-# requires re-embedding existing content.
-_DEFAULT_QUERY_PREFIX = "" if EMBED_URL else model_config.CONFIG.get("query_prefix", "")
-_DEFAULT_DOC_PREFIX = "" if EMBED_URL else model_config.CONFIG.get("doc_prefix", "")
-EMBED_QUERY_PREFIX = os.environ.get("MNEMOMATIC_EMBED_QUERY_PREFIX", _DEFAULT_QUERY_PREFIX)
-EMBED_DOC_PREFIX = os.environ.get("MNEMOMATIC_EMBED_DOC_PREFIX", _DEFAULT_DOC_PREFIX)
-
-
-# How startup responds to a stored index built by a different embedder than the
-# one configured now:
-#   "off"   (default) — refuse to start, naming what changed. The safe default:
-#                       an unintended model or prefix change should stop the
-#                       server, not silently rebuild the index.
-#   "auto"  — rebuild and re-embed, but only when something actually changed.
-#             A no-op otherwise, so it is safe to leave set permanently.
-#   "force" — rebuild and re-embed on every boot regardless. For forcing a
-#             re-embed that the identity check would not catch.
-def _reindex_mode() -> str:
-    raw = os.environ.get("MNEMOMATIC_REINDEX", "").strip().lower()
-    if raw == "auto":
-        return "auto"
-    if raw in ("1", "true", "yes"):
-        return "force"
-    if raw not in ("", "0", "false", "no"):
-        logger.warning(
-            "Ignoring unrecognised MNEMOMATIC_REINDEX=%r — expected 'auto', '1', or unset. "
-            "Treating it as unset, so a changed embedder will refuse startup rather than "
-            "silently re-embedding.", raw,
-        )
-    return "off"
-
-
-REINDEX_MODE = _reindex_mode()
-# Both modes let the database defer an index-invalidating change instead of
-# raising, so startup can rebuild rather than fail.
-REINDEX = REINDEX_MODE in ("auto", "force")
-
-
-def _embed_identity() -> dict[str, str]:
-    """What the database records about which embedder built its vector index.
-
-    The model name comes from the bundled model's config, or from
-    MNEMOMATIC_EMBED_MODEL for an external endpoint. An empty name means the
-    identity is unknown (FTS-only, or an external endpoint that never named its
-    model), which disables the startup identity check — see Database.
-    """
-    return {
-        "embed_model": model_config.CONFIG.get("model") or EMBED_MODEL or "",
-        "embed_query_prefix": EMBED_QUERY_PREFIX,
-        "embed_doc_prefix": EMBED_DOC_PREFIX,
-    }
-
-
-# Tool annotation presets
-_ANN_READ_ONLY = ToolAnnotations(readOnlyHint=True, openWorldHint=False)
-_ANN_STORE = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False)
-_ANN_UPDATE = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False)
-_ANN_DELETE = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False)
-_ANN_TAG = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False)
 
 mcp = FastMCP(
     "Mnem-O-matic",
     json_response=True,
-    host=HOST,
-    port=PORT,
+    host=config.HOST,
+    port=config.PORT,
 )
 
 db: Database | None = None
@@ -142,20 +53,20 @@ def _db() -> Database:
         with _db_lock:
             # Double-check pattern: verify again inside lock
             if db is None:
-                os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
+                os.makedirs(os.path.dirname(config.DB_PATH) or ".", exist_ok=True)
                 db = Database(
-                    DB_PATH, allow_reindex=REINDEX, embed_identity=_embed_identity()
+                    config.DB_PATH, allow_reindex=config.REINDEX, embed_identity=config.embed_identity()
                 )
     return db
 
 
 def _resolve_embedder():
     """Initialize and return the appropriate embedder, or None for FTS-only mode."""
-    if EMBED_URL:
+    if config.EMBED_URL:
         try:
             from mnemomatic.embeddings import HttpEmbedder
-            embedder = HttpEmbedder(EMBED_URL, EMBED_MODEL)
-            logger.info("Embedder: %s endpoint %s (model=%r)", embedder.mode, EMBED_URL, EMBED_MODEL)
+            embedder = HttpEmbedder(config.EMBED_URL, config.EMBED_MODEL)
+            logger.info("Embedder: %s endpoint %s (model=%r)", embedder.mode, config.EMBED_URL, config.EMBED_MODEL)
             _validate_embedding_dimension(embedder)
             return embedder
         except ValueError as e:
@@ -293,12 +204,12 @@ def _safe_embed_batch(texts: list[str]) -> list[list[float] | None]:
 
 def _embed_query(text: str) -> list[float] | None:
     """Embedding for a search query, with the configured query prefix applied."""
-    return _safe_embed(EMBED_QUERY_PREFIX + text)
+    return _safe_embed(config.EMBED_QUERY_PREFIX + text)
 
 
 def _embed_content(text: str) -> list[float] | None:
     """Embedding for stored content, with the configured document prefix applied."""
-    return _safe_embed(EMBED_DOC_PREFIX + text)
+    return _safe_embed(config.EMBED_DOC_PREFIX + text)
 
 
 def _similar_items(table: str, item_id: str, namespace: str,
@@ -306,22 +217,22 @@ def _similar_items(table: str, item_id: str, namespace: str,
     """Near-duplicates of a just-stored item, for the agent mid-write to judge.
 
     The server only flags — merging, superseding, or ignoring is the caller's
-    decision. Empty when there is nothing above SIMILAR_THRESHOLD, no
+    decision. Empty when there is nothing above config.SIMILAR_THRESHOLD, no
     embedding (FTS-only mode, chunked documents), or the check is disabled.
     Never breaks the store that triggered it.
     """
-    if embedding is None or SIMILAR_THRESHOLD <= 0:
+    if embedding is None or config.SIMILAR_THRESHOLD <= 0:
         return []
     try:
         results = _db().search_vec(embedding, table=table, namespace=namespace,
-                                   limit=_SIMILAR_LIMIT + 1)
+                                   limit=config.SIMILAR_LIMIT + 1)
     except Exception as e:
         logger.warning("Similar-item check failed: %s: %s", type(e).__name__, e)
         return []
     return [
         {"id": r.id, "title": r.title, "score": round(r.score, 3)}
-        for r in results if r.id != item_id and r.score >= SIMILAR_THRESHOLD
-    ][:_SIMILAR_LIMIT]
+        for r in results if r.id != item_id and r.score >= config.SIMILAR_THRESHOLD
+    ][:config.SIMILAR_LIMIT]
 
 
 def _knowledge_embed_text(subject: str, fact: str) -> str:
@@ -348,7 +259,7 @@ def _embed_document_body(title: str, content: str) -> tuple[list[float] | None, 
         texts = _chunk_text(content, CHUNK_SIZE, CHUNK_OVERLAP)
         # The document prefix is applied for embedding only; stored chunk
         # content stays raw so snippets never leak the prefix.
-        embeddings = _safe_embed_batch([EMBED_DOC_PREFIX + t for t in texts])
+        embeddings = _safe_embed_batch([config.EMBED_DOC_PREFIX + t for t in texts])
         chunks = [(c, e) for c, e in zip(texts, embeddings) if e is not None]
         return None, (chunks or None)
     return _embed_content(f"{title}\n{content}"), None
@@ -377,7 +288,7 @@ def _run_reindex() -> None:
         logger.error("MNEMOMATIC_REINDEX is set but no embedder is available — skipping reindex")
         return
 
-    if REINDEX_MODE == "force":
+    if config.REINDEX_MODE == "force":
         logger.warning(
             "Reindex starting (MNEMOMATIC_REINDEX=1): rebuilding vector index at dim %d and "
             "re-embedding all content. Remove the flag after this run — it re-embeds on every "
@@ -426,14 +337,14 @@ def _run_reindex() -> None:
     )
     # A whole-store re-embed is worth a trail entry: it explains why every
     # item's vector changed at once, and under =auto nobody typed a command.
-    _audit("reindex", mode=REINDEX_MODE, dim=EMBEDDING_DIM,
-           model=_embed_identity()["embed_model"] or None, **counts)
+    _audit("reindex", mode=config.REINDEX_MODE, dim=EMBEDDING_DIM,
+           model=config.embed_identity()["embed_model"] or None, **counts)
 
 
 # ── Tools ──
 
 
-@mcp.tool(annotations=_ANN_STORE)
+@mcp.tool(annotations=config.ANN_STORE)
 def store_document(
     namespace: str,
     title: str,
@@ -494,7 +405,7 @@ def store_document(
     return response
 
 
-@mcp.tool(annotations=_ANN_STORE)
+@mcp.tool(annotations=config.ANN_STORE)
 def store_knowledge(
     namespace: str,
     subject: str,
@@ -714,7 +625,7 @@ def _supersede_update(existing: Knowledge, fields: dict) -> dict:
     return {"id": stored.id, "subject": stored.subject, "updated": True, "superseded": existing.id}
 
 
-@mcp.tool(annotations=_ANN_UPDATE)
+@mcp.tool(annotations=config.ANN_UPDATE)
 def update_document(
     id: str,
     title: str | None = None,
@@ -744,7 +655,7 @@ def update_document(
     return _handle_update("document", id, fields)
 
 
-@mcp.tool(annotations=_ANN_UPDATE)
+@mcp.tool(annotations=config.ANN_UPDATE)
 def update_knowledge(
     id: str,
     subject: str | None = None,
@@ -775,7 +686,7 @@ def update_knowledge(
     return _handle_update("knowledge", id, fields)
 
 
-@mcp.tool(annotations=_ANN_DELETE)
+@mcp.tool(annotations=config.ANN_DELETE)
 def delete_document(id: str) -> dict:
     """Delete a document from Mnem-O-matic.
 
@@ -791,7 +702,7 @@ def delete_document(id: str) -> dict:
     return _handle_delete("document", id)
 
 
-@mcp.tool(annotations=_ANN_DELETE)
+@mcp.tool(annotations=config.ANN_DELETE)
 def delete_knowledge(id: str) -> dict:
     """Delete a knowledge entry from Mnem-O-matic.
 
@@ -806,7 +717,7 @@ def delete_knowledge(id: str) -> dict:
     return _handle_delete("knowledge", id)
 
 
-@mcp.tool(annotations=_ANN_STORE)
+@mcp.tool(annotations=config.ANN_STORE)
 def store_note(
     namespace: str,
     title: str,
@@ -864,7 +775,7 @@ def store_note(
     return response
 
 
-@mcp.tool(annotations=_ANN_UPDATE)
+@mcp.tool(annotations=config.ANN_UPDATE)
 def update_note(
     id: str,
     title: str | None = None,
@@ -892,7 +803,7 @@ def update_note(
     return _handle_update("note", id, fields)
 
 
-@mcp.tool(annotations=_ANN_DELETE)
+@mcp.tool(annotations=config.ANN_DELETE)
 def delete_note(id: str) -> dict:
     """Delete a note from Mnem-O-matic.
 
@@ -908,7 +819,7 @@ def delete_note(id: str) -> dict:
     return _handle_delete("note", id)
 
 
-@mcp.tool(annotations=_ANN_TAG)
+@mcp.tool(annotations=config.ANN_TAG)
 def tag(
     item_id: str,
     item_type: str,
@@ -936,7 +847,7 @@ def tag(
         return {"error": str(e)}
 
 
-@mcp.tool(annotations=_ANN_READ_ONLY)
+@mcp.tool(annotations=config.ANN_READ_ONLY)
 def search(
     query: str,
     content_type: str = "all",
@@ -985,7 +896,7 @@ def search(
     if not query or not query.strip():
         return [{"error": "Query cannot be empty", "details": "Provide a non-empty search query"}]
 
-    limit = max(1, min(int(limit), MAX_SEARCH_LIMIT))
+    limit = max(1, min(int(limit), config.MAX_SEARCH_LIMIT))
 
     if updated_after is not None:
         try:
@@ -1082,7 +993,7 @@ def _get_resource(item_type: str, id: str) -> str:
     return obj.model_dump_json()
 
 
-@mcp.tool(annotations=_ANN_READ_ONLY)
+@mcp.tool(annotations=config.ANN_READ_ONLY)
 def list_items(item_type: str, namespace: str, limit: int = 50, offset: int = 0) -> dict:
     """List items of one type in a namespace, newest first, with pagination.
 
@@ -1103,7 +1014,7 @@ def list_items(item_type: str, namespace: str, limit: int = 50, offset: int = 0)
                 fetch the next page (default 0).
     """
     try:
-        limit = max(1, min(int(limit), MAX_LIST_LIMIT))
+        limit = max(1, min(int(limit), config.MAX_LIST_LIMIT))
         offset = max(0, int(offset))
         items, total = _db().list_page(item_type, namespace, limit, offset)
     except ValueError as e:
@@ -1118,7 +1029,7 @@ def list_items(item_type: str, namespace: str, limit: int = 50, offset: int = 0)
     }
 
 
-@mcp.tool(annotations=_ANN_READ_ONLY)
+@mcp.tool(annotations=config.ANN_READ_ONLY)
 def read(item_type: str, id: str) -> dict:
     """Read the full content of a document, knowledge entry, or note by ID.
 
@@ -1139,7 +1050,7 @@ def read(item_type: str, id: str) -> dict:
     return json.loads(item.model_dump_json())
 
 
-@mcp.tool(annotations=_ANN_READ_ONLY)
+@mcp.tool(annotations=config.ANN_READ_ONLY)
 def related(item_type: str, id: str, namespace: str | None = None, limit: int = 5) -> dict:
     """Find items most similar to an existing item — "more like this".
 
@@ -1160,7 +1071,7 @@ def related(item_type: str, id: str, namespace: str | None = None, limit: int = 
     """
     if item_type not in _OPS:
         return {"error": "Invalid item_type", "details": f"Must be one of: {', '.join(sorted(_OPS))}"}
-    limit = max(1, min(int(limit), MAX_SEARCH_LIMIT))
+    limit = max(1, min(int(limit), config.MAX_SEARCH_LIMIT))
 
     if _OPS[item_type].get(_db(), id) is None:
         return {"error": f"{item_type} not found", "id": id}
@@ -1181,7 +1092,7 @@ def related(item_type: str, id: str, namespace: str | None = None, limit: int = 
             "related": [r.model_dump() for r in neighbors]}
 
 
-@mcp.tool(annotations=_ANN_READ_ONLY)
+@mcp.tool(annotations=config.ANN_READ_ONLY)
 def fact_history(namespace: str, subject: str) -> dict:
     """The full timeline of a fact: the current entry first, then every
     superseded version, newest first.
@@ -1209,7 +1120,7 @@ def fact_history(namespace: str, subject: str) -> dict:
     }
 
 
-@mcp.tool(annotations=_ANN_READ_ONLY)
+@mcp.tool(annotations=config.ANN_READ_ONLY)
 def list_revisions(
     item_type: str | None = None,
     item_id: str | None = None,
@@ -1236,13 +1147,13 @@ def list_revisions(
     """
     if item_type is not None and item_type not in _OPS:
         return {"error": "Invalid item_type", "details": f"Must be one of: {', '.join(sorted(_OPS))}"}
-    limit = max(1, min(int(limit), MAX_LIST_LIMIT))
+    limit = max(1, min(int(limit), config.MAX_LIST_LIMIT))
     revisions = _db().list_revisions(item_type=item_type, item_id=item_id,
                                      namespace=namespace, limit=limit)
     return {"revisions": revisions, "limit": limit}
 
 
-@mcp.tool(annotations=_ANN_READ_ONLY)
+@mcp.tool(annotations=config.ANN_READ_ONLY)
 def list_audit(
     item_type: str | None = None,
     item_id: str | None = None,
@@ -1273,13 +1184,13 @@ def list_audit(
     """
     if item_type is not None and item_type not in _OPS:
         return {"error": "Invalid item_type", "details": f"Must be one of: {', '.join(sorted(_OPS))}"}
-    limit = max(1, min(int(limit), MAX_LIST_LIMIT))
+    limit = max(1, min(int(limit), config.MAX_LIST_LIMIT))
     events = _db().list_audit(item_type=item_type, item_id=item_id,
                               namespace=namespace, op=op, limit=limit)
     return {"events": events, "limit": limit}
 
 
-@mcp.tool(annotations=_ANN_UPDATE)
+@mcp.tool(annotations=config.ANN_UPDATE)
 def restore(revision_id: int) -> dict:
     """Restore an item to a saved revision — undo an update or recover a deleted item.
 
@@ -1380,7 +1291,7 @@ def _duplicate_clusters(item_type: str, vectors: list[tuple[str, str, list[float
     ]
 
 
-@mcp.tool(annotations=_ANN_READ_ONLY)
+@mcp.tool(annotations=config.ANN_READ_ONLY)
 def consolidation_report(namespace: str, similarity_threshold: float | None = None,
                          stale_days: int = 90) -> dict:
     """Mechanical consolidation candidates for a namespace: near-duplicate
@@ -1403,7 +1314,7 @@ def consolidation_report(namespace: str, similarity_threshold: float | None = No
         stale_days: Only items untouched for this many days count as stale
             (default 90).
     """
-    threshold = SIMILAR_THRESHOLD if similarity_threshold is None else float(similarity_threshold)
+    threshold = config.SIMILAR_THRESHOLD if similarity_threshold is None else float(similarity_threshold)
     if threshold <= 0:
         return {"error": "Invalid similarity_threshold", "details": "Must be positive (cosine similarity)"}
 
@@ -1498,7 +1409,7 @@ def health() -> str:
         "status": "ok",
         "version": _server_version(),
         "embedding_mode": embedding_mode,
-        "auth_enabled": bool(API_KEY),
+        "auth_enabled": bool(config.API_KEY),
     })
 
 
@@ -1558,7 +1469,7 @@ def _settings_info() -> dict:
     from mnemomatic.embeddings import EMBED_API, MODEL_MAX_TOKENS
 
     embedder = _embedder()
-    model_name = _embed_identity()["embed_model"] or None
+    model_name = config.embed_identity()["embed_model"] or None
     info = {
         "version": _server_version(),
         "mode": embedder.mode if embedder is not None else "FTS-only (no embedder)",
@@ -1567,21 +1478,21 @@ def _settings_info() -> dict:
         "dim_configured": db_module.EMBEDDING_DIM,
         "dim_database": _db().stored_embed_dim(),
         "model_database": _db().stored_embed_identity().get("embed_model") or None,
-        "query_prefix": EMBED_QUERY_PREFIX,
-        "doc_prefix": EMBED_DOC_PREFIX,
+        "query_prefix": config.EMBED_QUERY_PREFIX,
+        "doc_prefix": config.EMBED_DOC_PREFIX,
         "chunk_threshold": CHUNK_THRESHOLD,
         "chunk_size": CHUNK_SIZE,
         "chunk_overlap": CHUNK_OVERLAP,
     }
-    if EMBED_URL:
-        info["endpoint_url"] = EMBED_URL
+    if config.EMBED_URL:
+        info["endpoint_url"] = config.EMBED_URL
         info["wire_api"] = EMBED_API
     else:
         info["max_tokens"] = MODEL_MAX_TOKENS
     return info
 
 
-@mcp.tool(annotations=_ANN_DELETE)
+@mcp.tool(annotations=config.ANN_DELETE)
 def delete_namespace(namespace: str) -> dict:
     """Delete all items in a namespace.
 
@@ -1603,7 +1514,7 @@ def delete_namespace(namespace: str) -> dict:
     }
 
 
-@mcp.tool(annotations=_ANN_UPDATE)
+@mcp.tool(annotations=config.ANN_UPDATE)
 def rename_namespace(old_namespace: str, new_namespace: str) -> dict:
     """Rename a namespace across all documents, knowledge entries, and notes.
 
@@ -1694,7 +1605,7 @@ def main():
     logging.basicConfig(level=logging.INFO)
 
     logger.info("Starting Mnem-O-matic MCP server")
-    logger.info("Configuration: db_path=%s, host=%s, port=%s", DB_PATH, HOST, PORT)
+    logger.info("Configuration: db_path=%s, host=%s, port=%s", config.DB_PATH, config.HOST, config.PORT)
 
     # Pre-warm db and resolve embedder so the first request doesn't pay setup costs
     logger.info("Initializing database...")
@@ -1706,24 +1617,24 @@ def main():
     # Under "auto" the database has already compared the recorded embedding
     # identity against the configured one, so reindex_pending is the whole
     # question: nothing changed, nothing to do.
-    if REINDEX_MODE == "force" or (REINDEX_MODE == "auto" and _db().reindex_pending):
+    if config.REINDEX_MODE == "force" or (config.REINDEX_MODE == "auto" and _db().reindex_pending):
         _run_reindex()
-    elif REINDEX_MODE == "auto":
+    elif config.REINDEX_MODE == "auto":
         logger.info("Embedder matches the stored index — no reindex needed")
 
     # Scheduled backups on a daemon thread (the Database hands each thread its
     # own connection, so the loop reads safely alongside request handling).
-    if BACKUP_DIR:
+    if config.BACKUP_DIR:
         from pathlib import Path
 
         from mnemomatic.backup import start_backup_thread
-        start_backup_thread(_db, Path(BACKUP_DIR), interval_hours=BACKUP_INTERVAL_HOURS,
-                            keep=BACKUP_KEEP, server_version=_server_version())
+        start_backup_thread(_db, Path(config.BACKUP_DIR), interval_hours=config.BACKUP_INTERVAL_HOURS,
+                            keep=config.BACKUP_KEEP, server_version=_server_version())
         logger.info("Scheduled backups: every %gh to %s (keeping %d)",
-                    BACKUP_INTERVAL_HOURS, BACKUP_DIR, BACKUP_KEEP)
+                    config.BACKUP_INTERVAL_HOURS, config.BACKUP_DIR, config.BACKUP_KEEP)
 
     # Always use unified ASGI app + Uvicorn code path
-    # Authentication is optional based on API_KEY environment variable
+    # Authentication is optional based on config.API_KEY environment variable
     logger.info("Building ASGI application...")
     app = mcp.streamable_http_app()
 
@@ -1734,9 +1645,9 @@ def main():
 
     # Optional read-only web viewer at /ui, gated by a single shared secret.
     # Disabled unless MNEMOMATIC_UI_TOKEN is set, so it never exposes data by default.
-    if UI_TOKEN:
+    if config.UI_TOKEN:
         from mnemomatic.webui import register_webui
-        register_webui(app, _db, UI_TOKEN, settings_info=_settings_info, make_export=_make_export)
+        register_webui(app, _db, config.UI_TOKEN, settings_info=_settings_info, make_export=_make_export)
         logger.info("Web viewer enabled at /ui")
     else:
         logger.info("Web viewer disabled (set MNEMOMATIC_UI_TOKEN to enable)")
@@ -1747,14 +1658,14 @@ def main():
     app = RequestMetaMiddleware(app)
 
     # Middleware handles both authenticated and non-authenticated modes
-    # If API_KEY is empty, auth is disabled but logging still tracks requests.
+    # If config.API_KEY is empty, auth is disabled but logging still tracks requests.
     # /ui is exempt from Bearer auth only when the viewer is actually registered.
-    app = BearerAuthMiddleware(app, api_key=API_KEY, exempt_ui=bool(UI_TOKEN))
+    app = BearerAuthMiddleware(app, api_key=config.API_KEY, exempt_ui=bool(config.UI_TOKEN))
 
-    if CORS_ORIGINS:
+    if config.CORS_ORIGINS:
         from starlette.middleware.cors import CORSMiddleware
-        origins = [o.strip() for o in CORS_ORIGINS.split(",") if o.strip()]
-        if "*" in origins and not API_KEY:
+        origins = [o.strip() for o in config.CORS_ORIGINS.split(",") if o.strip()]
+        if "*" in origins and not config.API_KEY:
             logger.warning(
                 "SECURITY: CORS is open to all origins (*) and authentication is disabled — "
                 "any website can read from and write to this server."
@@ -1768,11 +1679,11 @@ def main():
         )
         logger.info("CORS enabled for origins: %s", origins)
 
-    logger.info("Starting server on %s:%d", HOST, PORT)
+    logger.info("Starting server on %s:%d", config.HOST, config.PORT)
     uvicorn.run(
         app,
-        host=HOST,
-        port=PORT,
+        host=config.HOST,
+        port=config.PORT,
         log_level="info",
     )
 

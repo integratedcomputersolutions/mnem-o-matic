@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 import mnemomatic.db
 import mnemomatic.server as server
+from mnemomatic import config
 from mnemomatic.db import SCHEMA_VERSION, Database
 from mnemomatic.models import Document, Knowledge, Note
 from tests._support import EMBEDDING_DIM, FakeEmbedder, axis
@@ -141,7 +142,7 @@ class TestRunReindex(unittest.TestCase):
         self.assertIn(self.doc.id, [r.id for r in results])
 
     def test_reindex_applies_current_doc_prefix(self):
-        with patch.object(server, "EMBED_DOC_PREFIX", "D>> "):
+        with patch.object(config, "EMBED_DOC_PREFIX", "D>> "):
             server._run_reindex()
         # Every content embedding request carried the prefix.
         self.assertTrue(all(c.startswith("D>> ") for c in self.embedder.calls))

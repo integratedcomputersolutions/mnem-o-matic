@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import patch
 
 import mnemomatic.server as server
+from mnemomatic import config
 from mnemomatic.db import Database
 from mnemomatic.models import Document
 
@@ -42,7 +43,7 @@ class TestListItemsTool(unittest.TestCase):
 
     def test_limit_clamped_to_maximum(self):
         resp = server.list_items(item_type="document", namespace="proj", limit=10_000)
-        self.assertEqual(resp["limit"], server.MAX_LIST_LIMIT)
+        self.assertEqual(resp["limit"], config.MAX_LIST_LIMIT)
 
     def test_nonpositive_limit_and_negative_offset_clamped(self):
         resp = server.list_items(item_type="document", namespace="proj", limit=0, offset=-3)
