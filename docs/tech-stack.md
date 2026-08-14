@@ -8,7 +8,7 @@ Python has the most mature official MCP SDK ([modelcontextprotocol/python-sdk](h
 
 SQLite was chosen for transportability — the entire database is a single file. No server process, no connection strings. Copy the file to back it up, move it to another machine, or sync it between devices.
 
-The schema is versioned via `PRAGMA user_version`: on startup, databases from older versions are migrated forward automatically in a single transaction (see [Schema Migrations](installation.md#schema-migrations)). The database also records the embedding dimension it was created with, and the server fails fast on a mismatch instead of corrupting the index.
+The schema is versioned via `PRAGMA user_version`: on startup, databases from older versions are migrated forward automatically in a single transaction (see [Schema Migrations](installation.md#schema-migrations)). The database also records which embedder built its vector index — the dimension, the model name, and both task prefixes — and the server fails fast on a mismatch instead of searching against vectors from a different embedding space. The dimension alone is not enough: models of equal dimension would otherwise swap silently, leaving an index that returns degraded results with nothing to signal it.
 
 FTS5 is SQLite's built-in full-text search engine. It handles keyword and phrase matching with no external dependencies. User queries are escaped defensively: anything that isn't plain words is quoted into a literal phrase, so FTS5 operator syntax (`AND`, `NEAR`, `:` column filters, stray `?`) can never break a search.
 

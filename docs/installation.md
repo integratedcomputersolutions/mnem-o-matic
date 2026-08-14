@@ -300,6 +300,24 @@ The bundled `model_config.json` carries the new dimension and prefixes, so no ot
 
 Items whose embedding fails during the run are logged and remain findable via fulltext search; re-run the reindex to retry them. Fulltext search is unaffected throughout.
 
+### Forgetting the reindex
+
+The database records which embedder built its vector index — the model name and both task prefixes, alongside the dimension — and refuses to start when the configured embedder disagrees. The error names each field that changed:
+
+```
+Embedding identity mismatch: model was 'embeddinggemma-300m', now 'amaretto-embed-148m'.
+The stored vectors were produced with a different embedding configuration, so searching
+against them returns wrong results with no error to notice. Restore the previous settings
+to keep the existing index, or set MNEMOMATIC_REINDEX=1 to rebuild the index and re-embed
+all content on startup.
+```
+
+This matters most for swaps that keep the same dimension — most built-in models are 768-dim, so the dimension check alone would let the swap through. The resulting index isn't broken in any visible way: queries embedded by the new model, searched against the old model's vectors, return plausible but degraded results and nothing errors.
+
+Either way out works: restore the previous setting, or reindex.
+
+> **Upgrading an existing database:** the first start after upgrading to a release with this check records whatever embedder is configured then, logs a warning, and starts normally — nothing breaks. It cannot detect a swap that already happened, so if you changed models earlier without reindexing, run `MNEMOMATIC_REINDEX=1` once now. Running FTS-only (no embedder configured) neither triggers the check nor disturbs a recorded identity.
+
 > **Compatibility note:** the default `minilm` build uses the same model and quantization pipeline as earlier releases, so databases created by previous images keep working without a reindex. Only an actual model change triggers the flow above.
 
 ## Schema Migrations

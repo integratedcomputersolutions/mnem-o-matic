@@ -235,17 +235,35 @@ def _item_column_values(item, columns) -> list:
 
 
 class Database:
-    def __init__(self, db_path: str | Path = ":memory:", allow_dim_change: bool = False):
+    # schema_meta keys recording which embedder built the vector index. The
+    # dimension lives in `embed_dim` instead, because it is structural — the
+    # vec0 tables are declared with it — while these only describe identity.
+    _IDENTITY_KEYS = ("embed_model", "embed_query_prefix", "embed_doc_prefix")
+
+    def __init__(
+        self,
+        db_path: str | Path = ":memory:",
+        allow_reindex: bool = False,
+        embed_identity: dict[str, str] | None = None,
+    ):
         """Args:
             db_path: SQLite file path, or ":memory:".
-            allow_dim_change: when True, an EMBEDDING_DIM mismatch with the
-                stored dimension does not fail startup; instead
-                `dim_change_pending` is set and the caller is expected to run
-                rebuild_vec_tables() + re-embed (the MNEMOMATIC_REINDEX flow).
+            allow_reindex: when True, a change that invalidates the stored
+                vectors — EMBEDDING_DIM, or the embedding identity below —
+                does not fail startup; instead `reindex_pending` is set and the
+                caller is expected to run rebuild_vec_tables() + re-embed (the
+                MNEMOMATIC_REINDEX flow).
+            embed_identity: the current embedder's identity, keyed by
+                _IDENTITY_KEYS. Injected by the caller because the embedding
+                configuration lives in the server layer. Omitted (or without an
+                `embed_model`) means "unknown", which disables both the identity
+                check and its recording — an FTS-only run must neither fail
+                against a fingerprinted database nor overwrite its fingerprint.
         """
         self.db_path = str(db_path)
-        self.allow_dim_change = allow_dim_change
-        self.dim_change_pending = False
+        self.allow_reindex = allow_reindex
+        self.reindex_pending = False
+        self.embed_identity = embed_identity or {}
         self._local = threading.local()
         self._init_schema()
 
@@ -442,8 +460,85 @@ class Database:
             USING vec0(namespace TEXT partition key, embedding float[{EMBEDDING_DIM}])
         """)
 
+    def _identity_known(self) -> bool:
+        """Whether the caller told us which embedder is configured."""
+        return bool(self.embed_identity.get("embed_model"))
+
+    def _stamp_identity(self, conn: sqlite3.Connection) -> None:
+        """Record the configured embedding identity. No-op when unknown, so an
+        FTS-only run never erases the fingerprint of a real embedder."""
+        if not self._identity_known():
+            return
+        for key in self._IDENTITY_KEYS:
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_meta (key, value) VALUES (?, ?)",
+                (key, self.embed_identity.get(key) or ""),
+            )
+
+    def _check_identity(self, conn: sqlite3.Connection) -> None:
+        """Fail fast when a different embedder is configured than the one that
+        built the index.
+
+        The dimension check alone cannot catch this: models of equal dimension
+        swap silently, and the result is not a broken index so much as a subtly
+        wrong one — queries embedded by one model, searched against another
+        model's vectors, return plausible but degraded results with no error.
+
+        A database written before identities were recorded has nothing to
+        compare against, so it adopts whatever is configured now. That cannot
+        detect a swap that already happened, hence the warning.
+        """
+        if not self._identity_known():
+            return
+        placeholders = ",".join("?" * len(self._IDENTITY_KEYS))
+        stored = {
+            row["key"]: row["value"]
+            for row in conn.execute(
+                f"SELECT key, value FROM schema_meta WHERE key IN ({placeholders})",
+                self._IDENTITY_KEYS,
+            ).fetchall()
+        }
+
+        if "embed_model" not in stored:
+            logger.warning(
+                "Recording embedding identity (model %r) for a database that predates this "
+                "check — model and prefix changes will be caught from now on. If the model "
+                "was already changed without a reindex, run MNEMOMATIC_REINDEX=1 once.",
+                self.embed_identity.get("embed_model"),
+            )
+            self._stamp_identity(conn)
+            conn.commit()
+            return
+
+        changed = [
+            (key, stored.get(key, ""), self.embed_identity.get(key) or "")
+            for key in self._IDENTITY_KEYS
+            if stored.get(key, "") != (self.embed_identity.get(key) or "")
+        ]
+        if not changed:
+            return
+
+        detail = "; ".join(
+            f"{key.removeprefix('embed_')} was {old!r}, now {new!r}" for key, old, new in changed
+        )
+        if self.allow_reindex:
+            logger.warning(
+                "Embedding identity changing (%s) — vec tables will be rebuilt and all "
+                "content re-embedded", detail,
+            )
+            self.reindex_pending = True
+            return
+        raise RuntimeError(
+            f"Embedding identity mismatch: {detail}. The stored vectors were produced with a "
+            f"different embedding configuration, so searching against them returns wrong "
+            f"results with no error to notice. Restore the previous settings to keep the "
+            f"existing index, or set MNEMOMATIC_REINDEX=1 to rebuild the index and re-embed "
+            f"all content on startup."
+        )
+
     def _ensure_vec_schema(self, conn: sqlite3.Connection) -> None:
-        """Create or migrate the vec0 tables, then record schema version and dim.
+        """Create or migrate the vec0 tables, then record schema version, dim,
+        and the identity of the embedder that built the index.
 
         Fails fast when MNEMOMATIC_EMBED_DIM disagrees with the dimension the
         database was created with — a mismatch would otherwise surface later as
@@ -454,12 +549,12 @@ class Database:
         if version >= 1:
             stored = conn.execute("SELECT value FROM schema_meta WHERE key = 'embed_dim'").fetchone()
             if stored and int(stored["value"]) != EMBEDDING_DIM:
-                if self.allow_dim_change:
+                if self.allow_reindex:
                     logger.warning(
                         "Embedding dimension changing from %s to %d — vec tables will be "
                         "rebuilt and all content re-embedded", stored["value"], EMBEDDING_DIM,
                     )
-                    self.dim_change_pending = True
+                    self.reindex_pending = True
                 else:
                     raise RuntimeError(
                         f"Embedding dimension mismatch: database was created with dim {stored['value']} "
@@ -467,11 +562,12 @@ class Database:
                         f"to keep the existing index, or set MNEMOMATIC_REINDEX=1 to rebuild the index and "
                         f"re-embed all content at the new dimension on startup."
                     )
+            self._check_identity(conn)
             if version < SCHEMA_VERSION:
                 self._migrate_content_schema(conn)
-                # A pending dim change leaves the version to rebuild_vec_tables,
+                # A pending rebuild leaves the version to rebuild_vec_tables,
                 # which stamps it once the vec tables actually match.
-                if not self.dim_change_pending:
+                if not self.reindex_pending:
                     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
                     conn.commit()
             return
@@ -494,11 +590,11 @@ class Database:
                     if rows:
                         found_dim = len(rows[0]["embedding"]) // 4
                         if found_dim != EMBEDDING_DIM:
-                            if self.allow_dim_change:
+                            if self.allow_reindex:
                                 # No point copying wrong-dim embeddings; the
                                 # reindex rebuild will replace these tables.
                                 conn.rollback()
-                                self.dim_change_pending = True
+                                self.reindex_pending = True
                                 logger.warning(
                                     "Legacy embeddings have dim %d, configured %d — deferring "
                                     "to reindex rebuild", found_dim, EMBEDDING_DIM,
@@ -524,6 +620,7 @@ class Database:
                 "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('embed_dim', ?)",
                 (str(EMBEDDING_DIM),),
             )
+            self._stamp_identity(conn)
             self._migrate_content_schema(conn)
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             conn.commit()
@@ -613,8 +710,8 @@ class Database:
         """Drop and recreate all vec0 tables empty, at the configured dimension.
 
         The reindex flow: content tables are untouched; the caller re-embeds
-        every item afterwards. Also records the (possibly new) dimension and
-        schema version, and clears any pending dim change.
+        every item afterwards. Also records the (possibly new) dimension,
+        embedding identity, and schema version, and clears any pending rebuild.
         """
         logger.info("Rebuilding vector tables at dim %d...", EMBEDDING_DIM)
         conn = self._get_conn()
@@ -627,12 +724,13 @@ class Database:
                 "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('embed_dim', ?)",
                 (str(EMBEDDING_DIM),),
             )
+            self._stamp_identity(conn)
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             conn.commit()
         except Exception:
             conn.rollback()
             raise
-        self.dim_change_pending = False
+        self.reindex_pending = False
         logger.info("Vector tables rebuilt, re-embedding content for %d dims", EMBEDDING_DIM)
 
     def stored_embed_dim(self) -> int | None:
@@ -642,6 +740,18 @@ class Database:
             "SELECT value FROM schema_meta WHERE key = 'embed_dim'"
         ).fetchone()
         return int(row["value"]) if row else None
+
+    def stored_embed_identity(self) -> dict[str, str]:
+        """The embedding identity the vector index was built with, keyed by
+        _IDENTITY_KEYS. Empty for a database written before it was recorded."""
+        placeholders = ",".join("?" * len(self._IDENTITY_KEYS))
+        return {
+            row["key"]: row["value"]
+            for row in self._get_conn().execute(
+                f"SELECT key, value FROM schema_meta WHERE key IN ({placeholders})",
+                self._IDENTITY_KEYS,
+            ).fetchall()
+        }
 
     def set_embedding(self, item_type: str, item_id: str, embedding: list[float]) -> bool:
         """Write an item's embedding without touching its content or timestamps.

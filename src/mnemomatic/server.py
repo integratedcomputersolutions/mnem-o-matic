@@ -71,6 +71,21 @@ EMBED_DOC_PREFIX = os.environ.get("MNEMOMATIC_EMBED_DOC_PREFIX", _DEFAULT_DOC_PR
 # flag after the run — it re-embeds on every boot while set.
 REINDEX = os.environ.get("MNEMOMATIC_REINDEX", "").strip().lower() in ("1", "true", "yes")
 
+
+def _embed_identity() -> dict[str, str]:
+    """What the database records about which embedder built its vector index.
+
+    The model name comes from the bundled model's config, or from
+    MNEMOMATIC_EMBED_MODEL for an external endpoint. An empty name means the
+    identity is unknown (FTS-only, or an external endpoint that never named its
+    model), which disables the startup identity check — see Database.
+    """
+    return {
+        "embed_model": model_config.CONFIG.get("model") or EMBED_MODEL or "",
+        "embed_query_prefix": EMBED_QUERY_PREFIX,
+        "embed_doc_prefix": EMBED_DOC_PREFIX,
+    }
+
 # Tool annotation presets
 _ANN_READ_ONLY = ToolAnnotations(readOnlyHint=True, openWorldHint=False)
 _ANN_STORE = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False)
@@ -100,7 +115,9 @@ def _db() -> Database:
             # Double-check pattern: verify again inside lock
             if db is None:
                 os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
-                db = Database(DB_PATH, allow_dim_change=REINDEX)
+                db = Database(
+                    DB_PATH, allow_reindex=REINDEX, embed_identity=_embed_identity()
+                )
     return db
 
 
@@ -319,7 +336,7 @@ def _run_reindex() -> None:
     """
     database = _db()
     if _embedder() is None:
-        if database.dim_change_pending:
+        if database.reindex_pending:
             raise RuntimeError(
                 "MNEMOMATIC_REINDEX is set and the embedding dimension changed, but no "
                 "embedder is available — cannot rebuild the index. Configure an embedder "
@@ -1488,7 +1505,7 @@ def _settings_info() -> dict:
     from mnemomatic.embeddings import EMBED_API, MODEL_MAX_TOKENS
 
     embedder = _embedder()
-    model_name = model_config.CONFIG.get("model") or EMBED_MODEL or None
+    model_name = _embed_identity()["embed_model"] or None
     info = {
         "version": _server_version(),
         "mode": embedder.mode if embedder is not None else "FTS-only (no embedder)",
@@ -1496,6 +1513,7 @@ def _settings_info() -> dict:
         "model_url": _HF_MODEL_PAGES.get(model_name),
         "dim_configured": db_module.EMBEDDING_DIM,
         "dim_database": _db().stored_embed_dim(),
+        "model_database": _db().stored_embed_identity().get("embed_model") or None,
         "query_prefix": EMBED_QUERY_PREFIX,
         "doc_prefix": EMBED_DOC_PREFIX,
         "chunk_threshold": CHUNK_THRESHOLD,
