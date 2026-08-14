@@ -68,10 +68,35 @@ _DEFAULT_DOC_PREFIX = "" if EMBED_URL else model_config.CONFIG.get("doc_prefix",
 EMBED_QUERY_PREFIX = os.environ.get("MNEMOMATIC_EMBED_QUERY_PREFIX", _DEFAULT_QUERY_PREFIX)
 EMBED_DOC_PREFIX = os.environ.get("MNEMOMATIC_EMBED_DOC_PREFIX", _DEFAULT_DOC_PREFIX)
 
-# When set, startup rebuilds the vector index and re-embeds every stored item
-# with the current embedder/dim/prefixes, then serves normally. Remove the
-# flag after the run — it re-embeds on every boot while set.
-REINDEX = os.environ.get("MNEMOMATIC_REINDEX", "").strip().lower() in ("1", "true", "yes")
+
+# How startup responds to a stored index built by a different embedder than the
+# one configured now:
+#   "off"   (default) — refuse to start, naming what changed. The safe default:
+#                       an unintended model or prefix change should stop the
+#                       server, not silently rebuild the index.
+#   "auto"  — rebuild and re-embed, but only when something actually changed.
+#             A no-op otherwise, so it is safe to leave set permanently.
+#   "force" — rebuild and re-embed on every boot regardless. For forcing a
+#             re-embed that the identity check would not catch.
+def _reindex_mode() -> str:
+    raw = os.environ.get("MNEMOMATIC_REINDEX", "").strip().lower()
+    if raw == "auto":
+        return "auto"
+    if raw in ("1", "true", "yes"):
+        return "force"
+    if raw not in ("", "0", "false", "no"):
+        logger.warning(
+            "Ignoring unrecognised MNEMOMATIC_REINDEX=%r — expected 'auto', '1', or unset. "
+            "Treating it as unset, so a changed embedder will refuse startup rather than "
+            "silently re-embedding.", raw,
+        )
+    return "off"
+
+
+REINDEX_MODE = _reindex_mode()
+# Both modes let the database defer an index-invalidating change instead of
+# raising, so startup can rebuild rather than fail.
+REINDEX = REINDEX_MODE in ("auto", "force")
 
 
 def _embed_identity() -> dict[str, str]:
@@ -332,27 +357,40 @@ def _embed_document_body(title: str, content: str) -> tuple[list[float] | None, 
 def _run_reindex() -> None:
     """Rebuild the vector index and re-embed every stored item.
 
-    Runs at startup when MNEMOMATIC_REINDEX is set — after a change of
-    embedding model, dimension, or task prefixes. Content tables are never
-    modified (timestamps included); only vectors and document chunks are
-    recomputed. Items whose embedding fails are logged and left FTS-only.
+    Runs at startup after a change of embedding model, dimension, or task
+    prefixes — triggered by the recorded identity under MNEMOMATIC_REINDEX=auto,
+    or unconditionally under =1. Content tables are never modified (timestamps
+    included); only vectors and document chunks are recomputed. Items whose
+    embedding fails are logged and left FTS-only.
     """
     database = _db()
     if _embedder() is None:
         if database.reindex_pending:
+            # Never drop vectors that cannot be rebuilt: the rebuild empties the
+            # index first, so without an embedder this would leave the store with
+            # no semantic search at all and no way back.
             raise RuntimeError(
-                "MNEMOMATIC_REINDEX is set and the embedding dimension changed, but no "
-                "embedder is available — cannot rebuild the index. Configure an embedder "
-                "or restore the previous MNEMOMATIC_EMBED_DIM."
+                "The configured embedder differs from the one that built this index, but no "
+                "embedder is available to rebuild it. Configure an embedder, or restore the "
+                "previous embedding settings to keep the existing index."
             )
         logger.error("MNEMOMATIC_REINDEX is set but no embedder is available — skipping reindex")
         return
 
-    logger.warning(
-        "Reindex starting: rebuilding vector index at dim %d and re-embedding all content. "
-        "Remove MNEMOMATIC_REINDEX after this run — it re-embeds on every startup while set.",
-        EMBEDDING_DIM,
-    )
+    if REINDEX_MODE == "force":
+        logger.warning(
+            "Reindex starting (MNEMOMATIC_REINDEX=1): rebuilding vector index at dim %d and "
+            "re-embedding all content. Remove the flag after this run — it re-embeds on every "
+            "startup while set. MNEMOMATIC_REINDEX=auto re-embeds only when the embedder "
+            "actually changes, and is safe to leave set.",
+            EMBEDDING_DIM,
+        )
+    else:
+        logger.warning(
+            "Embedder changed — reindexing automatically (MNEMOMATIC_REINDEX=auto): rebuilding "
+            "vector index at dim %d and re-embedding all content before serving.",
+            EMBEDDING_DIM,
+        )
     database.rebuild_vec_tables()
 
     counts = {"documents": 0, "knowledge": 0, "notes": 0, "failed": 0}
@@ -386,6 +424,10 @@ def _run_reindex() -> None:
         "Reindex complete: %d documents, %d knowledge, %d notes re-embedded, %d failed",
         counts["documents"], counts["knowledge"], counts["notes"], counts["failed"],
     )
+    # A whole-store re-embed is worth a trail entry: it explains why every
+    # item's vector changed at once, and under =auto nobody typed a command.
+    _audit("reindex", mode=REINDEX_MODE, dim=EMBEDDING_DIM,
+           model=_embed_identity()["embed_model"] or None, **counts)
 
 
 # ── Tools ──
@@ -1216,7 +1258,8 @@ def list_audit(
     (for restore), the audit log holds the events (who did what, when).
 
     Each event carries: ts, op (store/update/supersede/delete/tag/restore/
-    rename_namespace/delete_namespace), item_type/item_id/namespace/title,
+    rename_namespace/delete_namespace, plus reindex when the whole store was
+    re-embedded), item_type/item_id/namespace/title,
     actor (the client's self-declared X-Mnemomatic-Actor header, if any),
     client (user-agent), ip, and op-specific detail. With a shared API key
     the actor is self-reported, not authenticated.
@@ -1660,8 +1703,13 @@ def main():
     _embedder()
 
     # Opt-in full re-embed (model/dim/prefix changes) before serving traffic.
-    if REINDEX:
+    # Under "auto" the database has already compared the recorded embedding
+    # identity against the configured one, so reindex_pending is the whole
+    # question: nothing changed, nothing to do.
+    if REINDEX_MODE == "force" or (REINDEX_MODE == "auto" and _db().reindex_pending):
         _run_reindex()
+    elif REINDEX_MODE == "auto":
+        logger.info("Embedder matches the stored index — no reindex needed")
 
     # Scheduled backups on a daemon thread (the Database hands each thread its
     # own connection, so the loop reads safely alongside request handling).
