@@ -4,6 +4,8 @@ import os
 import re
 import sqlite3
 import threading
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from importlib.metadata import PackageNotFoundError, version
 
@@ -554,28 +556,44 @@ def _note_update_embedding(id: str, existing: Note, fields: dict) -> list[float]
     return None
 
 
-_UPDATE_CONFIG = {
-    "document": {
-        "model": Document,
-        "getter": Database.get_document,
-        "updater": lambda db, id, emb, fields: db.update_document(id, embedding=emb, **fields),
-        "embed": _document_update_embedding,
-        "key": "title",
-    },
-    "knowledge": {
-        "model": Knowledge,
-        "getter": Database.get_knowledge,
-        "updater": lambda db, id, emb, fields: db.update_knowledge(id, embedding=emb, **fields),
-        "embed": _knowledge_update_embedding,
-        "key": "subject",
-    },
-    "note": {
-        "model": Note,
-        "getter": Database.get_note,
-        "updater": lambda db, id, emb, fields: db.update_note(id, embedding=emb, **fields),
-        "embed": _note_update_embedding,
-        "key": "title",
-    },
+@dataclass(frozen=True)
+class _ItemOps:
+    """The per-type database calls the tools dispatch through.
+
+    Only genuinely per-type behaviour lives here. Everything descriptive —
+    model, title field, resource shape — comes from the table spec in db.py,
+    so the two never disagree about what a "note" is.
+    """
+
+    get: Callable                # (db, id) -> item | None
+    delete: Callable             # (db, id) -> bool
+    list: Callable               # (db, namespace) -> [item]
+    update: Callable             # (db, id, embedding, fields) -> item | None
+    embed_update: Callable       # (id, existing, fields) -> embedding | None
+
+
+_OPS: dict[str, _ItemOps] = {
+    "document": _ItemOps(
+        get=Database.get_document,
+        delete=Database.delete_document,
+        list=Database.list_documents,
+        update=lambda db, id, emb, fields: db.update_document(id, embedding=emb, **fields),
+        embed_update=_document_update_embedding,
+    ),
+    "knowledge": _ItemOps(
+        get=Database.get_knowledge,
+        delete=Database.delete_knowledge,
+        list=Database.list_knowledge,
+        update=lambda db, id, emb, fields: db.update_knowledge(id, embedding=emb, **fields),
+        embed_update=_knowledge_update_embedding,
+    ),
+    "note": _ItemOps(
+        get=Database.get_note,
+        delete=Database.delete_note,
+        list=Database.list_notes,
+        update=lambda db, id, emb, fields: db.update_note(id, embedding=emb, **fields),
+        embed_update=_note_update_embedding,
+    ),
 }
 
 
@@ -587,9 +605,9 @@ def _handle_update(item_type: str, id: str, fields: dict) -> dict:
     change to the fact itself supersedes (closes the current entry and inserts
     a successor) instead of overwriting.
     """
-    cfg = _UPDATE_CONFIG[item_type]
+    ops, spec = _OPS[item_type], _SPEC_BY_ITEM_TYPE[item_type]
     db = _db()
-    existing = cfg["getter"](db, id)
+    existing = ops.get(db, id)
     if existing is None:
         return {"error": f"{item_type.capitalize()} {id} not found"}
     if item_type == "knowledge" and existing.valid_until is not None:
@@ -598,20 +616,39 @@ def _handle_update(item_type: str, id: str, fields: dict) -> dict:
                            f"Update the current fact for this subject instead, or use fact_history to inspect it."}
 
     try:
-        cfg["model"](**{**existing.model_dump(), **fields})
+        spec.model(**{**existing.model_dump(), **fields})
     except ValidationError as e:
         return {"error": "Invalid update", "details": _format_validation_error(e)}
 
     if item_type == "knowledge" and "fact" in fields and fields["fact"] != existing.fact:
         return _supersede_update(existing, fields)
 
-    embedding = cfg["embed"](id, existing, fields)
-    updated = cfg["updater"](db, id, embedding, fields)
+    embedding = ops.embed_update(id, existing, fields)
+    updated = ops.update(db, id, embedding, fields)
     if updated is None:
         return {"error": f"{item_type.capitalize()} {id} not found"}
+    key = spec.title_field
     _audit("update", item_type=item_type, item_id=updated.id, namespace=updated.namespace,
-           title=getattr(updated, cfg["key"]), fields=sorted(fields))
-    return {"id": updated.id, cfg["key"]: getattr(updated, cfg["key"]), "updated": True}
+           title=getattr(updated, key), fields=sorted(fields))
+    return {"id": updated.id, key: getattr(updated, key), "updated": True}
+
+
+def _handle_delete(item_type: str, id: str) -> dict:
+    """Shared body for the delete_* tools.
+
+    The item is read before it goes, so the audit event can still name the
+    namespace and title it had — the row is gone by the time the event is
+    written. A delete that removed nothing is not an event.
+    """
+    db = _db()
+    existing = _OPS[item_type].get(db, id)
+    deleted = _OPS[item_type].delete(db, id)
+    if deleted:
+        title_field = _SPEC_BY_ITEM_TYPE[item_type].title_field
+        _audit("delete", item_type=item_type, item_id=id,
+               namespace=existing.namespace if existing else None,
+               title=getattr(existing, title_field, None) if existing else None)
+    return {"id": id, "deleted": deleted}
 
 
 def _supersede_update(existing: Knowledge, fields: dict) -> dict:
@@ -709,13 +746,7 @@ def delete_document(id: str) -> dict:
     Args:
         id: The document ID to delete.
     """
-    existing = _db().get_document(id)
-    deleted = _db().delete_document(id)
-    if deleted:
-        _audit("delete", item_type="document", item_id=id,
-               namespace=existing.namespace if existing else None,
-               title=getattr(existing, "title", None) if existing else None)
-    return {"id": id, "deleted": deleted}
+    return _handle_delete("document", id)
 
 
 @mcp.tool(annotations=_ANN_DELETE)
@@ -730,13 +761,7 @@ def delete_knowledge(id: str) -> dict:
     Args:
         id: The knowledge entry ID to delete.
     """
-    existing = _db().get_knowledge(id)
-    deleted = _db().delete_knowledge(id)
-    if deleted:
-        _audit("delete", item_type="knowledge", item_id=id,
-               namespace=existing.namespace if existing else None,
-               title=getattr(existing, "subject", None) if existing else None)
-    return {"id": id, "deleted": deleted}
+    return _handle_delete("knowledge", id)
 
 
 @mcp.tool(annotations=_ANN_STORE)
@@ -838,13 +863,7 @@ def delete_note(id: str) -> dict:
     Args:
         id: The note ID to delete.
     """
-    existing = _db().get_note(id)
-    deleted = _db().delete_note(id)
-    if deleted:
-        _audit("delete", item_type="note", item_id=id,
-               namespace=existing.namespace if existing else None,
-               title=getattr(existing, "title", None) if existing else None)
-    return {"id": id, "deleted": deleted}
+    return _handle_delete("note", id)
 
 
 @mcp.tool(annotations=_ANN_TAG)
@@ -987,13 +1006,6 @@ def search(
     return response
 
 
-_READ_GETTERS = {
-    "document": Database.get_document,
-    "knowledge": Database.get_knowledge,
-    "note": Database.get_note,
-}
-
-
 def _record_access(refs: list[tuple[str, str]]) -> None:
     """Usage bookkeeping for items surfaced to a client — never breaks the request."""
     try:
@@ -1021,7 +1033,7 @@ def _audit(op: str, *, item_type: str | None = None, item_id: str | None = None,
 
 def _get_resource(item_type: str, id: str) -> str:
     """Shared body for the get_* MCP resources: fetch by id, return JSON or a not-found error."""
-    obj = _READ_GETTERS[item_type](_db(), id)
+    obj = _OPS[item_type].get(_db(), id)
     if obj is None:
         return json.dumps({"error": f"{item_type.capitalize()} {id} not found"})
     _record_access([(item_type, id)])
@@ -1075,10 +1087,10 @@ def read(item_type: str, id: str) -> dict:
         item_type: The item type — "document", "knowledge", or "note".
         id: The unique item ID (UUID returned by store/search).
     """
-    getter = _READ_GETTERS.get(item_type)
-    if getter is None:
-        return {"error": "Invalid item_type", "details": f"Must be one of: {', '.join(sorted(_READ_GETTERS))}"}
-    item = getter(_db(), id)
+    ops = _OPS.get(item_type)
+    if ops is None:
+        return {"error": "Invalid item_type", "details": f"Must be one of: {', '.join(sorted(_OPS))}"}
+    item = ops.get(_db(), id)
     if item is None:
         return {"error": f"{item_type} not found", "id": id}
     _record_access([(item_type, id)])
@@ -1104,11 +1116,11 @@ def related(item_type: str, id: str, namespace: str | None = None, limit: int = 
                    search across all namespaces.
         limit: Maximum related items to return (default 5, max 100).
     """
-    if item_type not in _READ_GETTERS:
-        return {"error": "Invalid item_type", "details": f"Must be one of: {', '.join(sorted(_READ_GETTERS))}"}
+    if item_type not in _OPS:
+        return {"error": "Invalid item_type", "details": f"Must be one of: {', '.join(sorted(_OPS))}"}
     limit = max(1, min(int(limit), MAX_SEARCH_LIMIT))
 
-    if _READ_GETTERS[item_type](_db(), id) is None:
+    if _OPS[item_type].get(_db(), id) is None:
         return {"error": f"{item_type} not found", "id": id}
     embedding = _db().item_embedding(item_type, id)
     if embedding is None:
@@ -1180,8 +1192,8 @@ def list_revisions(
         namespace: Filter by namespace (optional).
         limit: Maximum revisions to return, newest first (default 20, max 200).
     """
-    if item_type is not None and item_type not in _READ_GETTERS:
-        return {"error": "Invalid item_type", "details": f"Must be one of: {', '.join(sorted(_READ_GETTERS))}"}
+    if item_type is not None and item_type not in _OPS:
+        return {"error": "Invalid item_type", "details": f"Must be one of: {', '.join(sorted(_OPS))}"}
     limit = max(1, min(int(limit), MAX_LIST_LIMIT))
     revisions = _db().list_revisions(item_type=item_type, item_id=item_id,
                                      namespace=namespace, limit=limit)
@@ -1216,8 +1228,8 @@ def list_audit(
         op: Filter by operation name (optional).
         limit: Maximum events to return, newest first (default 50, max 200).
     """
-    if item_type is not None and item_type not in _READ_GETTERS:
-        return {"error": "Invalid item_type", "details": f"Must be one of: {', '.join(sorted(_READ_GETTERS))}"}
+    if item_type is not None and item_type not in _OPS:
+        return {"error": "Invalid item_type", "details": f"Must be one of: {', '.join(sorted(_OPS))}"}
     limit = max(1, min(int(limit), MAX_LIST_LIMIT))
     events = _db().list_audit(item_type=item_type, item_id=item_id,
                               namespace=namespace, op=op, limit=limit)
@@ -1247,9 +1259,9 @@ def restore(revision_id: int) -> dict:
         return {"error": f"Revision {revision_id} not found"}
 
     item_type, item = rev["item_type"], rev["item"]
-    key = _UPDATE_CONFIG[item_type]["key"]
+    key = _SPEC_BY_ITEM_TYPE[item_type].title_field
 
-    if _READ_GETTERS[item_type](_db(), rev["item_id"]) is not None:
+    if _OPS[item_type].get(_db(), rev["item_id"]) is not None:
         # Roll the live item back through the normal update path — it captures
         # the current state as a revision and re-embeds what changed.
         fields = {f: getattr(item, f) for f in _SPEC_BY_ITEM_TYPE[item_type].update_fields}
@@ -1584,37 +1596,37 @@ def list_namespaces() -> str:
     return json.dumps(namespaces)
 
 
+def _json_scalar(value):
+    """Datetimes serialize as ISO-8601; everything else is already JSON-safe."""
+    return value.isoformat() if isinstance(value, datetime) else value
+
+
+def _list_resource(item_type: str, namespace: str) -> str:
+    """Shared body for the per-namespace list resources: summaries only, with
+    the projection taken from the table spec so it tracks the schema."""
+    fields = _SPEC_BY_ITEM_TYPE[item_type].resource_fields
+    items = _OPS[item_type].list(_db(), namespace)
+    return json.dumps([
+        {f: _json_scalar(getattr(item, f)) for f in fields} for item in items
+    ])
+
+
 @mcp.resource("mnemomatic://documents/{namespace}")
 def list_documents(namespace: str) -> str:
     """List all documents in a namespace."""
-    docs = _db().list_documents(namespace)
-    return json.dumps([
-        {"id": d.id, "title": d.title, "mime_type": d.mime_type,
-         "tags": d.tags, "updated_at": d.updated_at.isoformat()}
-        for d in docs
-    ])
+    return _list_resource("document", namespace)
 
 
 @mcp.resource("mnemomatic://knowledge/{namespace}")
 def list_knowledge(namespace: str) -> str:
     """List all knowledge entries in a namespace."""
-    entries = _db().list_knowledge(namespace)
-    return json.dumps([
-        {"id": k.id, "subject": k.subject, "fact": k.fact,
-         "confidence": k.confidence, "tags": k.tags, "updated_at": k.updated_at.isoformat()}
-        for k in entries
-    ])
+    return _list_resource("knowledge", namespace)
 
 
 @mcp.resource("mnemomatic://notes/{namespace}")
 def list_notes(namespace: str) -> str:
     """List all notes in a namespace."""
-    notes = _db().list_notes(namespace)
-    return json.dumps([
-        {"id": n.id, "title": n.title, "source": n.source,
-         "tags": n.tags, "updated_at": n.updated_at.isoformat()}
-        for n in notes
-    ])
+    return _list_resource("note", namespace)
 
 
 @mcp.resource("mnemomatic://note/{id}")

@@ -70,6 +70,21 @@ class _TableSpec:
     resource_uri: str                   # MCP resource template, formatted with the row id
     current_only: str = ""              # extra WHERE fragment hiding non-current rows
 
+    @property
+    def resource_fields(self) -> tuple[str, ...]:
+        """What the per-namespace list resources project.
+
+        The same shape as `summary_columns` minus the usage counters, which
+        those resources have never exposed — derived rather than repeated so
+        the two cannot drift apart.
+        """
+        return tuple(c for c in self.summary_columns if c not in _USAGE_COLUMNS)
+
+
+# Bookkeeping columns present on every content table, tracked separately from
+# the content itself.
+_USAGE_COLUMNS = ("retrieval_count", "last_accessed")
+
 
 # The three content tables, in display order. Each has a parallel vec_<table>.
 # Only knowledge sets current_only: superseded facts stay in the table (that is
