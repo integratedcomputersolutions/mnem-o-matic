@@ -23,11 +23,11 @@ import sqlite3
 import unittest
 from unittest.mock import MagicMock, patch
 
-import mnemomatic.server as server
 from mnemomatic import config
 from mnemomatic.db import Database
 from mnemomatic.models import Document
 from mnemomatic import runtime
+from mnemomatic import tools_search
 
 # A non-None stand-in for "an embedder is configured". search() only checks the
 # embedder for None-ness; the actual embedding is produced by _safe_embed, which
@@ -90,7 +90,7 @@ class SearchDispatchTest(unittest.TestCase):
         with patch.object(runtime, "_db", return_value=self.fake_db), \
              patch.object(runtime, "_embedder", return_value=embedder), \
              patch.object(runtime, "_safe_embed", return_value=embed_result):
-            return server.search(**kwargs)
+            return tools_search.search(**kwargs)
 
     def _backends(self):
         return [c[0] for c in self.fake_db.calls]
@@ -213,7 +213,7 @@ class SearchDispatchTest(unittest.TestCase):
         with patch.object(runtime, "_db", return_value=self.fake_db), \
              patch.object(runtime, "_embedder", return_value=SENTINEL_EMBEDDER), \
              patch.object(runtime, "_safe_embed", safe):
-            server.search(query="a AND b", mode="hybrid")
+            tools_search.search(query="a AND b", mode="hybrid")
         safe.assert_called_once_with(config.EMBED_QUERY_PREFIX + "a AND b")
         backend, fts_arg, embedding, _table, _ns, _limit = self.fake_db.calls[0]
         self.assertEqual(backend, "hybrid")
@@ -227,7 +227,7 @@ class SearchDispatchTest(unittest.TestCase):
         failing_db.search_fts.side_effect = sqlite3.OperationalError('fts5: syntax error near "?"')
         with patch.object(runtime, "_db", return_value=failing_db), \
              patch.object(runtime, "_embedder", return_value=None):
-            res = server.search(query="hello", mode="fulltext")
+            res = tools_search.search(query="hello", mode="fulltext")
         self.assertEqual(len(res), 1)
         self.assertEqual(res[0]["error"], "Search failed")
         self.assertIn("syntax error", res[0]["details"])
@@ -243,7 +243,7 @@ class TestEscapeFtsQuery(unittest.TestCase):
 
     def test_bare_words_pass_through(self):
         for q in ("hello", "hello world", "auth mechanism 42", "café naïve"):
-            self.assertEqual(server._escape_fts_query(q), q)
+            self.assertEqual(tools_search._escape_fts_query(q), q)
 
     def test_punctuation_is_quoted(self):
         cases = {
@@ -259,13 +259,13 @@ class TestEscapeFtsQuery(unittest.TestCase):
             "(group)": '"(group)"',
         }
         for raw, expected in cases.items():
-            self.assertEqual(server._escape_fts_query(raw), expected)
+            self.assertEqual(tools_search._escape_fts_query(raw), expected)
 
     def test_operator_words_quoted_even_when_bare(self):
         # AND/OR/NOT/NEAR are alphanumeric, so the bare-word check alone
         # would let them through as operators.
         for q in ("import AND export", "this OR that", "not NOT me", "a NEAR b"):
-            self.assertTrue(server._escape_fts_query(q).startswith('"'))
+            self.assertTrue(tools_search._escape_fts_query(q).startswith('"'))
 
 
 class TestEscapedQueriesAgainstRealFts(unittest.TestCase):
@@ -289,10 +289,10 @@ class TestEscapedQueriesAgainstRealFts(unittest.TestCase):
     def test_no_query_raises(self):
         for raw in self.PUNCTUATION_QUERIES:
             with self.subTest(query=raw):
-                self.db.search_fts(server._escape_fts_query(raw))  # must not raise
+                self.db.search_fts(tools_search._escape_fts_query(raw))  # must not raise
 
     def test_quoted_phrase_still_matches(self):
-        results = self.db.search_fts(server._escape_fts_query("remains open?"))
+        results = self.db.search_fts(tools_search._escape_fts_query("remains open?"))
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0].title, "doc")
 

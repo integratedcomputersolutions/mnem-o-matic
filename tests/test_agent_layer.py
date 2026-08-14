@@ -14,6 +14,8 @@ from mnemomatic import config
 from mnemomatic.db import Database
 from mnemomatic.models import Knowledge, Note
 from mnemomatic import runtime
+from mnemomatic import tools_content
+from mnemomatic import tools_history
 from tests._support import axis, mix
 
 
@@ -36,7 +38,7 @@ class ToolTestCase(unittest.TestCase):
 class TestSimilarOnStore(ToolTestCase):
     def _store_with_vector(self, title, vector, content="body"):
         with patch.object(runtime, "_safe_embed", return_value=vector):
-            return server.store_note(namespace="proj", title=title, content=content)
+            return tools_content.store_note(namespace="proj", title=title, content=content)
 
     def test_near_duplicate_is_flagged(self):
         first = self._store_with_vector("original", axis(0))
@@ -58,8 +60,8 @@ class TestSimilarOnStore(ToolTestCase):
         self.assertNotIn("similar", again)
 
     def test_no_embedding_no_flag(self):
-        server.store_note(namespace="proj", title="a", content="x")
-        second = server.store_note(namespace="proj", title="b", content="x")
+        tools_content.store_note(namespace="proj", title="a", content="x")
+        second = tools_content.store_note(namespace="proj", title="b", content="x")
         self.assertNotIn("similar", second)
 
     def test_threshold_zero_disables(self):
@@ -71,13 +73,13 @@ class TestSimilarOnStore(ToolTestCase):
     def test_other_namespaces_do_not_flag(self):
         self._store_with_vector("original", axis(0))
         with patch.object(runtime, "_safe_embed", return_value=axis(0)):
-            second = server.store_note(namespace="elsewhere", title="same", content="body")
+            second = tools_content.store_note(namespace="elsewhere", title="same", content="body")
         self.assertNotIn("similar", second)
 
     def test_knowledge_store_flags_too(self):
         with patch.object(runtime, "_safe_embed", return_value=axis(0)):
-            first = server.store_knowledge(namespace="proj", subject="s1", fact="f1")
-            second = server.store_knowledge(namespace="proj", subject="s2", fact="f2")
+            first = tools_content.store_knowledge(namespace="proj", subject="s1", fact="f1")
+            second = tools_content.store_knowledge(namespace="proj", subject="s2", fact="f2")
         self.assertEqual([s["id"] for s in second["similar"]], [first["id"]])
 
 
@@ -90,7 +92,7 @@ class TestDuplicateClusters(unittest.TestCase):
             ("d", "D", axis(3)),
             ("e", "E", axis(3)),                  # identical to d
         ]
-        clusters = server._duplicate_clusters("note", vectors, threshold=0.8)
+        clusters = tools_history._duplicate_clusters("note", vectors, threshold=0.8)
         clusters.sort(key=lambda c: c["similarity"])
         self.assertEqual(len(clusters), 2)
         self.assertEqual({i["id"] for i in clusters[0]["items"]}, {"a", "b"})
@@ -104,13 +106,13 @@ class TestDuplicateClusters(unittest.TestCase):
             ("b", "B", mix(0, 1, 0.9, 0.44)),
             ("c", "C", mix(0, 1, 0.62, 0.78)),
         ]
-        clusters = server._duplicate_clusters("note", vectors, threshold=0.85)
+        clusters = tools_history._duplicate_clusters("note", vectors, threshold=0.85)
         self.assertEqual(len(clusters), 1)
         self.assertEqual({i["id"] for i in clusters[0]["items"]}, {"a", "b", "c"})
 
     def test_empty_and_singleton(self):
-        self.assertEqual(server._duplicate_clusters("note", [], 0.8), [])
-        self.assertEqual(server._duplicate_clusters("note", [("a", "A", axis(0))], 0.8), [])
+        self.assertEqual(tools_history._duplicate_clusters("note", [], 0.8), [])
+        self.assertEqual(tools_history._duplicate_clusters("note", [("a", "A", axis(0))], 0.8), [])
 
 
 class TestConsolidationReport(ToolTestCase):
@@ -119,7 +121,7 @@ class TestConsolidationReport(ToolTestCase):
         self.db.store_knowledge(Knowledge(namespace="proj", subject="s2", fact="f2"), axis(0))
         self.db.store_note(Note(namespace="proj", title="lonely", content="x"), axis(5))
 
-        report = server.consolidation_report(namespace="proj", stale_days=0)
+        report = tools_history.consolidation_report(namespace="proj", stale_days=0)
         self.assertEqual(len(report["duplicate_clusters"]), 1)
         cluster = report["duplicate_clusters"][0]
         self.assertEqual(cluster["type"], "knowledge")
@@ -132,22 +134,22 @@ class TestConsolidationReport(ToolTestCase):
         note, _ = self.db.store_note(Note(namespace="proj", title="used", content="x"), None)
         self.db.store_note(Note(namespace="proj", title="unused", content="y"), None)
         self.db.record_access([("note", note.id)])
-        report = server.consolidation_report(namespace="proj", stale_days=0)
+        report = tools_history.consolidation_report(namespace="proj", stale_days=0)
         self.assertEqual([r["title"] for r in report["stale"]], ["unused"])
 
     def test_superseded_facts_do_not_cluster(self):
         self.db.store_knowledge(Knowledge(namespace="proj", subject="s", fact="old"), axis(0))
         self.db.store_knowledge(Knowledge(namespace="proj", subject="s", fact="new"), axis(0))
-        report = server.consolidation_report(namespace="proj", stale_days=0)
+        report = tools_history.consolidation_report(namespace="proj", stale_days=0)
         # The superseded row lost its vector; only the current fact remains.
         self.assertEqual(report["duplicate_clusters"], [])
 
     def test_invalid_threshold(self):
-        self.assertIn("error", server.consolidation_report(namespace="proj",
+        self.assertIn("error", tools_history.consolidation_report(namespace="proj",
                                                            similarity_threshold=0))
 
     def test_empty_namespace(self):
-        report = server.consolidation_report(namespace="nothing-here")
+        report = tools_history.consolidation_report(namespace="nothing-here")
         self.assertEqual(report["duplicate_clusters"], [])
         self.assertEqual(report["stale"], [])
         self.assertEqual(report["counts"], {})
@@ -155,20 +157,20 @@ class TestConsolidationReport(ToolTestCase):
 
 class TestPrompts(unittest.TestCase):
     def test_consolidate_prompt_mentions_the_workflow(self):
-        text = server.consolidate("proj")
+        text = tools_history.consolidate("proj")
         self.assertIn("consolidation_report(namespace='proj')", text)
         for tool in ("read()", "update_knowledge", "list_revisions"):
             self.assertIn(tool, text)
 
     def test_briefing_prompt_embeds_task_and_scope(self):
-        text = server.briefing("upgrade the auth flow", namespace="webapp")
+        text = tools_history.briefing("upgrade the auth flow", namespace="webapp")
         self.assertIn("upgrade the auth flow", text)
         self.assertIn("namespace='webapp'", text)
         for tool in ("search()", "read()", "fact_history"):
             self.assertIn(tool, text)
 
     def test_briefing_prompt_global_scope(self):
-        text = server.briefing("some task")
+        text = tools_history.briefing("some task")
         self.assertIn("whole store", text)
 
     def test_prompts_are_registered(self):

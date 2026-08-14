@@ -10,10 +10,10 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
-import mnemomatic.server as server
 from mnemomatic.db import CHUNK_THRESHOLD, Database
 from mnemomatic.models import Document, Knowledge, Note
 from mnemomatic import runtime
+from mnemomatic import tools_search
 from tests._support import axis, mix
 
 
@@ -175,7 +175,7 @@ class TestRelatedTool(ToolTestCase):
             Note(namespace="other", title="elsewhere", content="w"), axis(0))
 
     def test_ranks_neighbors_and_excludes_self(self):
-        resp = server.related(item_type="note", id=self.anchor.id)
+        resp = tools_search.related(item_type="note", id=self.anchor.id)
         ids = [r["id"] for r in resp["related"]]
         self.assertNotIn(self.anchor.id, ids)
         self.assertEqual(ids[0], self.elsewhere.id)  # identical vector, other namespace
@@ -183,28 +183,28 @@ class TestRelatedTool(ToolTestCase):
         self.assertLess(ids.index(self.near.id), ids.index(self.far.id))
 
     def test_crosses_content_types(self):
-        resp = server.related(item_type="note", id=self.anchor.id)
+        resp = tools_search.related(item_type="note", id=self.anchor.id)
         self.assertIn("knowledge", {r["type"] for r in resp["related"]})
 
     def test_namespace_scope(self):
-        resp = server.related(item_type="note", id=self.anchor.id, namespace="proj")
+        resp = tools_search.related(item_type="note", id=self.anchor.id, namespace="proj")
         self.assertNotIn(self.elsewhere.id, [r["id"] for r in resp["related"]])
 
     def test_limit_respected(self):
-        resp = server.related(item_type="note", id=self.anchor.id, limit=1)
+        resp = tools_search.related(item_type="note", id=self.anchor.id, limit=1)
         self.assertEqual(len(resp["related"]), 1)
 
     def test_records_access_for_neighbors_not_anchor(self):
-        server.related(item_type="note", id=self.anchor.id)
+        tools_search.related(item_type="note", id=self.anchor.id)
         self.assertEqual(self.db.get_note(self.anchor.id).retrieval_count, 0)
         self.assertEqual(self.db.get_note(self.far.id).retrieval_count, 1)
 
     def test_error_paths(self):
-        self.assertIn("error", server.related(item_type="bogus", id="x"))
-        self.assertIn("error", server.related(item_type="note", id="no-such-id"))
+        self.assertIn("error", tools_search.related(item_type="bogus", id="x"))
+        self.assertIn("error", tools_search.related(item_type="note", id="no-such-id"))
         unembedded, _ = self.db.store_note(
             Note(namespace="proj", title="no vector", content="x"), embedding=None)
-        resp = server.related(item_type="note", id=unembedded.id)
+        resp = tools_search.related(item_type="note", id=unembedded.id)
         self.assertIn("error", resp)
         self.assertIn("REINDEX", resp["details"])
 
@@ -218,20 +218,20 @@ class TestSearchToolFilters(ToolTestCase):
         self._age("notes", old.id, 90)
 
         with patch.object(runtime, "_safe_embed", return_value=axis(0)):
-            tagged = server.search("topic", tags=["keep"], mode="fulltext")
+            tagged = tools_search.search("topic", tags=["keep"], mode="fulltext")
             cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).date().isoformat()
-            fresh = server.search("topic", updated_after=cutoff, mode="hybrid")
+            fresh = tools_search.search("topic", updated_after=cutoff, mode="hybrid")
         self.assertEqual({r["id"] for r in tagged}, {recent.id, old.id})
         self.assertEqual([r["id"] for r in fresh], [recent.id])
 
     def test_invalid_updated_after_is_rejected(self):
-        result = server.search("x", updated_after="last tuesday")
+        result = tools_search.search("x", updated_after="last tuesday")
         self.assertIn("error", result[0])
         self.assertIn("ISO", result[0]["details"])
 
     def test_empty_tag_list_is_not_a_filter(self):
         note, _ = self.db.store_note(Note(namespace="proj", title="n", content="topic"), axis(0))
-        results = server.search("topic", tags=[], mode="fulltext")
+        results = tools_search.search("topic", tags=[], mode="fulltext")
         self.assertEqual([r["id"] for r in results], [note.id])
 
 
