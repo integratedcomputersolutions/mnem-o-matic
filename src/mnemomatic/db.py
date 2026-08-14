@@ -4,6 +4,7 @@ import os
 import sqlite3
 import struct
 import threading
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -47,30 +48,75 @@ REVISIONS_KEEP = int(os.environ.get("MNEMOMATIC_REVISIONS_KEEP", "10"))
 # 0 keeps the trail forever.
 AUDIT_KEEP_DAYS = int(os.environ.get("MNEMOMATIC_AUDIT_KEEP_DAYS", "730"))
 
-# The three content tables, in display order. Each has a parallel vec_<table>.
-_TABLES = ("documents", "knowledge", "notes")
 
-# Per-table shape: the pydantic model, the full column list (mirroring the
-# model's fields), and the fields update_* may change.
-_TABLE_MODEL = {"documents": Document, "knowledge": Knowledge, "notes": Note}
-_TABLE_COLUMNS = {
-    "documents": ("id", "namespace", "title", "content", "mime_type",
-                  "tags", "metadata", "created_at", "updated_at"),
-    "knowledge": ("id", "namespace", "subject", "fact", "confidence", "source",
-                  "tags", "metadata", "created_at", "updated_at",
-                  "valid_until", "superseded_by"),
-    "notes": ("id", "namespace", "title", "content", "source",
-              "tags", "metadata", "created_at", "updated_at"),
+@dataclass(frozen=True)
+class _TableSpec:
+    """Everything that varies between the three content tables.
+
+    One record per table, so adding a content type means adding one entry here
+    rather than editing a dozen parallel dicts and hoping none was missed.
+    """
+
+    table: str                          # SQL table name, e.g. "documents"
+    item_type: str                      # singular name used by the tools, e.g. "document"
+    model: type                         # the pydantic model rows deserialize into
+    alias: str                          # short alias used in multi-table SQL
+    columns: tuple[str, ...]            # full column list, mirroring the model's fields
+    update_fields: frozenset[str]       # what update_* is allowed to change
+    title_field: str                    # the human-facing label ("title"/"subject")
+    snippet_field: str                  # the body field search snippets come from
+    snippet_len: int | None             # snippet truncation; None means "whole field"
+    summary_columns: tuple[str, ...]    # list_page's columns — never the body, so pages stay small
+    resource_uri: str                   # MCP resource template, formatted with the row id
+    current_only: str = ""              # extra WHERE fragment hiding non-current rows
+
+
+# The three content tables, in display order. Each has a parallel vec_<table>.
+# Only knowledge sets current_only: superseded facts stay in the table (that is
+# the point of temporal knowledge) but are excluded from search, listings,
+# counts, and upsert lookups.
+_SPECS: dict[str, _TableSpec] = {
+    "documents": _TableSpec(
+        table="documents", item_type="document", model=Document, alias="d",
+        columns=("id", "namespace", "title", "content", "mime_type",
+                 "tags", "metadata", "created_at", "updated_at"),
+        update_fields=frozenset({"title", "content", "mime_type", "tags", "metadata"}),
+        title_field="title", snippet_field="content", snippet_len=200,
+        summary_columns=("id", "title", "mime_type", "tags", "updated_at",
+                         "retrieval_count", "last_accessed"),
+        resource_uri="mnemomatic://document/{id}",
+    ),
+    "knowledge": _TableSpec(
+        table="knowledge", item_type="knowledge", model=Knowledge, alias="k",
+        columns=("id", "namespace", "subject", "fact", "confidence", "source",
+                 "tags", "metadata", "created_at", "updated_at",
+                 "valid_until", "superseded_by"),
+        update_fields=frozenset({"subject", "fact", "confidence", "source", "tags", "metadata"}),
+        title_field="subject", snippet_field="fact", snippet_len=None,
+        summary_columns=("id", "subject", "fact", "confidence", "tags", "updated_at",
+                         "retrieval_count", "last_accessed"),
+        resource_uri="mnemomatic://knowledge-entry/{id}",
+        current_only=" AND {alias}valid_until IS NULL",
+    ),
+    "notes": _TableSpec(
+        table="notes", item_type="note", model=Note, alias="n",
+        columns=("id", "namespace", "title", "content", "source",
+                 "tags", "metadata", "created_at", "updated_at"),
+        update_fields=frozenset({"title", "content", "source", "tags", "metadata"}),
+        title_field="title", snippet_field="content", snippet_len=200,
+        summary_columns=("id", "title", "source", "tags", "updated_at",
+                         "retrieval_count", "last_accessed"),
+        resource_uri="mnemomatic://note/{id}",
+    ),
 }
 
-# Extra WHERE fragment restricting a table to its live rows. Only knowledge
-# has history rows to hide: superseded facts stay in the table (that's the
-# point) but are excluded from search, listings, counts, and upsert lookups.
-_CURRENT_ONLY = {"documents": "", "knowledge": " AND {alias}valid_until IS NULL", "notes": ""}
+_TABLES = tuple(_SPECS)
+# Same specs keyed by the singular item_type the tools speak.
+_SPEC_BY_ITEM_TYPE: dict[str, _TableSpec] = {s.item_type: s for s in _SPECS.values()}
 
 
 def _current_filter(table: str, alias: str = "") -> str:
-    return _CURRENT_ONLY[table].format(alias=f"{alias}." if alias else "")
+    return _SPECS[table].current_only.format(alias=f"{alias}." if alias else "")
 
 
 def _item_filters(tags: list[str] | None, updated_after: str | None,
@@ -90,35 +136,6 @@ def _item_filters(tags: list[str] | None, updated_after: str | None,
         sql += f" AND {prefix}updated_at >= ?"
         params.append(updated_after)
     return sql, params
-
-
-_TABLE_UPDATE_FIELDS = {
-    "documents": frozenset({"title", "content", "mime_type", "tags", "metadata"}),
-    "knowledge": frozenset({"subject", "fact", "confidence", "source", "tags", "metadata"}),
-    "notes": frozenset({"title", "content", "source", "tags", "metadata"}),
-}
-
-# Maps singular item_type strings (used by update_tags) to table names
-_ITEM_TYPE_TO_TABLE = {"document": "documents", "knowledge": "knowledge", "note": "notes"}
-
-# Per-table field mappings for search result construction
-_TABLE_TO_TYPE = {"documents": "document", "knowledge": "knowledge", "notes": "note"}
-_TABLE_TITLE_FIELD = {"documents": "title", "knowledge": "subject", "notes": "title"}
-_TABLE_SNIPPET_FIELD = {"documents": "content", "knowledge": "fact", "notes": "content"}
-_TABLE_SNIPPET_LEN = {"documents": 200, "knowledge": None, "notes": 200}
-_TABLE_RESOURCE_URI = {
-    "documents": "mnemomatic://document/{id}",
-    "knowledge": "mnemomatic://knowledge-entry/{id}",
-    "notes": "mnemomatic://note/{id}",
-}
-
-# Summary columns returned by list_page — mirrors the list resources; never
-# includes document/note content so pages stay small.
-_LIST_SUMMARY_COLUMNS = {
-    "documents": ("id", "title", "mime_type", "tags", "updated_at", "retrieval_count", "last_accessed"),
-    "knowledge": ("id", "subject", "fact", "confidence", "tags", "updated_at", "retrieval_count", "last_accessed"),
-    "notes": ("id", "title", "source", "tags", "updated_at", "retrieval_count", "last_accessed"),
-}
 
 
 def _chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[str]:
@@ -154,19 +171,19 @@ def _chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OV
 
 
 def _row_to_search_result(table: str, row, score: float) -> SearchResult:
-    title_field = _TABLE_TITLE_FIELD[table]
-    snippet_field = _TABLE_SNIPPET_FIELD[table]
+    title_field = _SPECS[table].title_field
+    snippet_field = _SPECS[table].snippet_field
     snippet = row[snippet_field]
-    max_len = _TABLE_SNIPPET_LEN[table]
+    max_len = _SPECS[table].snippet_len
     if max_len:
         snippet = snippet[:max_len]
     return SearchResult(
         id=row["id"],
-        type=_TABLE_TO_TYPE[table],
+        type=_SPECS[table].item_type,
         namespace=row["namespace"],
         title=row[title_field],
         snippet=snippet,
-        resource_uri=_TABLE_RESOURCE_URI[table].format(id=row["id"]),
+        resource_uri=_SPECS[table].resource_uri.format(id=row["id"]),
         score=score,
         tags=_safe_json_loads(row["tags"], [], f"tags row {row['id']}"),
     )
@@ -758,9 +775,10 @@ class Database:
 
         Used by the reindex flow. Returns False when the item doesn't exist.
         """
-        table = _ITEM_TYPE_TO_TABLE.get(item_type)
-        if table is None:
+        spec = _SPEC_BY_ITEM_TYPE.get(item_type)
+        if spec is None:
             raise ValueError(f"Invalid type {item_type!r}: must be 'document', 'knowledge', or 'note'")
+        table = spec.table
         conn = self._get_conn()
         row = conn.execute(
             f"SELECT rowid, namespace FROM {table} WHERE id = ?", (item_id,)
@@ -786,9 +804,9 @@ class Database:
         now = datetime.now(timezone.utc).isoformat()
         by_table: dict[str, set[str]] = {}
         for item_type, item_id in refs:
-            table = _ITEM_TYPE_TO_TABLE.get(item_type)
-            if table:
-                by_table.setdefault(table, set()).add(item_id)
+            spec = _SPEC_BY_ITEM_TYPE.get(item_type)
+            if spec:
+                by_table.setdefault(spec.table, set()).add(item_id)
         for table, ids in by_table.items():
             conn.execute(
                 f"UPDATE {table} SET retrieval_count = retrieval_count + 1, last_accessed = ? "
@@ -807,24 +825,24 @@ class Database:
         """
         if REVISIONS_KEEP <= 0:
             return
-        payload = {col: row[col] for col in _TABLE_COLUMNS[table]}
+        payload = {col: row[col] for col in _SPECS[table].columns}
         conn.execute(
             "INSERT INTO revisions (item_type, item_id, namespace, title, op, payload, revised_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (_TABLE_TO_TYPE[table], row["id"], row["namespace"],
-             row[_TABLE_TITLE_FIELD[table]], op, json.dumps(payload),
+            (_SPECS[table].item_type, row["id"], row["namespace"],
+             row[_SPECS[table].title_field], op, json.dumps(payload),
              datetime.now(timezone.utc).isoformat()),
         )
         conn.execute(
             "DELETE FROM revisions WHERE item_type = ? AND item_id = ? AND id NOT IN "
             "(SELECT id FROM revisions WHERE item_type = ? AND item_id = ? ORDER BY id DESC LIMIT ?)",
-            (_TABLE_TO_TYPE[table], row["id"], _TABLE_TO_TYPE[table], row["id"], REVISIONS_KEEP),
+            (_SPECS[table].item_type, row["id"], _SPECS[table].item_type, row["id"], REVISIONS_KEEP),
         )
 
     def list_revisions(self, item_type: str | None = None, item_id: str | None = None,
                        namespace: str | None = None, limit: int = 20) -> list[dict]:
         """Revision summaries, newest first — no payloads, so listings stay small."""
-        if item_type is not None and item_type not in _ITEM_TYPE_TO_TABLE:
+        if item_type is not None and item_type not in _SPEC_BY_ITEM_TYPE:
             raise ValueError(f"Invalid type {item_type!r}: must be 'document', 'knowledge', or 'note'")
         sql = "SELECT id, item_type, item_id, namespace, title, op, revised_at FROM revisions"
         clauses, params = [], []
@@ -845,11 +863,11 @@ class Database:
         ).fetchone()
         if row is None:
             return None
-        table = _ITEM_TYPE_TO_TABLE[row["item_type"]]
+        table = _SPEC_BY_ITEM_TYPE[row["item_type"]].table
         payload = _safe_json_loads(row["payload"], None, f"revision {revision_id}")
         if payload is None:
             return None
-        row["item"] = _row_to_model(_TABLE_MODEL[table], payload)
+        row["item"] = _row_to_model(_SPECS[table].model, payload)
         return row
 
     def item_vectors(self, table: str, namespace: str) -> list[tuple[str, str, list[float]]]:
@@ -863,7 +881,7 @@ class Database:
         if table not in _TABLES:
             raise ValueError(f"Invalid table {table!r}")
         rows = self._get_conn().execute(
-            f"SELECT t.id AS id, t.{_TABLE_TITLE_FIELD[table]} AS title, v.embedding AS embedding "
+            f"SELECT t.id AS id, t.{_SPECS[table].title_field} AS title, v.embedding AS embedding "
             f"FROM {table} t JOIN vec_{table} v ON v.rowid = t.rowid "
             f"WHERE t.namespace = ?{_current_filter(table, 't')}",
             (namespace,),
@@ -881,14 +899,14 @@ class Database:
         conn = self._get_conn()
         for table in _TABLES:
             rows = conn.execute(
-                f"SELECT id, {_TABLE_TITLE_FIELD[table]} AS title, updated_at, retrieval_count "
+                f"SELECT id, {_SPECS[table].title_field} AS title, updated_at, retrieval_count "
                 f"FROM {table} WHERE namespace = ? AND retrieval_count = 0 "
                 f"AND updated_at < ?{_current_filter(table)} "
                 f"ORDER BY updated_at LIMIT ?",
                 (namespace, cutoff, limit),
             ).fetchall()
             for row in rows:
-                row["type"] = _TABLE_TO_TYPE[table]
+                row["type"] = _SPECS[table].item_type
             out.extend(rows)
         out.sort(key=lambda r: r["updated_at"])
         return out[:limit]
@@ -921,7 +939,7 @@ class Database:
                    namespace: str | None = None, op: str | None = None,
                    limit: int = 50) -> list[dict]:
         """Audit events, newest first, with optional filters. detail is parsed JSON."""
-        if item_type is not None and item_type not in _ITEM_TYPE_TO_TABLE:
+        if item_type is not None and item_type not in _SPEC_BY_ITEM_TYPE:
             raise ValueError(f"Invalid type {item_type!r}: must be 'document', 'knowledge', or 'note'")
         sql = "SELECT * FROM audit_log"
         clauses, params = [], []
@@ -947,9 +965,10 @@ class Database:
         mean of their chunk vectors stands in as a centroid — good enough
         for "more like this" neighbor queries.
         """
-        table = _ITEM_TYPE_TO_TABLE.get(item_type)
-        if table is None:
+        spec = _SPEC_BY_ITEM_TYPE.get(item_type)
+        if spec is None:
             raise ValueError(f"Invalid type {item_type!r}: must be 'document', 'knowledge', or 'note'")
+        table = spec.table
         conn = self._get_conn()
         row = conn.execute(f"SELECT rowid FROM {table} WHERE id = ?", (item_id,)).fetchone()
         if row is None:
@@ -980,11 +999,12 @@ class Database:
     def find_by_key(self, item_type: str, namespace: str, key_value: str) -> str | None:
         """The id currently occupying (namespace, title/subject), or None. Used by
         restore to refuse recreating an item under a key another item now owns."""
-        table = _ITEM_TYPE_TO_TABLE.get(item_type)
-        if table is None:
+        spec = _SPEC_BY_ITEM_TYPE.get(item_type)
+        if spec is None:
             raise ValueError(f"Invalid type {item_type!r}: must be 'document', 'knowledge', or 'note'")
+        table = spec.table
         row = self._get_conn().execute(
-            f"SELECT id FROM {table} WHERE namespace = ? AND {_TABLE_TITLE_FIELD[table]} = ?"
+            f"SELECT id FROM {table} WHERE namespace = ? AND {_SPECS[table].title_field} = ?"
             f"{_current_filter(table)}",
             (namespace, key_value),
         ).fetchone()
@@ -1001,8 +1021,8 @@ class Database:
         an update.
         """
         conn = self._get_conn()
-        key = _TABLE_TITLE_FIELD[table]
-        columns = _TABLE_COLUMNS[table]
+        key = _SPECS[table].title_field
+        columns = _SPECS[table].columns
         existing = conn.execute(
             f"SELECT rowid, * FROM {table} WHERE namespace = ? AND {key} = ?{_current_filter(table)}",
             (item.namespace, getattr(item, key)),
@@ -1046,7 +1066,7 @@ class Database:
         row = self._get_conn().execute(
             f"SELECT * FROM {table} WHERE id = ?", (item_id,)
         ).fetchone()
-        return _row_to_model(_TABLE_MODEL[table], row) if row else None
+        return _row_to_model(_SPECS[table].model, row) if row else None
 
     def _delete_item(self, table: str, item_id: str) -> bool:
         conn = self._get_conn()
@@ -1083,10 +1103,10 @@ class Database:
             f"SELECT * FROM {table} WHERE namespace = ?{_current_filter(table)} "
             f"ORDER BY updated_at DESC", (namespace,)
         ).fetchall()
-        return [_row_to_model(_TABLE_MODEL[table], r) for r in rows]
+        return [_row_to_model(_SPECS[table].model, r) for r in rows]
 
     def _update_item(self, table: str, item_id: str, embedding: list[float] | None, **fields):
-        invalid = set(fields) - _TABLE_UPDATE_FIELDS[table]
+        invalid = set(fields) - _SPECS[table].update_fields
         if invalid:
             raise ValueError(f"Invalid {table} fields: {invalid}")
         conn = self._get_conn()
@@ -1111,7 +1131,7 @@ class Database:
         if embedding is not None:
             self._upsert_vec(conn, f"vec_{table}", row["rowid"], embedding, row["namespace"])
         conn.commit()
-        return _row_to_model(_TABLE_MODEL[table], row)
+        return _row_to_model(_SPECS[table].model, row)
 
     # ── Documents CRUD ──
 
@@ -1196,7 +1216,7 @@ class Database:
                 (now.isoformat(), stored.id, old_row["id"]),
             )
             conn.execute("DELETE FROM vec_knowledge WHERE rowid = ?", (old_row["rowid"],))
-            columns = _TABLE_COLUMNS["knowledge"]
+            columns = _SPECS["knowledge"].columns
             rowid = conn.execute(
                 f"INSERT INTO knowledge ({', '.join(columns)}) "
                 f"VALUES ({', '.join('?' * len(columns))}) RETURNING rowid",
@@ -1258,9 +1278,10 @@ class Database:
 
     def update_tags(self, item_id: str, item_type: str, add_tags: list[str] | None = None, remove_tags: list[str] | None = None) -> list[str]:
         conn = self._get_conn()
-        table = _ITEM_TYPE_TO_TABLE.get(item_type)
-        if table is None:
+        spec = _SPEC_BY_ITEM_TYPE.get(item_type)
+        if spec is None:
             raise ValueError(f"Invalid type {item_type!r}: must be 'document', 'knowledge', or 'note'")
+        table = spec.table
         row = conn.execute(f"SELECT * FROM {table} WHERE id = ?", (item_id,)).fetchone()
         if not row:
             raise ValueError(f"{item_type} {item_id} not found")
@@ -1355,7 +1376,7 @@ class Database:
         }
         try:
             for table in _TABLES:
-                key = _TABLE_TITLE_FIELD[table]
+                key = _SPECS[table].title_field
                 # The moved item wins a collision: drop the target's row (and
                 # its vector; document chunks cascade via FK + trigger) first.
                 # For knowledge only current rows collide — superseded history
@@ -1424,15 +1445,16 @@ class Database:
         resources — no document/note content, so a page stays small no matter
         how large the underlying items are.
         """
-        table = _ITEM_TYPE_TO_TABLE.get(item_type)
-        if table is None:
+        spec = _SPEC_BY_ITEM_TYPE.get(item_type)
+        if spec is None:
             raise ValueError(f"Invalid type {item_type!r}: must be 'document', 'knowledge', or 'note'")
+        table = spec.table
         conn = self._get_conn()
         total = conn.execute(
             f"SELECT COUNT(*) AS n FROM {table} WHERE namespace = ?{_current_filter(table)}",
             (namespace,),
         ).fetchone()["n"]
-        columns = ", ".join(_LIST_SUMMARY_COLUMNS[table])
+        columns = ", ".join(_SPECS[table].summary_columns)
         rows = conn.execute(
             f"SELECT {columns} FROM {table} WHERE namespace = ?{_current_filter(table)} "
             f"ORDER BY updated_at DESC LIMIT ? OFFSET ?",
@@ -1462,7 +1484,7 @@ class Database:
                           tags: list[str] | None = None, updated_after: str | None = None) -> list[SearchResult]:
         conn = self._get_conn()
         fts_table = f"{table}_fts"
-        alias = {"documents": "d", "knowledge": "k", "notes": "n"}[table]
+        alias = _SPECS[table].alias
         filter_sql, filter_params = _item_filters(tags, updated_after, alias)
         sql = f"""
             SELECT {alias}.*, {fts_table}.rank

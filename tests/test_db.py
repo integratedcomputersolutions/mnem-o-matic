@@ -19,7 +19,7 @@ import sqlite_vec
 import mnemomatic.db
 from mnemomatic.db import (
     Database, SCHEMA_VERSION, _chunk_text, _serialize_embedding,
-    _TABLE_UPDATE_FIELDS,
+    _SPECS,
 )
 from mnemomatic.models import Document, Knowledge, Note
 from tests._support import tilted_axis
@@ -123,10 +123,10 @@ class TestDocumentCRUD(unittest.TestCase):
         self.assertEqual(len(self.db.list_documents("other")), 0)
 
     def test_allowlist_constants(self):
-        self.assertIn("title", _TABLE_UPDATE_FIELDS["documents"])
-        self.assertIn("content", _TABLE_UPDATE_FIELDS["documents"])
-        self.assertNotIn("namespace", _TABLE_UPDATE_FIELDS["documents"])
-        self.assertNotIn("id", _TABLE_UPDATE_FIELDS["documents"])
+        self.assertIn("title", _SPECS["documents"].update_fields)
+        self.assertIn("content", _SPECS["documents"].update_fields)
+        self.assertNotIn("namespace", _SPECS["documents"].update_fields)
+        self.assertNotIn("id", _SPECS["documents"].update_fields)
 
 
 # ── Knowledge ──────────────────────────────────────────────────────────────────
@@ -218,10 +218,10 @@ class TestKnowledgeCRUD(unittest.TestCase):
         self.assertEqual(len(self.db.list_knowledge("other")), 0)
 
     def test_allowlist_constants(self):
-        self.assertIn("fact", _TABLE_UPDATE_FIELDS["knowledge"])
-        self.assertIn("confidence", _TABLE_UPDATE_FIELDS["knowledge"])
-        self.assertNotIn("namespace", _TABLE_UPDATE_FIELDS["knowledge"])
-        self.assertNotIn("id", _TABLE_UPDATE_FIELDS["knowledge"])
+        self.assertIn("fact", _SPECS["knowledge"].update_fields)
+        self.assertIn("confidence", _SPECS["knowledge"].update_fields)
+        self.assertNotIn("namespace", _SPECS["knowledge"].update_fields)
+        self.assertNotIn("id", _SPECS["knowledge"].update_fields)
 
 
 # ── Notes ──────────────────────────────────────────────────────────────────────
@@ -299,10 +299,10 @@ class TestNoteCRUD(unittest.TestCase):
         self.assertEqual(len(self.db.list_notes("other")), 0)
 
     def test_allowlist_constants(self):
-        self.assertIn("content", _TABLE_UPDATE_FIELDS["notes"])
-        self.assertIn("source", _TABLE_UPDATE_FIELDS["notes"])
-        self.assertNotIn("namespace", _TABLE_UPDATE_FIELDS["notes"])
-        self.assertNotIn("id", _TABLE_UPDATE_FIELDS["notes"])
+        self.assertIn("content", _SPECS["notes"].update_fields)
+        self.assertIn("source", _SPECS["notes"].update_fields)
+        self.assertNotIn("namespace", _SPECS["notes"].update_fields)
+        self.assertNotIn("id", _SPECS["notes"].update_fields)
 
 
 # ── Tags ───────────────────────────────────────────────────────────────────────
