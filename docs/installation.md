@@ -197,7 +197,7 @@ Or in `docker-compose.yml`:
         EMBED_MODEL: embeddinggemma
 ```
 
-The build bakes the model weights plus a `model_config.json` (dimension, token limit, task prefixes) into the image, and the server reads its defaults from that file — no runtime environment changes are needed when picking a different model. **Changing the model for an existing database requires one `MNEMOMATIC_REINDEX=1` restart** (see [Switching Embedding Models](#switching-embedding-models)); until then the server refuses to start on a dimension mismatch rather than corrupting the index.
+The build bakes the model weights plus a `model_config.json` (dimension, token limit, task prefixes) into the image, and the server reads its defaults from that file — no runtime environment changes are needed when picking a different model. **Changing the model for an existing database requires a reindex** (see [Switching Embedding Models](#switching-embedding-models)) — set `MNEMOMATIC_REINDEX=auto` to have the server handle it on the next start. Until then it refuses to start rather than searching against another model's vectors.
 
 ### Lite image with Ollama
 
@@ -259,29 +259,38 @@ Environment variables (set in `docker-compose.yml` or passed to Docker):
 | `MNEMOMATIC_EMBED_DIM`      | *(bundled model's; else 384)* | Embedding dimension — must match the model's output. Defaults to the bundled model's dimension from `model_config.json`; 384 without a config file. |
 | `MNEMOMATIC_EMBED_QUERY_PREFIX` | *(bundled model's; else empty)* | Task prefix prepended to search queries before embedding (asymmetric models). Defaults from `model_config.json`; empty when `MNEMOMATIC_EMBED_URL` is set. |
 | `MNEMOMATIC_EMBED_DOC_PREFIX` | *(bundled model's; else empty)* | Task prefix prepended to stored content before embedding (asymmetric models). Defaults from `model_config.json`; empty when `MNEMOMATIC_EMBED_URL` is set. |
-| `MNEMOMATIC_REINDEX`        | *(unset)*                   | Set to `1` for one startup to rebuild the vector index and re-embed all content (after changing model/dim/prefixes). Remove afterwards. |
+| `MNEMOMATIC_REINDEX`        | *(unset)*                   | `auto` re-embeds only when the configured embedder differs from the one that built the index — a no-op otherwise, so it is safe to leave set. `1` rebuilds on every startup; remove it afterwards. Unset refuses to start on a mismatch. |
 | `MNEMOMATIC_MODEL_PATH`     | `/app/model/model.onnx`     | Path to the ONNX model file (full image only)            |
 | `MNEMOMATIC_TOKENIZER_PATH` | `/app/model/tokenizer.json` | Path to the tokenizer file (full image only)             |
 | `MNEMOMATIC_MODEL_CONFIG_PATH` | `/app/model/model_config.json` | Path to the bundled model's metadata file, written by the Docker build |
 | `MNEMOMATIC_MODEL_MAX_TOKENS` | *(bundled model's; else 512)* | Token truncation limit for the built-in model (2048 for `embeddinggemma`, 512 for the others) |
 
-> **Changing `MNEMOMATIC_EMBED_DIM`:** the embedding dimension is baked into the database's vector tables at creation. The server records it and refuses to start on a mismatch rather than corrupting the index — unless `MNEMOMATIC_REINDEX=1` is set, in which case it rebuilds the index at the new dimension (see below).
+> **Changing `MNEMOMATIC_EMBED_DIM`:** the embedding dimension is baked into the database's vector tables at creation. The server records it and refuses to start on a mismatch rather than corrupting the index — unless `MNEMOMATIC_REINDEX` is set to `auto` or `1`, in which case it rebuilds the index at the new dimension (see below).
 
 > **Asymmetric embedding models:** some models are trained with task prefixes that differ between queries and stored content — e.g. EmbeddingGemma expects `task: search result | query: ` on queries and `title: none | text: ` on documents, and multilingual-e5 expects `query: ` / `passage: `. For the built-in model the correct prompts are recorded in `model_config.json` at build time and apply automatically. When `MNEMOMATIC_EMBED_URL` points at an external endpoint, both prefixes default to empty and must be set explicitly for asymmetric models (include the trailing space). Prefixes are applied at embedding time only and never appear in stored content or search snippets. Because the document prefix is baked into stored vectors, changing prefixes — like changing models — requires re-embedding existing content.
 
 ## Switching Embedding Models
 
-Changing the embedding model, dimension, or task prefixes invalidates every stored vector — old and new embeddings live in different spaces and must not be compared. The switch is a config change plus one flagged restart.
+Changing the embedding model, dimension, or task prefixes invalidates every stored vector — old and new embeddings live in different spaces and must not be compared. The database records which embedder built its index, so the server can tell a deliberate switch from an accidental one.
 
-**Switching between built-in models** — rebuild with a different `EMBED_MODEL` build argument and set `MNEMOMATIC_REINDEX=1` for the first start:
+`MNEMOMATIC_REINDEX` decides what happens when they disagree:
+
+| Value | Behaviour |
+| ----- | --------- |
+| *(unset — the default)* | Refuse to start, naming what changed. An unintended model or prefix change stops the server instead of quietly rebuilding the index. |
+| `auto` | Rebuild and re-embed, but **only** when the embedder actually changed. A no-op on every other start, so it is safe to leave set permanently. |
+| `1` | Rebuild and re-embed on **every** start, whether or not anything changed. For forcing a re-embed the identity check would not catch. |
+
+**Switching between built-in models** — set `MNEMOMATIC_REINDEX=auto` once in `docker-compose.yml` and leave it there, then rebuild with a different `EMBED_MODEL`:
 
 ```bash
 docker compose build --build-arg EMBED_MODEL=embeddinggemma
-# set MNEMOMATIC_REINDEX=1 in docker-compose.yml, then:
 docker compose up -d
 ```
 
-The bundled `model_config.json` carries the new dimension and prefixes, so no other settings change.
+The server notices the new model on startup, re-embeds everything, and starts serving. Later restarts on the same model do nothing. The bundled `model_config.json` carries the new dimension and prefixes, so no other settings change.
+
+Without `auto`, the same switch takes three restarts: one that refuses, one with `MNEMOMATIC_REINDEX=1`, and one with the flag removed.
 
 **Switching to an external embedder:**
 
@@ -295,10 +304,13 @@ The bundled `model_config.json` carries the new dimension and prefixes, so no ot
      - MNEMOMATIC_EMBED_DIM=768
      - "MNEMOMATIC_EMBED_QUERY_PREFIX=task: search result | query: "
      - "MNEMOMATIC_EMBED_DOC_PREFIX=title: none | text: "
-     - MNEMOMATIC_REINDEX=1
+     - MNEMOMATIC_REINDEX=auto
    ```
-2. Restart the server. Startup rebuilds the vector index at the new dimension and re-embeds every document, chunk, knowledge entry, and note with the new model before serving. Content and timestamps are untouched; progress and a final count are logged.
-3. **Remove `MNEMOMATIC_REINDEX`** and restart once more — while set, the (harmless but wasteful) re-embed runs on every boot.
+2. Restart the server. Startup rebuilds the vector index at the new dimension and re-embeds every document, chunk, knowledge entry, and note with the new model before serving. Content and timestamps are untouched; progress and a final count are logged, and the run is recorded in the audit log.
+
+With `auto` there is no third step — it stays inert until the embedder changes again. (With `MNEMOMATIC_REINDEX=1` you must remove the flag and restart once more, or the re-embed repeats on every boot.)
+
+A reindex needs a working embedder. If one is not available, startup refuses rather than emptying an index it cannot rebuild.
 
 Items whose embedding fails during the run are logged and remain findable via fulltext search; re-run the reindex to retry them. Fulltext search is unaffected throughout.
 
@@ -318,7 +330,7 @@ This matters most for swaps that keep the same dimension — most built-in model
 
 Either way out works: restore the previous setting, or reindex.
 
-> **Upgrading an existing database:** the first start after upgrading to a release with this check records whatever embedder is configured then, logs a warning, and starts normally — nothing breaks. It cannot detect a swap that already happened, so if you changed models earlier without reindexing, run `MNEMOMATIC_REINDEX=1` once now. Running FTS-only (no embedder configured) neither triggers the check nor disturbs a recorded identity.
+> **Upgrading an existing database:** the first start after upgrading to a release with this check records whatever embedder is configured then, logs a warning, and starts normally — nothing breaks. It cannot detect a swap that already happened, so if you changed models earlier without reindexing, run `MNEMOMATIC_REINDEX=1` once now (`auto` will not fire — as far as the record is concerned nothing has changed). Running FTS-only (no embedder configured) neither triggers the check nor disturbs a recorded identity.
 
 > **Compatibility note:** the default `minilm` build uses the same model and quantization pipeline as earlier releases, so databases created by previous images keep working without a reindex. Only an actual model change triggers the flow above.
 
