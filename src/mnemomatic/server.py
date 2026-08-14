@@ -86,6 +86,7 @@ def _embed_identity() -> dict[str, str]:
         "embed_doc_prefix": EMBED_DOC_PREFIX,
     }
 
+
 # Tool annotation presets
 _ANN_READ_ONLY = ToolAnnotations(readOnlyHint=True, openWorldHint=False)
 _ANN_STORE = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False)

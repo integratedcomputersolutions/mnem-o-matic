@@ -22,6 +22,7 @@ from mnemomatic.db import (
     _TABLE_UPDATE_FIELDS,
 )
 from mnemomatic.models import Document, Knowledge, Note
+from tests._support import tilted_axis
 
 EMBEDDING_DIM = 384
 
@@ -748,16 +749,6 @@ class TestSearch(unittest.TestCase):
 
 # ── Namespace-partitioned vector search ────────────────────────────────────────
 
-def _axis_embedding(axis: int, wobble: float = 0.0) -> list[float]:
-    """A unit vector on `axis`, optionally tilted slightly toward axis 1."""
-    vec = [0.0] * EMBEDDING_DIM
-    vec[axis] = 1.0
-    if wobble:
-        vec[1] += wobble
-    norm = math.sqrt(sum(x * x for x in vec))
-    return [x / norm for x in vec]
-
-
 class TestVecNamespacePartition(unittest.TestCase):
     """Namespace filtering must happen inside the KNN, not by post-filtering.
 
@@ -778,50 +769,50 @@ class TestVecNamespacePartition(unittest.TestCase):
         for i in range(30):
             self.db.store_document(
                 Document(namespace="big", title=f"big {i}", content="x"),
-                _axis_embedding(0, wobble=0.001 * (i + 1)),
+                tilted_axis(0, wobble=0.001 * (i + 1)),
             )
         for i in range(2):
             self.db.store_document(
                 Document(namespace="small", title=f"small {i}", content="x"),
-                _axis_embedding(100 + i),
+                tilted_axis(100 + i),
             )
-        results = self.db.search_vec(_axis_embedding(0), table="documents", namespace="small", limit=5)
+        results = self.db.search_vec(tilted_axis(0), table="documents", namespace="small", limit=5)
         self.assertEqual(sorted(r.title for r in results), ["small 0", "small 1"])
 
     def test_namespace_filter_applies_to_knowledge_and_notes(self):
-        self.db.store_knowledge(Knowledge(namespace="a", subject="s", fact="f"), _axis_embedding(0))
-        self.db.store_note(Note(namespace="b", title="n", content="c"), _axis_embedding(0, wobble=0.01))
-        results = self.db.search_vec(_axis_embedding(0), table="all", namespace="a", limit=10)
+        self.db.store_knowledge(Knowledge(namespace="a", subject="s", fact="f"), tilted_axis(0))
+        self.db.store_note(Note(namespace="b", title="n", content="c"), tilted_axis(0, wobble=0.01))
+        results = self.db.search_vec(tilted_axis(0), table="all", namespace="a", limit=10)
         self.assertEqual([r.type for r in results], ["knowledge"])
 
     def test_chunk_search_respects_namespace(self):
-        chunks_a = [("alpha chunk", _axis_embedding(0))]
-        chunks_b = [("beta chunk", _axis_embedding(0, wobble=0.01))]
+        chunks_a = [("alpha chunk", tilted_axis(0))]
+        chunks_b = [("beta chunk", tilted_axis(0, wobble=0.01))]
         self.db.store_document(Document(namespace="a", title="doc a", content="x" * 3000), None, chunks_a)
         self.db.store_document(Document(namespace="b", title="doc b", content="y" * 3000), None, chunks_b)
-        results = self.db.search_vec(_axis_embedding(0), table="documents", namespace="a", limit=5)
+        results = self.db.search_vec(tilted_axis(0), table="documents", namespace="a", limit=5)
         self.assertEqual([r.title for r in results], ["doc a"])
         self.assertEqual(results[0].snippet, "alpha chunk")
 
     def test_rename_namespace_moves_vectors(self):
-        self.db.store_document(Document(namespace="old-ns", title="d", content="x"), _axis_embedding(0))
+        self.db.store_document(Document(namespace="old-ns", title="d", content="x"), tilted_axis(0))
         self.db.store_document(
             Document(namespace="old-ns", title="big", content="x" * 3000), None,
-            [("chunky", _axis_embedding(2))],
+            [("chunky", tilted_axis(2))],
         )
         self.db.rename_namespace("old-ns", "new-ns")
-        hits = self.db.search_vec(_axis_embedding(0), table="documents", namespace="new-ns", limit=5)
+        hits = self.db.search_vec(tilted_axis(0), table="documents", namespace="new-ns", limit=5)
         self.assertIn("d", [r.title for r in hits])
-        chunk_hits = self.db.search_vec(_axis_embedding(2), table="documents", namespace="new-ns", limit=5)
+        chunk_hits = self.db.search_vec(tilted_axis(2), table="documents", namespace="new-ns", limit=5)
         self.assertIn("big", [r.title for r in chunk_hits])
-        self.assertEqual(self.db.search_vec(_axis_embedding(0), table="documents", namespace="old-ns", limit=5), [])
+        self.assertEqual(self.db.search_vec(tilted_axis(0), table="documents", namespace="old-ns", limit=5), [])
 
     def test_upsert_after_fts_only_store_lands_in_namespace(self):
         # Stored without an embedding first (FTS-only mode), then re-stored
         # with one: the vec row must be inserted with the right partition.
         self.db.store_document(Document(namespace="ns", title="t", content="x"), None)
-        self.db.store_document(Document(namespace="ns", title="t", content="x"), _axis_embedding(0))
-        results = self.db.search_vec(_axis_embedding(0), table="documents", namespace="ns", limit=5)
+        self.db.store_document(Document(namespace="ns", title="t", content="x"), tilted_axis(0))
+        results = self.db.search_vec(tilted_axis(0), table="documents", namespace="ns", limit=5)
         self.assertEqual([r.title for r in results], ["t"])
 
 
@@ -915,10 +906,10 @@ class TestSchemaMigration(unittest.TestCase):
             ).fetchone()["sql"]
             self.assertIn("partition key", sql.lower())
             # Embeddings survived and are namespace-partitioned now.
-            results = db.search_vec(_axis_embedding(2), table="documents", namespace="proj-b", limit=5)
+            results = db.search_vec(tilted_axis(2), table="documents", namespace="proj-b", limit=5)
             self.assertEqual([r.title for r in results], ["doc 2"])
             # Chunk vector survived too (chunk hit shadows the whole-doc one).
-            chunk_hits = db.search_vec(_axis_embedding(5), table="documents", namespace="proj-a", limit=5)
+            chunk_hits = db.search_vec(tilted_axis(5), table="documents", namespace="proj-a", limit=5)
             self.assertIn("chunk text", [r.snippet for r in chunk_hits])
             # Old data remains readable.
             self.assertEqual(db.get_document("id-0").title, "doc 0")
@@ -931,7 +922,7 @@ class TestSchemaMigration(unittest.TestCase):
         db = Database(self.path)  # must not attempt to migrate again
         try:
             self.assertEqual(self._user_version(db), SCHEMA_VERSION)
-            results = db.search_vec(_axis_embedding(2), table="documents", namespace="proj-b", limit=5)
+            results = db.search_vec(tilted_axis(2), table="documents", namespace="proj-b", limit=5)
             self.assertEqual(len(results), 1)
         finally:
             db.close()

@@ -5,56 +5,32 @@ change) and server._run_reindex end to end against a real database with a
 fake embedder — including a dimension change.
 """
 
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-
 import mnemomatic.db
 import mnemomatic.server as server
 from mnemomatic.db import SCHEMA_VERSION, Database
 from mnemomatic.models import Document, Knowledge, Note
-
-EMBEDDING_DIM = 384
-
-
-def _axis(i: int, dim: int = EMBEDDING_DIM) -> list[float]:
-    vec = [0.0] * dim
-    vec[i] = 1.0
-    return vec
-
-
-class FakeEmbedder:
-    """Deterministic embedder: axis chosen by text hash, configurable dim."""
-
-    def __init__(self, dim: int = EMBEDDING_DIM):
-        self.dim = dim
-        self.calls: list[str] = []
-
-    def embed(self, text: str) -> list[float]:
-        self.calls.append(text)
-        vec = [0.0] * self.dim
-        vec[hash(text) % self.dim] = 1.0
-        return vec
+from tests._support import EMBEDDING_DIM, FakeEmbedder, axis
 
 
 class TestRebuildVecTables(unittest.TestCase):
     def setUp(self):
         self.db = Database(":memory:")
         self.doc, _ = self.db.store_document(
-            Document(namespace="ns", title="T", content="c"), _axis(0)
+            Document(namespace="ns", title="T", content="c"), axis(0)
         )
 
     def tearDown(self):
         self.db.close()
 
     def test_rebuild_clears_vectors_but_keeps_content(self):
-        self.assertEqual(len(self.db.search_vec(_axis(0), table="documents")), 1)
+        self.assertEqual(len(self.db.search_vec(axis(0), table="documents")), 1)
         self.db.rebuild_vec_tables()
-        self.assertEqual(self.db.search_vec(_axis(0), table="documents"), [])
+        self.assertEqual(self.db.search_vec(axis(0), table="documents"), [])
         self.assertEqual(self.db.get_document(self.doc.id).title, "T")
 
     def test_rebuild_records_dim_and_version(self):
@@ -74,23 +50,23 @@ class TestSetEmbedding(unittest.TestCase):
 
     def test_set_embedding_makes_item_searchable(self):
         doc, _ = self.db.store_document(Document(namespace="ns", title="T", content="c"), None)
-        self.assertEqual(self.db.search_vec(_axis(3), table="documents"), [])
-        self.assertTrue(self.db.set_embedding("document", doc.id, _axis(3)))
-        results = self.db.search_vec(_axis(3), table="documents", namespace="ns")
+        self.assertEqual(self.db.search_vec(axis(3), table="documents"), [])
+        self.assertTrue(self.db.set_embedding("document", doc.id, axis(3)))
+        results = self.db.search_vec(axis(3), table="documents", namespace="ns")
         self.assertEqual([r.id for r in results], [doc.id])
 
     def test_set_embedding_does_not_touch_timestamps(self):
         doc, _ = self.db.store_document(Document(namespace="ns", title="T", content="c"), None)
         before = self.db.get_document(doc.id).updated_at
-        self.db.set_embedding("document", doc.id, _axis(1))
+        self.db.set_embedding("document", doc.id, axis(1))
         self.assertEqual(self.db.get_document(doc.id).updated_at, before)
 
     def test_missing_item_returns_false(self):
-        self.assertFalse(self.db.set_embedding("document", "no-such-id", _axis(0)))
+        self.assertFalse(self.db.set_embedding("document", "no-such-id", axis(0)))
 
     def test_invalid_type_raises(self):
         with self.assertRaises(ValueError):
-            self.db.set_embedding("widget", "id", _axis(0))
+            self.db.set_embedding("widget", "id", axis(0))
 
 
 class TestDimChangeDeferral(unittest.TestCase):
@@ -173,11 +149,11 @@ class TestRunReindex(unittest.TestCase):
     def test_reindex_replaces_stale_vectors(self):
         # Pre-existing vector from an "old model" points at axis 0; after
         # reindex, searching with the old vector must not return the doc.
-        self.db.set_embedding("document", self.doc.id, _axis(0))
+        self.db.set_embedding("document", self.doc.id, axis(0))
         server._run_reindex()
         new_emb = self.embedder.embed("small\nshort body")
         if new_emb[0] != 1.0:  # only meaningful when the fake axis differs
-            results = self.db.search_vec(_axis(0), table="documents", namespace="ns", limit=1)
+            results = self.db.search_vec(axis(0), table="documents", namespace="ns", limit=1)
             self.assertTrue(not results or results[0].score < 0.999)
 
     def test_reindex_with_dim_change_end_to_end(self):

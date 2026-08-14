@@ -10,12 +10,8 @@ These tests exercise `_embed` directly on a hand-built instance; they need
 numpy (part of the `onnx` extra) and are skipped where it isn't installed.
 """
 
-import sys
 import unittest
-from pathlib import Path
 from unittest.mock import MagicMock
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 try:
     import numpy as np

@@ -49,6 +49,7 @@ _COMPACT_PARAMS: dict[str, dict[str, str]] = {
     "list_audit":      {"item_type": "document|knowledge|note"},
 }
 
+
 def _simplify_prop(prop: dict) -> dict:
     """Strip schema noise from a single parameter property."""
     # Unwrap anyOf: [{type: X}, {type: null}] → {type: X}

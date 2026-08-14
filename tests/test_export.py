@@ -7,12 +7,9 @@ namespace filter, and Bearer-auth enforcement on the HTTP route.
 
 import io
 import json
-import sys
 import unittest
 import zipfile
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from starlette.applications import Starlette
 from starlette.routing import Route

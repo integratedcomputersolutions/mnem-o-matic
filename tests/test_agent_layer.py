@@ -6,31 +6,13 @@ clusters from stored vectors + stale never-retrieved items), the clustering
 helper, and the consolidate/briefing prompts.
 """
 
-import sys
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-
 import mnemomatic.server as server
-from mnemomatic.db import EMBEDDING_DIM, Database
+from mnemomatic.db import Database
 from mnemomatic.models import Knowledge, Note
-
-
-def _axis(i: int, scale: float = 1.0) -> list[float]:
-    v = [0.0] * EMBEDDING_DIM
-    v[i] = scale
-    return v
-
-
-def _mix(i: int, j: int, wi: float, wj: float) -> list[float]:
-    """A normalized blend of two axes — cosine to axis i is wi."""
-    norm = (wi * wi + wj * wj) ** 0.5
-    v = [0.0] * EMBEDDING_DIM
-    v[i] = wi / norm
-    v[j] = wj / norm
-    return v
+from tests._support import axis, mix
 
 
 class ToolTestCase(unittest.TestCase):
@@ -55,22 +37,22 @@ class TestSimilarOnStore(ToolTestCase):
             return server.store_note(namespace="proj", title=title, content=content)
 
     def test_near_duplicate_is_flagged(self):
-        first = self._store_with_vector("original", _axis(0))
-        second = self._store_with_vector("copycat", _mix(0, 1, 0.95, 0.31))  # cos ~0.95
+        first = self._store_with_vector("original", axis(0))
+        second = self._store_with_vector("copycat", mix(0, 1, 0.95, 0.31))  # cos ~0.95
         self.assertIn("similar", second)
         self.assertEqual(second["similar"][0]["id"], first["id"])
         self.assertGreaterEqual(second["similar"][0]["score"], 0.9)
 
     def test_distinct_content_is_not_flagged(self):
-        self._store_with_vector("original", _axis(0))
-        second = self._store_with_vector("unrelated", _axis(1))
+        self._store_with_vector("original", axis(0))
+        second = self._store_with_vector("unrelated", axis(1))
         self.assertNotIn("similar", second)
 
     def test_item_never_flags_itself(self):
-        first = self._store_with_vector("only one", _axis(0))
+        first = self._store_with_vector("only one", axis(0))
         self.assertNotIn("similar", first)
         # Re-storing the same item (upsert) must not flag itself either.
-        again = self._store_with_vector("only one", _axis(0), content="body v2")
+        again = self._store_with_vector("only one", axis(0), content="body v2")
         self.assertNotIn("similar", again)
 
     def test_no_embedding_no_flag(self):
@@ -79,19 +61,19 @@ class TestSimilarOnStore(ToolTestCase):
         self.assertNotIn("similar", second)
 
     def test_threshold_zero_disables(self):
-        self._store_with_vector("original", _axis(0))
+        self._store_with_vector("original", axis(0))
         with patch.object(server, "SIMILAR_THRESHOLD", 0):
-            second = self._store_with_vector("copy", _axis(0))
+            second = self._store_with_vector("copy", axis(0))
         self.assertNotIn("similar", second)
 
     def test_other_namespaces_do_not_flag(self):
-        self._store_with_vector("original", _axis(0))
-        with patch.object(server, "_safe_embed", return_value=_axis(0)):
+        self._store_with_vector("original", axis(0))
+        with patch.object(server, "_safe_embed", return_value=axis(0)):
             second = server.store_note(namespace="elsewhere", title="same", content="body")
         self.assertNotIn("similar", second)
 
     def test_knowledge_store_flags_too(self):
-        with patch.object(server, "_safe_embed", return_value=_axis(0)):
+        with patch.object(server, "_safe_embed", return_value=axis(0)):
             first = server.store_knowledge(namespace="proj", subject="s1", fact="f1")
             second = server.store_knowledge(namespace="proj", subject="s2", fact="f2")
         self.assertEqual([s["id"] for s in second["similar"]], [first["id"]])
@@ -100,11 +82,11 @@ class TestSimilarOnStore(ToolTestCase):
 class TestDuplicateClusters(unittest.TestCase):
     def test_clusters_and_scores(self):
         vectors = [
-            ("a", "A", _axis(0)),
-            ("b", "B", _mix(0, 1, 0.95, 0.31)),   # ~0.95 to a
-            ("c", "C", _axis(2)),                  # unrelated
-            ("d", "D", _axis(3)),
-            ("e", "E", _axis(3)),                  # identical to d
+            ("a", "A", axis(0)),
+            ("b", "B", mix(0, 1, 0.95, 0.31)),   # ~0.95 to a
+            ("c", "C", axis(2)),                  # unrelated
+            ("d", "D", axis(3)),
+            ("e", "E", axis(3)),                  # identical to d
         ]
         clusters = server._duplicate_clusters("note", vectors, threshold=0.8)
         clusters.sort(key=lambda c: c["similarity"])
@@ -116,9 +98,9 @@ class TestDuplicateClusters(unittest.TestCase):
     def test_transitive_chain_becomes_one_cluster(self):
         # a~b and b~c above threshold, a~c below: union-find still groups them.
         vectors = [
-            ("a", "A", _mix(0, 1, 1.0, 0.0)),
-            ("b", "B", _mix(0, 1, 0.9, 0.44)),
-            ("c", "C", _mix(0, 1, 0.62, 0.78)),
+            ("a", "A", mix(0, 1, 1.0, 0.0)),
+            ("b", "B", mix(0, 1, 0.9, 0.44)),
+            ("c", "C", mix(0, 1, 0.62, 0.78)),
         ]
         clusters = server._duplicate_clusters("note", vectors, threshold=0.85)
         self.assertEqual(len(clusters), 1)
@@ -126,14 +108,14 @@ class TestDuplicateClusters(unittest.TestCase):
 
     def test_empty_and_singleton(self):
         self.assertEqual(server._duplicate_clusters("note", [], 0.8), [])
-        self.assertEqual(server._duplicate_clusters("note", [("a", "A", _axis(0))], 0.8), [])
+        self.assertEqual(server._duplicate_clusters("note", [("a", "A", axis(0))], 0.8), [])
 
 
 class TestConsolidationReport(ToolTestCase):
     def test_report_shape_clusters_and_stale(self):
-        self.db.store_knowledge(Knowledge(namespace="proj", subject="s1", fact="f1"), _axis(0))
-        self.db.store_knowledge(Knowledge(namespace="proj", subject="s2", fact="f2"), _axis(0))
-        self.db.store_note(Note(namespace="proj", title="lonely", content="x"), _axis(5))
+        self.db.store_knowledge(Knowledge(namespace="proj", subject="s1", fact="f1"), axis(0))
+        self.db.store_knowledge(Knowledge(namespace="proj", subject="s2", fact="f2"), axis(0))
+        self.db.store_note(Note(namespace="proj", title="lonely", content="x"), axis(5))
 
         report = server.consolidation_report(namespace="proj", stale_days=0)
         self.assertEqual(len(report["duplicate_clusters"]), 1)
@@ -152,8 +134,8 @@ class TestConsolidationReport(ToolTestCase):
         self.assertEqual([r["title"] for r in report["stale"]], ["unused"])
 
     def test_superseded_facts_do_not_cluster(self):
-        self.db.store_knowledge(Knowledge(namespace="proj", subject="s", fact="old"), _axis(0))
-        self.db.store_knowledge(Knowledge(namespace="proj", subject="s", fact="new"), _axis(0))
+        self.db.store_knowledge(Knowledge(namespace="proj", subject="s", fact="old"), axis(0))
+        self.db.store_knowledge(Knowledge(namespace="proj", subject="s", fact="new"), axis(0))
         report = server.consolidation_report(namespace="proj", stale_days=0)
         # The superseded row lost its vector; only the current fact remains.
         self.assertEqual(report["duplicate_clusters"], [])

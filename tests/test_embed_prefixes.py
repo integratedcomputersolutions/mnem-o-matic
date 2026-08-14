@@ -8,12 +8,8 @@ EmbeddingGemma record their task prompts there); without a config file — as in
 this test environment — and for external endpoints, defaults are empty.
 """
 
-import sys
 import unittest
-from pathlib import Path
 from unittest.mock import MagicMock, patch
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 import mnemomatic.server as server
 

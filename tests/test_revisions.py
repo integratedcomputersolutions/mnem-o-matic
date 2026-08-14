@@ -6,13 +6,9 @@ upsert-overwrite, tag edits, namespace delete/rename-replace), per-item
 pruning, and the list_revisions/restore tools end to end.
 """
 
-import sqlite3
-import sys
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 import mnemomatic.db as db_module
 import mnemomatic.server as server

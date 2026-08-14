@@ -6,15 +6,12 @@ scheduling via next_delay, and the loop's failure handling.
 """
 
 import io
-import sys
 import tempfile
 import threading
 import time
 import unittest
 import zipfile
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from mnemomatic.backup import backup_loop, next_delay, run_backup, start_backup_thread
 from mnemomatic.db import Database

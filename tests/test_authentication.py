@@ -8,12 +8,8 @@ normalization that gates it all.
 """
 
 import hmac
-import sys
 import unittest
-from pathlib import Path
 from unittest.mock import AsyncMock, patch
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from starlette.applications import Starlette
 from starlette.responses import PlainTextResponse

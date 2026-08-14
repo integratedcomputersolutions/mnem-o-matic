@@ -4,13 +4,10 @@ Covers the shared-secret gate, navigation, content rendering with HTML
 escaping, and the BearerAuthMiddleware /ui exemption.
 """
 
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 from urllib.parse import quote
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from starlette.applications import Starlette
 from starlette.testclient import TestClient

@@ -9,12 +9,9 @@ two cases that must never fail (a database predating the check, and a run with
 no embedder configured).
 """
 
-import sys
 import tempfile
 import unittest
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from mnemomatic.db import Database
 

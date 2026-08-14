@@ -7,12 +7,9 @@ immutable), exclusion of superseded rows from search/listings/counts, the
 fact_history tool, namespace rename/delete interplay, and restore guards.
 """
 
-import sys
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 import mnemomatic.db as db_module
 import mnemomatic.server as server
