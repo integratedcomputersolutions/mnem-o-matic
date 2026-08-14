@@ -7,17 +7,13 @@ request-identity fields via RequestMetaMiddleware, the failure guarantee
 staying silent.
 """
 
-import sys
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-
 import mnemomatic.server as server
 from mnemomatic.audit import RequestMetaMiddleware, request_meta
 from mnemomatic.db import Database
-from mnemomatic.models import Note
 
 
 class TestMigrationV4(unittest.TestCase):

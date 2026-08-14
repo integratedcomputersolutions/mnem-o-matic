@@ -4,12 +4,8 @@ Drives server.list_items against a real in-memory Database so the tool's
 validation, clamping, and response shape are exercised end to end.
 """
 
-import sys
 import unittest
-from pathlib import Path
 from unittest.mock import patch
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 import mnemomatic.server as server
 from mnemomatic.db import Database

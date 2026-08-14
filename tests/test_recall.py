@@ -6,31 +6,14 @@ namespaces and superseded facts, plus the `related` tool: neighbor ranking,
 self-exclusion, chunk-centroid fallback, and its error paths.
 """
 
-import sys
 import unittest
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-
 import mnemomatic.server as server
-from mnemomatic.db import CHUNK_THRESHOLD, EMBEDDING_DIM, Database
+from mnemomatic.db import CHUNK_THRESHOLD, Database
 from mnemomatic.models import Document, Knowledge, Note
-
-
-def _axis(i: int) -> list[float]:
-    v = [0.0] * EMBEDDING_DIM
-    v[i] = 1.0
-    return v
-
-
-def _mix(i: int, j: int, wi: float, wj: float) -> list[float]:
-    norm = (wi * wi + wj * wj) ** 0.5
-    v = [0.0] * EMBEDDING_DIM
-    v[i] = wi / norm
-    v[j] = wj / norm
-    return v
+from tests._support import axis, mix
 
 
 class DbTestCase(unittest.TestCase):
@@ -53,10 +36,10 @@ class TestFtsFilters(DbTestCase):
         super().setUp()
         self.old, _ = self.db.store_note(
             Note(namespace="proj", title="old note", content="shared topic",
-                 tags=["archive", "docs"]), _axis(0))
+                 tags=["archive", "docs"]), axis(0))
         self.new, _ = self.db.store_note(
             Note(namespace="proj", title="new note", content="shared topic",
-                 tags=["docs"]), _axis(0))
+                 tags=["docs"]), axis(0))
         self._age("notes", self.old.id, 100)
 
     def _ids(self, **kw):
@@ -88,12 +71,12 @@ class TestVecFilters(DbTestCase):
     def setUp(self):
         super().setUp()
         self.tagged, _ = self.db.store_note(
-            Note(namespace="proj", title="tagged", content="x", tags=["keep"]), _axis(0))
+            Note(namespace="proj", title="tagged", content="x", tags=["keep"]), axis(0))
         self.plain, _ = self.db.store_note(
-            Note(namespace="proj", title="plain", content="y"), _mix(0, 1, 0.9, 0.44))
+            Note(namespace="proj", title="plain", content="y"), mix(0, 1, 0.9, 0.44))
 
     def _ids(self, **kw):
-        return {r.id for r in self.db.search_vec(_axis(0), table="all", **kw)}
+        return {r.id for r in self.db.search_vec(axis(0), table="all", **kw)}
 
     def test_tag_filter_applies_to_vector_leg(self):
         self.assertEqual(self._ids(), {self.tagged.id, self.plain.id})
@@ -109,38 +92,38 @@ class TestVecFilters(DbTestCase):
         self.assertGreaterEqual(len(body), CHUNK_THRESHOLD)
         doc, _ = self.db.store_document(
             Document(namespace="proj", title="big", content=body, tags=["report"]),
-            embedding=None, chunks=[(body[:500], _axis(0)), (body[500:1000], _axis(0))])
-        hits = self.db.search_vec(_axis(0), table="documents", tags=["report"])
+            embedding=None, chunks=[(body[:500], axis(0)), (body[500:1000], axis(0))])
+        hits = self.db.search_vec(axis(0), table="documents", tags=["report"])
         self.assertEqual([r.id for r in hits], [doc.id])
         self.assertTrue(hits[0].partial)
-        self.assertEqual(self.db.search_vec(_axis(0), table="documents", tags=["other"]), [])
+        self.assertEqual(self.db.search_vec(axis(0), table="documents", tags=["other"]), [])
 
     def test_hybrid_applies_filters_to_both_legs(self):
-        results = self.db.search_hybrid("plain", _axis(0), table="all", tags=["keep"])
+        results = self.db.search_hybrid("plain", axis(0), table="all", tags=["keep"])
         self.assertEqual([r.id for r in results], [self.tagged.id])
 
 
 class TestFilterInteractions(DbTestCase):
     def test_namespace_and_tags_compose(self):
-        a, _ = self.db.store_note(Note(namespace="a", title="n", content="topic", tags=["t"]), _axis(0))
-        self.db.store_note(Note(namespace="b", title="n", content="topic", tags=["t"]), _axis(0))
+        a, _ = self.db.store_note(Note(namespace="a", title="n", content="topic", tags=["t"]), axis(0))
+        self.db.store_note(Note(namespace="b", title="n", content="topic", tags=["t"]), axis(0))
         hits = self.db.search_fts("topic", namespace="a", tags=["t"])
         self.assertEqual([r.id for r in hits], [a.id])
 
     def test_superseded_facts_stay_excluded_when_filtering(self):
         self.db.store_knowledge(
-            Knowledge(namespace="proj", subject="s", fact="old answer", tags=["t"]), _axis(0))
+            Knowledge(namespace="proj", subject="s", fact="old answer", tags=["t"]), axis(0))
         current, _, superseded = self.db.store_knowledge(
-            Knowledge(namespace="proj", subject="s", fact="new answer", tags=["t"]), _axis(0))
+            Knowledge(namespace="proj", subject="s", fact="new answer", tags=["t"]), axis(0))
         self.assertIsNotNone(superseded)
         for hits in (self.db.search_fts("answer", tags=["t"]),
-                     self.db.search_vec(_axis(0), table="knowledge", tags=["t"])):
+                     self.db.search_vec(axis(0), table="knowledge", tags=["t"])):
             self.assertEqual([r.id for r in hits], [current.id])
 
 
 class TestItemEmbedding(DbTestCase):
     def test_returns_stored_vector(self):
-        note, _ = self.db.store_note(Note(namespace="p", title="n", content="x"), _axis(3))
+        note, _ = self.db.store_note(Note(namespace="p", title="n", content="x"), axis(3))
         emb = self.db.item_embedding("note", note.id)
         self.assertEqual(emb[3], 1.0)
 
@@ -154,7 +137,7 @@ class TestItemEmbedding(DbTestCase):
     def test_chunked_document_uses_chunk_centroid(self):
         doc, _ = self.db.store_document(
             Document(namespace="p", title="big", content="body"),
-            embedding=None, chunks=[("a", _axis(0)), ("b", _axis(1))])
+            embedding=None, chunks=[("a", axis(0)), ("b", axis(1))])
         emb = self.db.item_embedding("document", doc.id)
         # Mean of two orthogonal unit axes, renormalized: both components 1/sqrt(2).
         self.assertAlmostEqual(emb[0], 0.7071, places=3)
@@ -182,13 +165,13 @@ class TestRelatedTool(ToolTestCase):
     def setUp(self):
         super().setUp()
         self.anchor, _ = self.db.store_note(
-            Note(namespace="proj", title="anchor", content="x"), _axis(0))
+            Note(namespace="proj", title="anchor", content="x"), axis(0))
         self.near, _, _ = self.db.store_knowledge(
-            Knowledge(namespace="proj", subject="near", fact="y"), _mix(0, 1, 0.95, 0.31))
+            Knowledge(namespace="proj", subject="near", fact="y"), mix(0, 1, 0.95, 0.31))
         self.far, _ = self.db.store_note(
-            Note(namespace="proj", title="far", content="z"), _axis(1))
+            Note(namespace="proj", title="far", content="z"), axis(1))
         self.elsewhere, _ = self.db.store_note(
-            Note(namespace="other", title="elsewhere", content="w"), _axis(0))
+            Note(namespace="other", title="elsewhere", content="w"), axis(0))
 
     def test_ranks_neighbors_and_excludes_self(self):
         resp = server.related(item_type="note", id=self.anchor.id)
@@ -228,12 +211,12 @@ class TestRelatedTool(ToolTestCase):
 class TestSearchToolFilters(ToolTestCase):
     def test_filters_reach_the_db(self):
         recent, _ = self.db.store_note(
-            Note(namespace="proj", title="recent", content="topic", tags=["keep"]), _axis(0))
+            Note(namespace="proj", title="recent", content="topic", tags=["keep"]), axis(0))
         old, _ = self.db.store_note(
-            Note(namespace="proj", title="old", content="topic", tags=["keep"]), _axis(0))
+            Note(namespace="proj", title="old", content="topic", tags=["keep"]), axis(0))
         self._age("notes", old.id, 90)
 
-        with patch.object(server, "_safe_embed", return_value=_axis(0)):
+        with patch.object(server, "_safe_embed", return_value=axis(0)):
             tagged = server.search("topic", tags=["keep"], mode="fulltext")
             cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).date().isoformat()
             fresh = server.search("topic", updated_after=cutoff, mode="hybrid")
@@ -246,7 +229,7 @@ class TestSearchToolFilters(ToolTestCase):
         self.assertIn("ISO", result[0]["details"])
 
     def test_empty_tag_list_is_not_a_filter(self):
-        note, _ = self.db.store_note(Note(namespace="proj", title="n", content="topic"), _axis(0))
+        note, _ = self.db.store_note(Note(namespace="proj", title="n", content="topic"), axis(0))
         results = server.search("topic", tags=[], mode="fulltext")
         self.assertEqual([r["id"] for r in results], [note.id])
 

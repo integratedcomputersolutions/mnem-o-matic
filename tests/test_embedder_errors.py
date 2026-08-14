@@ -15,11 +15,7 @@ from unittest.mock import MagicMock, Mock, patch
 import urllib.error
 import socket
 
-import sys
-from pathlib import Path
-
 # Add src to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from mnemomatic.embeddings import HttpEmbedder
 

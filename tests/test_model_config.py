@@ -8,13 +8,9 @@ server at import time.
 """
 
 import json
-import sys
 import tempfile
 import unittest
-from pathlib import Path
 from unittest.mock import patch
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from mnemomatic import model_config
 

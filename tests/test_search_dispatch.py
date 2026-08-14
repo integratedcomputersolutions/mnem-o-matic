@@ -20,12 +20,8 @@ original query while FTS uses the escaped query; validation and limit clamping.
 """
 
 import sqlite3
-import sys
 import unittest
-from pathlib import Path
 from unittest.mock import MagicMock, patch
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 import mnemomatic.server as server
 from mnemomatic.db import Database
