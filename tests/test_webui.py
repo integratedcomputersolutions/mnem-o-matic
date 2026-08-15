@@ -256,7 +256,27 @@ class TestViews(WebUITestBase):
         resp = self.client.get("/ui/settings")
         self.assertEqual(resp.status_code, 200)
         self.assertIn("alert-warning", resp.text)
-        self.assertIn("MNEMOMATIC_REINDEX=1", resp.text)
+        self.assertIn("MNEMOMATIC_REINDEX=auto", resp.text)
+
+    def test_settings_page_flags_model_mismatch(self):
+        self.settings_info["model_database"] = "a-different-model"
+        resp = self.client.get("/ui/settings")
+        self.assertIn("alert-warning", resp.text)
+        self.assertIn("a-different-model", resp.text)
+        # The reason a mismatch matters: it does not announce itself.
+        self.assertIn("wrong results with no", resp.text)
+
+    def test_settings_page_names_the_model_that_built_the_index(self):
+        self.settings_info["model_database"] = "test-model"
+        resp = self.client.get("/ui/settings")
+        self.assertIn("Index built by model", resp.text)
+        self.assertNotIn("alert-warning", resp.text)
+
+    def test_settings_page_says_when_the_index_model_was_never_recorded(self):
+        self.settings_info["model_database"] = None
+        resp = self.client.get("/ui/settings")
+        self.assertIn("not recorded", resp.text)
+        self.assertNotIn("alert-warning", resp.text)
 
     def test_settings_page_shows_external_endpoint(self):
         self.settings_info.pop("max_tokens")

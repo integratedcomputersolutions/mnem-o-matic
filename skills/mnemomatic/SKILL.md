@@ -150,3 +150,9 @@ or deleting.
 
 Every write is recorded in an append-only audit trail — `list_audit(namespace=...)` shows
 recent activity (who changed what, when), `list_audit(item_id=...)` traces one item.
+
+If semantic search starts returning results that look plausible but wrong, check
+`embedding_info()`. It reports whether semantic search is available at all, which model is
+embedding your queries, and whether that is the model that built the stored vectors. When
+`matches_index` is false the index needs rebuilding and similarity scores mean little until
+it is — say so rather than working around it.

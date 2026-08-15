@@ -56,6 +56,11 @@ class FakeEmbedder:
         self.dim = dim
         self.calls: list[str] = []
 
+    @property
+    def mode(self) -> str:
+        """Real embedders describe themselves for the settings page; so does this."""
+        return "fake (test)"
+
     def embed(self, text: str) -> list[float]:
         self.calls.append(text)
         vec = [0.0] * self.dim

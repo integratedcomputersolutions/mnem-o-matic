@@ -103,6 +103,54 @@ def _settings_info() -> dict:
     return info
 
 
+@mcp.tool(annotations=config.ANN_READ_ONLY)
+def embedding_info() -> dict:
+    """Report which embedding model is in use, and whether it matches the index.
+
+    Use this when semantic search returns odd results, before reading much
+    into a similarity score, or to check whether semantic search is available
+    at all. Search only works when the model embedding your query is the one
+    that embedded the stored content — query a model against another model's
+    vectors and the results come back plausible but wrong, with no error.
+
+    Returns:
+        semantic_search: whether an embedder is available at all. False means
+            fulltext-only: `semantic` mode errors and `hybrid` falls back.
+        model / dimensions: the embedder configured right now.
+        index_model / index_dimensions: what actually built the stored vectors.
+            index_model is null for a database written before the server began
+            recording it.
+        matches_index: true when the two agree, false when they do not (search
+            results are unreliable until a reindex), null when unknowable
+            because the index predates identity recording.
+        query_prefix / doc_prefix: task prefixes applied at embedding time.
+            These are part of the index's identity — changing one invalidates
+            stored vectors exactly as changing the model does.
+    """
+    info = _settings_info()
+    index_model = info["model_database"]
+    same = index_model == info["model"] and info["dim_database"] == info["dim_configured"]
+    result = {
+        "semantic_search": runtime._embedder() is not None,
+        "mode": info["mode"],
+        "model": info["model"],
+        "dimensions": info["dim_configured"],
+        "index_model": index_model,
+        "index_dimensions": info["dim_database"],
+        "matches_index": None if index_model is None else same,
+        "query_prefix": info["query_prefix"],
+        "doc_prefix": info["doc_prefix"],
+    }
+    if info["model_url"]:
+        result["model_url"] = info["model_url"]
+    if "endpoint_url" in info:
+        result["endpoint"] = info["endpoint_url"]
+        result["wire_api"] = info["wire_api"]
+    else:
+        result["max_tokens"] = info["max_tokens"]
+    return result
+
+
 @mcp.tool(annotations=config.ANN_DELETE)
 def delete_namespace(namespace: str) -> dict:
     """Delete all items in a namespace.

@@ -322,7 +322,7 @@ The database records which embedder built its vector index — the model name an
 Embedding identity mismatch: model was 'embeddinggemma-300m', now 'amaretto-embed-148m'.
 The stored vectors were produced with a different embedding configuration, so searching
 against them returns wrong results with no error to notice. Restore the previous settings
-to keep the existing index, or set MNEMOMATIC_REINDEX=1 to rebuild the index and re-embed
+to keep the existing index, or set MNEMOMATIC_REINDEX=auto to rebuild the index and re-embed
 all content on startup.
 ```
 

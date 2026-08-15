@@ -419,6 +419,7 @@ Once connected, your LLM has access to these tools:
 | `fact_history`       | The timeline of a knowledge fact: the current entry, then every superseded version (see Temporal Facts) |
 | `consolidation_report` | Consolidation candidates for a namespace: near-duplicate clusters and stale never-retrieved items (see Memory Hygiene) |
 | `list_audit`         | The append-only audit trail of write operations, newest first — filter by item, namespace, or operation (see Audit Log) |
+| `embedding_info`     | Which embedding model is in use, whether it matches the one that built the index, and whether semantic search is available (see Embedding Info) |
 
 ### Input Validation & Limits
 
@@ -524,6 +525,32 @@ related(item_type="knowledge", id="def-456", namespace="webapp", limit=10)
 ```
 
 Results span all content types, ranked by embedding similarity, and never include the item itself. It needs an embedder (semantic search); chunked documents work through the centroid of their chunk vectors. Items stored while no embedder was configured have no vector and return an error suggesting a `MNEMOMATIC_REINDEX=1` restart.
+
+### Embedding Info
+
+`embedding_info()` reports the state semantic search depends on:
+
+```json
+{
+  "semantic_search": true,
+  "mode": "built-in ONNX (amaretto-embed-148m)",
+  "model": "amaretto-embed-148m",
+  "dimensions": 768,
+  "index_model": "amaretto-embed-148m",
+  "index_dimensions": 768,
+  "matches_index": true,
+  "query_prefix": "task: search result | query: ",
+  "doc_prefix": "title: none | text: ",
+  "max_tokens": 2048,
+  "model_url": "https://huggingface.co/AmarettoLabs/amaretto-embed-148m"
+}
+```
+
+The field worth checking is **`matches_index`**. Search only works when the model embedding your query is the one that embedded the stored content — query a model against another model's vectors and results come back plausible but wrong, with no error to notice. `false` means the index needs rebuilding (see [Switching Embedding Models](installation.md#switching-embedding-models)) and similarity scores mean little until it is.
+
+`null` means unknowable rather than mismatched: the database was written before the server began recording which model built the index. `semantic_search: false` means no embedder is available at all — `semantic` mode will error and `hybrid` falls back to fulltext.
+
+External endpoints report `endpoint` and `wire_api` in place of `max_tokens`.
 
 ### Example Usage
 

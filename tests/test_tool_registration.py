@@ -37,6 +37,7 @@ EXPECTED_TOOLS = [
     "list_audit",
     "restore",
     "consolidation_report",
+    "embedding_info",
     "delete_namespace",
     "rename_namespace",
 ]

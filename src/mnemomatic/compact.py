@@ -35,6 +35,7 @@ _COMPACT_DESCRIPTIONS: dict[str, str] = {
     "consolidation_report": "Consolidation candidates for a namespace: near-duplicate clusters (vector similarity) and stale never-retrieved items.",
     "list_audit":       "Audit trail of write operations, newest first. Filter by item_type/item_id/namespace/op.",
     "related":          "Items most similar to an existing item (by embedding), across all content types.",
+    "embedding_info":   "Which embedding model is in use, whether it matches the one that built the index, and whether semantic search is available.",
 }
 
 # Param descriptions only for constrained/non-obvious values; all others are stripped.
