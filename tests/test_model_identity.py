@@ -65,7 +65,7 @@ class TestMismatch(_TempDatabaseTest):
         message = str(ctx.exception)
         self.assertIn("embeddinggemma-300m", message)
         self.assertIn("amaretto-embed-148m", message)
-        self.assertIn("MNEMOMATIC_REINDEX=1", message)
+        self.assertIn("MNEMOMATIC_REINDEX=auto", message)
 
     def test_query_prefix_change_refuses_startup(self):
         self.open(GEMMA).close()

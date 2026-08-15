@@ -302,7 +302,7 @@ def build_routes(db_getter, token: str, settings_info=None, make_export=None) ->
                 '<div class="alert alert-warning">The vector index was built at dimension '
                 f"<strong>{_esc(dim_db)}</strong> but the server is configured for "
                 f"<strong>{_esc(dim_cfg)}</strong>. Semantic search cannot work like this — "
-                "restart once with <code>MNEMOMATIC_REINDEX=1</code> to rebuild the index "
+                "set <code>MNEMOMATIC_REINDEX=auto</code> and restart to rebuild the index "
                 "and re-embed all content.</div>"
             )
 
@@ -313,7 +313,7 @@ def build_routes(db_getter, token: str, settings_info=None, make_export=None) ->
                 f"<strong>{_esc(model_db)}</strong> but the server is configured for "
                 f"<strong>{_esc(model_cfg)}</strong>. Queries embedded by one model and "
                 "searched against another model's vectors return wrong results with no "
-                "error — restart once with <code>MNEMOMATIC_REINDEX=1</code> to rebuild "
+                "error — set <code>MNEMOMATIC_REINDEX=auto</code> and restart to rebuild "
                 "the index and re-embed all content.</div>"
             )
 
@@ -328,7 +328,11 @@ def build_routes(db_getter, token: str, settings_info=None, make_export=None) ->
             ("Model", model_html),
             ("Embedding dimension", val("dim_configured")),
             ("Index built at dimension", val("dim_database")),
-            ("Index built by model", val("model_database")),
+            # Absent on databases written before the server recorded which model
+            # built the index — say so rather than showing a bare dash.
+            ("Index built by model", val("model_database")
+             if info.get("model_database")
+             else '<span class="text-muted">not recorded (pre-dates this check)</span>'),
         ]
         if info.get("endpoint_url"):
             embed_rows += [

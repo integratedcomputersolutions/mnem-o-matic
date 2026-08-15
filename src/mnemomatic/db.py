@@ -17,7 +17,7 @@ logger = logging.getLogger("mnemomatic")
 
 # Defaults to the bundled model's dimension (model_config.json, written by the
 # Docker build for the EMBED_MODEL chosen), falling back to 384 (MiniLM-class)
-# when no config exists. Changing dimension requires MNEMOMATIC_REINDEX=1 once
+# when no config exists. Changing dimension requires a reindex once
 # to rebuild the index — the server fails fast on the mismatch otherwise.
 EMBEDDING_DIM = int(os.environ.get("MNEMOMATIC_EMBED_DIM", model_config.CONFIG.get("dim", 384)))
 BUSY_TIMEOUT_MS = 5000
@@ -564,7 +564,7 @@ class Database:
             f"Embedding identity mismatch: {detail}. The stored vectors were produced with a "
             f"different embedding configuration, so searching against them returns wrong "
             f"results with no error to notice. Restore the previous settings to keep the "
-            f"existing index, or set MNEMOMATIC_REINDEX=1 to rebuild the index and re-embed "
+            f"existing index, or set MNEMOMATIC_REINDEX=auto to rebuild the index and re-embed "
             f"all content on startup."
         )
 
@@ -591,7 +591,7 @@ class Database:
                     raise RuntimeError(
                         f"Embedding dimension mismatch: database was created with dim {stored['value']} "
                         f"but MNEMOMATIC_EMBED_DIM={EMBEDDING_DIM}. Set MNEMOMATIC_EMBED_DIM={stored['value']} "
-                        f"to keep the existing index, or set MNEMOMATIC_REINDEX=1 to rebuild the index and "
+                        f"to keep the existing index, or set MNEMOMATIC_REINDEX=auto to rebuild the index and "
                         f"re-embed all content at the new dimension on startup."
                     )
             self._check_identity(conn)
@@ -638,7 +638,7 @@ class Database:
                                 f"Cannot migrate {name}: stored embeddings have dim {found_dim} "
                                 f"but MNEMOMATIC_EMBED_DIM={EMBEDDING_DIM}. "
                                 f"Set MNEMOMATIC_EMBED_DIM={found_dim} and retry, or set "
-                                f"MNEMOMATIC_REINDEX=1 to re-embed everything at the new dimension."
+                                f"MNEMOMATIC_REINDEX=auto to re-embed everything at the new dimension."
                             )
                     conn.execute(f"DROP TABLE {name}")
                     logger.info("Migrating %s to partitioned schema (%d embeddings)", name, len(rows))
