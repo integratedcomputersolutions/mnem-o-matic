@@ -12,10 +12,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 import mnemomatic.db as db_module
-import mnemomatic.server as server
 from mnemomatic.db import EMBEDDING_DIM, Database
 from mnemomatic.models import Knowledge
 from mnemomatic import runtime
+from mnemomatic import tools_content
+from mnemomatic import tools_history
 
 
 def _emb(seed: float) -> list[float]:
@@ -201,35 +202,35 @@ class ToolTestCase(DbTestCase):
 class TestUpdateTool(ToolTestCase):
     def test_fact_change_supersedes(self):
         old, _, _ = self._store("v1")
-        result = server.update_knowledge(id=old.id, fact="v2")
+        result = tools_content.update_knowledge(id=old.id, fact="v2")
         self.assertEqual(result["superseded"], old.id)
         self.assertNotEqual(result["id"], old.id)
         self.assertIsNotNone(self.db.get_knowledge(old.id).valid_until)
 
     def test_non_fact_fields_update_in_place(self):
         old, _, _ = self._store("v1")
-        result = server.update_knowledge(id=old.id, confidence=0.4, tags=["a"])
+        result = tools_content.update_knowledge(id=old.id, confidence=0.4, tags=["a"])
         self.assertEqual(result["id"], old.id)
         self.assertNotIn("superseded", result)
         self.assertIsNone(self.db.get_knowledge(old.id).valid_until)
 
     def test_unchanged_fact_does_not_supersede(self):
         old, _, _ = self._store("v1")
-        result = server.update_knowledge(id=old.id, fact="v1", confidence=0.4)
+        result = tools_content.update_knowledge(id=old.id, fact="v1", confidence=0.4)
         self.assertEqual(result["id"], old.id)
         self.assertNotIn("superseded", result)
 
     def test_superseded_entry_is_immutable(self):
         old, _, _ = self._store("v1")
         self._store("v2")
-        result = server.update_knowledge(id=old.id, confidence=0.1)
+        result = tools_content.update_knowledge(id=old.id, confidence=0.1)
         self.assertIn("error", result)
         self.assertIn("superseded", result["error"])
 
     def test_subject_conflict_on_supersede(self):
         self._store("other fact", subject="taken")
         old, _, _ = self._store("v1", subject="mine")
-        result = server.update_knowledge(id=old.id, subject="taken", fact="v2")
+        result = tools_content.update_knowledge(id=old.id, subject="taken", fact="v2")
         self.assertIn("error", result)
         # The original chain is untouched by the failed supersede.
         self.assertIsNone(self.db.get_knowledge(old.id).valid_until)
@@ -239,7 +240,7 @@ class TestFactHistoryTool(ToolTestCase):
     def test_returns_timeline_and_records_access(self):
         self._store("v1")
         self._store("v2")
-        resp = server.fact_history(namespace="proj", subject="topic")
+        resp = tools_history.fact_history(namespace="proj", subject="topic")
         self.assertEqual(resp["count"], 2)
         self.assertEqual([e["fact"] for e in resp["history"]], ["v2", "v1"])
         self.assertIsNone(resp["history"][0]["valid_until"])
@@ -248,7 +249,7 @@ class TestFactHistoryTool(ToolTestCase):
             self.assertEqual(self.db.get_knowledge(entry["id"]).retrieval_count, 1)
 
     def test_unknown_subject_is_empty(self):
-        resp = server.fact_history(namespace="proj", subject="nope")
+        resp = tools_history.fact_history(namespace="proj", subject="nope")
         self.assertEqual(resp["count"], 0)
 
 
@@ -257,7 +258,7 @@ class TestRestoreInterplay(ToolTestCase):
         k, _, _ = self._store("precious")
         self.db.delete_knowledge(k.id)
         rev_id = self.db.list_revisions(item_id=k.id)[0]["id"]
-        result = server.restore(rev_id)
+        result = tools_history.restore(rev_id)
         self.assertTrue(result["recreated"])
         self.assertEqual(self.db.get_knowledge(k.id).fact, "precious")
 
@@ -267,7 +268,7 @@ class TestRestoreInterplay(ToolTestCase):
         current = self.db.knowledge_history("proj", "topic")[0]
         self.db.delete_knowledge(old.id)  # prune the history row itself
         rev_id = self.db.list_revisions(item_id=old.id)[0]["id"]
-        result = server.restore(rev_id)
+        result = tools_history.restore(rev_id)
         self.assertIn("error", result)
         # Current fact untouched.
         self.assertEqual(self.db.get_knowledge(current.id).fact, "v2")

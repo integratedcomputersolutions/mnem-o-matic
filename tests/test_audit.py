@@ -11,10 +11,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import mnemomatic.server as server
 from mnemomatic.audit import RequestMetaMiddleware, request_meta
 from mnemomatic.db import Database
 from mnemomatic import runtime
+from mnemomatic import tools_admin
+from mnemomatic import tools_content
+from mnemomatic import tools_history
+from mnemomatic import tools_search
 
 
 class TestMigrationV4(unittest.TestCase):
@@ -109,12 +112,12 @@ class ToolTestCase(unittest.TestCase):
 
 class TestToolCoverage(ToolTestCase):
     def test_full_write_lifecycle_is_audited(self):
-        note = server.store_note(namespace="proj", title="n", content="v1")
-        server.update_note(id=note["id"], content="v2")
-        server.tag(item_id=note["id"], item_type="note", add_tags=["x"])
-        server.delete_note(id=note["id"])
+        note = tools_content.store_note(namespace="proj", title="n", content="v1")
+        tools_content.update_note(id=note["id"], content="v2")
+        tools_content.tag(item_id=note["id"], item_type="note", add_tags=["x"])
+        tools_content.delete_note(id=note["id"])
         rev = self.db.list_revisions(item_id=note["id"])[0]
-        server.restore(revision_id=rev["id"])
+        tools_history.restore(revision_id=rev["id"])
 
         events = self.db.list_audit(item_id=note["id"])
         self.assertEqual([e["op"] for e in events],
@@ -126,9 +129,9 @@ class TestToolCoverage(ToolTestCase):
         self.assertEqual(events[3]["detail"]["fields"], ["content"])
 
     def test_knowledge_supersede_paths(self):
-        r1 = server.store_knowledge(namespace="proj", subject="s", fact="v1")
-        r2 = server.store_knowledge(namespace="proj", subject="s", fact="v2")
-        server.update_knowledge(id=r2["id"], fact="v3")
+        r1 = tools_content.store_knowledge(namespace="proj", subject="s", fact="v1")
+        r2 = tools_content.store_knowledge(namespace="proj", subject="s", fact="v2")
+        tools_content.update_knowledge(id=r2["id"], fact="v3")
 
         ops = self.db.list_audit(namespace="proj")
         self.assertEqual([e["op"] for e in ops], ["supersede", "store", "store"])
@@ -136,38 +139,38 @@ class TestToolCoverage(ToolTestCase):
         self.assertEqual(ops[0]["detail"]["superseded"], r2["id"])
 
     def test_namespace_ops_audited(self):
-        server.store_note(namespace="src", title="n", content="x")
-        server.rename_namespace(old_namespace="src", new_namespace="dst")
-        server.delete_namespace(namespace="dst")
+        tools_content.store_note(namespace="src", title="n", content="x")
+        tools_admin.rename_namespace(old_namespace="src", new_namespace="dst")
+        tools_admin.delete_namespace(namespace="dst")
         self.assertEqual(self._ops(op="rename_namespace"), ["rename_namespace"])
         event = self.db.list_audit(op="delete_namespace")[0]
         self.assertEqual(event["namespace"], "dst")
         self.assertEqual(event["detail"]["deleted"], 1)
 
     def test_failed_writes_are_not_audited(self):
-        server.delete_note(id="no-such-id")
-        server.update_note(id="no-such-id", content="x")
+        tools_content.delete_note(id="no-such-id")
+        tools_content.update_note(id="no-such-id", content="x")
         self.assertEqual(self.db.list_audit(), [])
 
     def test_reads_are_not_audited(self):
-        note = server.store_note(namespace="proj", title="n", content="x")
-        server.read("note", note["id"])
-        server.search("x", mode="fulltext")
-        server.list_items("note", "proj")
+        note = tools_content.store_note(namespace="proj", title="n", content="x")
+        tools_search.read("note", note["id"])
+        tools_search.search("x", mode="fulltext")
+        tools_search.list_items("note", "proj")
         self.assertEqual(self._ops(), ["store"])
 
     def test_broken_audit_never_breaks_the_operation(self):
         with patch.object(self.db, "append_audit", side_effect=RuntimeError("disk full")):
-            result = server.store_note(namespace="proj", title="n", content="x")
+            result = tools_content.store_note(namespace="proj", title="n", content="x")
         self.assertIn("id", result)
         self.assertIsNotNone(self.db.get_note(result["id"]))
 
     def test_list_audit_tool_shape(self):
-        server.store_note(namespace="proj", title="n", content="x")
-        resp = server.list_audit(namespace="proj")
+        tools_content.store_note(namespace="proj", title="n", content="x")
+        resp = tools_history.list_audit(namespace="proj")
         self.assertEqual(len(resp["events"]), 1)
         self.assertEqual(resp["events"][0]["op"], "store")
-        self.assertIn("error", server.list_audit(item_type="bogus"))
+        self.assertIn("error", tools_history.list_audit(item_type="bogus"))
 
 
 class TestRequestMeta(unittest.TestCase):

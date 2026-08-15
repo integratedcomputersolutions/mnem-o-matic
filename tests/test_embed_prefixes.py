@@ -14,6 +14,8 @@ from unittest.mock import MagicMock, patch
 import mnemomatic.server as server
 from mnemomatic import config
 from mnemomatic import runtime
+from mnemomatic import tools_content
+from mnemomatic import tools_search
 
 EMBEDDING = [0.1, 0.2]
 
@@ -47,14 +49,14 @@ class TestQueryPrefix(PrefixTestBase):
         fake_db = MagicMock()
         fake_db.search_vec.return_value = []
         with patch.object(runtime, "_db", return_value=fake_db):
-            server.search(query="hello world", mode="semantic")
+            tools_search.search(query="hello world", mode="semantic")
         self.assertEqual(self.embedded, ["Q>> hello world"])
 
     def test_hybrid_search_prefixes_query_but_not_fts(self):
         fake_db = MagicMock()
         fake_db.search_hybrid.return_value = []
         with patch.object(runtime, "_db", return_value=fake_db):
-            server.search(query="hello world", mode="hybrid")
+            tools_search.search(query="hello world", mode="hybrid")
         self.assertEqual(self.embedded, ["Q>> hello world"])
         # FTS receives the raw (escaped) query, never the embedding prefix.
         fts_query = fake_db.search_hybrid.call_args[0][0]
@@ -73,17 +75,17 @@ class TestDocumentPrefix(PrefixTestBase):
 
     def test_store_knowledge_prefixes_content(self):
         with patch.object(runtime, "_db", return_value=self._fake_db()):
-            server.store_knowledge(namespace="ns", subject="auth", fact="JWT")
+            tools_content.store_knowledge(namespace="ns", subject="auth", fact="JWT")
         self.assertEqual(self.embedded, ["D>> auth: JWT"])
 
     def test_store_note_prefixes_content(self):
         with patch.object(runtime, "_db", return_value=self._fake_db()):
-            server.store_note(namespace="ns", title="n", content="c")
+            tools_content.store_note(namespace="ns", title="n", content="c")
         self.assertEqual(self.embedded, ["D>> n\nc"])
 
     def test_store_small_document_prefixes_content(self):
         with patch.object(runtime, "_db", return_value=self._fake_db()):
-            server.store_document(namespace="ns", title="T", content="small body")
+            tools_content.store_document(namespace="ns", title="T", content="small body")
         self.assertEqual(self.embedded, ["D>> T\nsmall body"])
 
     def test_chunked_document_prefixes_embeds_but_stores_raw_chunks(self):
@@ -111,7 +113,7 @@ class TestPrefixDefaults(unittest.TestCase):
         self.assertEqual(config.EMBED_DOC_PREFIX, "")
         recorded = []
         with patch.object(runtime, "_safe_embed", side_effect=lambda t: recorded.append(t) or EMBEDDING):
-            server._embed_query("hello")
+            tools_search._embed_query("hello")
             server._embed_content("world")
         self.assertEqual(recorded, ["hello", "world"])
 

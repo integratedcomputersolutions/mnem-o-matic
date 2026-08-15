@@ -11,10 +11,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 import mnemomatic.db as db_module
-import mnemomatic.server as server
 from mnemomatic.db import Database
 from mnemomatic.models import Document, Knowledge, Note
 from mnemomatic import runtime
+from mnemomatic import tools_history
+from mnemomatic import tools_search
 
 
 class DbTestCase(unittest.TestCase):
@@ -205,18 +206,18 @@ class ToolTestCase(DbTestCase):
 class TestAccessRecordingTools(ToolTestCase):
     def test_read_tool_records(self):
         note = self._note()
-        server.read("note", note.id)
+        tools_search.read("note", note.id)
         self.assertEqual(self.db.get_note(note.id).retrieval_count, 1)
 
     def test_search_records_surfaced_items(self):
         note = self._note(title="alpha topic", content="about alpha")
         self._note(title="unrelated", content="beta")
-        server.search("alpha", mode="fulltext")
+        tools_search.search("alpha", mode="fulltext")
         self.assertEqual(self.db.get_note(note.id).retrieval_count, 1)
 
     def test_list_items_does_not_record(self):
         note = self._note()
-        server.list_items("note", "proj")
+        tools_search.list_items("note", "proj")
         self.assertEqual(self.db.get_note(note.id).retrieval_count, 0)
 
 
@@ -226,7 +227,7 @@ class TestRestoreTool(ToolTestCase):
         self.db.update_note(note.id, content="v2")
         rev_id = self.db.list_revisions(item_id=note.id)[0]["id"]
 
-        result = server.restore(rev_id)
+        result = tools_history.restore(rev_id)
         self.assertEqual(result["restored_revision"], rev_id)
         self.assertFalse(result["recreated"])
         self.assertEqual(self.db.get_note(note.id).content, "v1")
@@ -239,7 +240,7 @@ class TestRestoreTool(ToolTestCase):
         self.db.delete_note(note.id)
         rev_id = self.db.list_revisions(item_id=note.id)[0]["id"]
 
-        result = server.restore(rev_id)
+        result = tools_history.restore(rev_id)
         self.assertTrue(result["recreated"])
         restored = self.db.get_note(note.id)
         self.assertEqual(restored.content, "precious")
@@ -251,13 +252,13 @@ class TestRestoreTool(ToolTestCase):
         usurper = self._note(title="the-title", content="new item, new id")
         rev_id = self.db.list_revisions(item_id=note.id)[0]["id"]
 
-        result = server.restore(rev_id)
+        result = tools_history.restore(rev_id)
         self.assertIn("error", result)
         self.assertIn(usurper.id, result["details"])
         self.assertEqual(self.db.get_note(usurper.id).content, "new item, new id")
 
     def test_restore_unknown_revision(self):
-        self.assertIn("error", server.restore(99999))
+        self.assertIn("error", tools_history.restore(99999))
 
     def test_restored_document_is_searchable(self):
         doc, _ = self.db.store_document(
@@ -265,8 +266,8 @@ class TestRestoreTool(ToolTestCase):
             embedding=None)
         self.db.delete_document(doc.id)
         rev_id = self.db.list_revisions(item_id=doc.id)[0]["id"]
-        server.restore(rev_id)
-        results = server.search("flux capacitor", mode="fulltext")
+        tools_history.restore(rev_id)
+        results = tools_search.search("flux capacitor", mode="fulltext")
         self.assertIn(doc.id, [r["id"] for r in results if "id" in r])
 
 
@@ -274,13 +275,13 @@ class TestListRevisionsTool(ToolTestCase):
     def test_response_shape_and_validation(self):
         note = self._note()
         self.db.update_note(note.id, content="v2")
-        resp = server.list_revisions(item_id=note.id)
+        resp = tools_history.list_revisions(item_id=note.id)
         self.assertEqual(len(resp["revisions"]), 1)
         rev = resp["revisions"][0]
         self.assertEqual(rev["item_id"], note.id)
         self.assertEqual(rev["op"], "update")
         self.assertNotIn("payload", rev)  # summaries stay small
-        self.assertIn("error", server.list_revisions(item_type="bogus"))
+        self.assertIn("error", tools_history.list_revisions(item_type="bogus"))
 
 
 if __name__ == "__main__":
