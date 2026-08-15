@@ -13,6 +13,7 @@ import mnemomatic.server as server
 from mnemomatic import config
 from mnemomatic.db import Database
 from mnemomatic.models import Knowledge, Note
+from mnemomatic import runtime
 from tests._support import axis, mix
 
 
@@ -20,8 +21,8 @@ class ToolTestCase(unittest.TestCase):
     def setUp(self):
         self.db = Database(":memory:")
         self._patches = [
-            patch.object(server, "_db", return_value=self.db),
-            patch.object(server, "_embedder", return_value=None),
+            patch.object(runtime, "_db", return_value=self.db),
+            patch.object(runtime, "_embedder", return_value=None),
         ]
         for p in self._patches:
             p.start()
@@ -34,7 +35,7 @@ class ToolTestCase(unittest.TestCase):
 
 class TestSimilarOnStore(ToolTestCase):
     def _store_with_vector(self, title, vector, content="body"):
-        with patch.object(server, "_safe_embed", return_value=vector):
+        with patch.object(runtime, "_safe_embed", return_value=vector):
             return server.store_note(namespace="proj", title=title, content=content)
 
     def test_near_duplicate_is_flagged(self):
@@ -69,12 +70,12 @@ class TestSimilarOnStore(ToolTestCase):
 
     def test_other_namespaces_do_not_flag(self):
         self._store_with_vector("original", axis(0))
-        with patch.object(server, "_safe_embed", return_value=axis(0)):
+        with patch.object(runtime, "_safe_embed", return_value=axis(0)):
             second = server.store_note(namespace="elsewhere", title="same", content="body")
         self.assertNotIn("similar", second)
 
     def test_knowledge_store_flags_too(self):
-        with patch.object(server, "_safe_embed", return_value=axis(0)):
+        with patch.object(runtime, "_safe_embed", return_value=axis(0)):
             first = server.store_knowledge(namespace="proj", subject="s1", fact="f1")
             second = server.store_knowledge(namespace="proj", subject="s2", fact="f2")
         self.assertEqual([s["id"] for s in second["similar"]], [first["id"]])

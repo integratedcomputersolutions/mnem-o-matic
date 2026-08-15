@@ -13,6 +13,7 @@ from unittest.mock import patch
 import mnemomatic.server as server
 from mnemomatic.db import Database
 from mnemomatic.models import Document, Knowledge, Note
+from mnemomatic import runtime
 from tests._support import axis
 
 
@@ -23,9 +24,9 @@ class _ToolTest(unittest.TestCase):
     def setUp(self):
         self.db = Database(":memory:")
         self._patches = [
-            patch.object(server, "_db", return_value=self.db),
-            patch.object(server, "_safe_embed", return_value=axis(0)),
-            patch.object(server, "_safe_embed_batch", side_effect=lambda ts: [axis(0)] * len(ts)),
+            patch.object(runtime, "_db", return_value=self.db),
+            patch.object(runtime, "_safe_embed", return_value=axis(0)),
+            patch.object(runtime, "_safe_embed_batch", side_effect=lambda ts: [axis(0)] * len(ts)),
         ]
         for p in self._patches:
             p.start()

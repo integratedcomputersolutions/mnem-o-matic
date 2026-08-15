@@ -14,6 +14,7 @@ import mnemomatic.db as db_module
 import mnemomatic.server as server
 from mnemomatic.db import Database
 from mnemomatic.models import Document, Knowledge, Note
+from mnemomatic import runtime
 
 
 class DbTestCase(unittest.TestCase):
@@ -189,8 +190,8 @@ class ToolTestCase(DbTestCase):
     def setUp(self):
         super().setUp()
         self._patches = [
-            patch.object(server, "_db", return_value=self.db),
-            patch.object(server, "_embedder", return_value=None),
+            patch.object(runtime, "_db", return_value=self.db),
+            patch.object(runtime, "_embedder", return_value=None),
         ]
         for p in self._patches:
             p.start()
