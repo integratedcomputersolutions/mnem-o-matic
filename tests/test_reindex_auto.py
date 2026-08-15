@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import patch
 
 import mnemomatic.server as server
+from mnemomatic import config
 from mnemomatic.db import Database
 from mnemomatic.models import Document
 from tests._support import FakeEmbedder, axis
@@ -28,7 +29,7 @@ class TestModeParsing(unittest.TestCase):
         with patch.dict(server.os.environ, env, clear=False):
             if value is None:
                 server.os.environ.pop("MNEMOMATIC_REINDEX", None)
-            return server._reindex_mode()
+            return config._reindex_mode()
 
     def test_unset_is_off(self):
         self.assertEqual(self._mode(None), "off")
@@ -127,12 +128,12 @@ class TestRunReindexUnderAuto(unittest.TestCase):
             "SELECT COUNT(*) AS n FROM vec_documents").fetchone()["n"]
 
     def test_auto_reindex_embeds_content(self):
-        with patch.object(server, "REINDEX_MODE", "auto"):
+        with patch.object(config, "REINDEX_MODE", "auto"):
             server._run_reindex()
         self.assertEqual(self._vec_count(), 1)
 
     def test_auto_logs_that_the_embedder_changed(self):
-        with patch.object(server, "REINDEX_MODE", "auto"):
+        with patch.object(config, "REINDEX_MODE", "auto"):
             with self.assertLogs("mnemomatic", level="WARNING") as logs:
                 server._run_reindex()
         message = "".join(logs.output)
@@ -141,13 +142,13 @@ class TestRunReindexUnderAuto(unittest.TestCase):
         self.assertNotIn("Remove the flag", message)
 
     def test_force_still_tells_you_to_remove_the_flag(self):
-        with patch.object(server, "REINDEX_MODE", "force"):
+        with patch.object(config, "REINDEX_MODE", "force"):
             with self.assertLogs("mnemomatic", level="WARNING") as logs:
                 server._run_reindex()
         self.assertIn("Remove the flag", "".join(logs.output))
 
     def test_reindex_is_recorded_in_the_audit_trail(self):
-        with patch.object(server, "REINDEX_MODE", "auto"):
+        with patch.object(config, "REINDEX_MODE", "auto"):
             server._run_reindex()
         events = self.db.list_audit(op="reindex")
         self.assertEqual(len(events), 1)

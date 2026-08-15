@@ -12,6 +12,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import mnemomatic.server as server
+from mnemomatic import config
 
 EMBEDDING = [0.1, 0.2]
 
@@ -27,8 +28,8 @@ class PrefixTestBase(unittest.TestCase):
             return EMBEDDING
 
         self._patches = [
-            patch.object(server, "EMBED_QUERY_PREFIX", "Q>> "),
-            patch.object(server, "EMBED_DOC_PREFIX", "D>> "),
+            patch.object(config, "EMBED_QUERY_PREFIX", "Q>> "),
+            patch.object(config, "EMBED_DOC_PREFIX", "D>> "),
             patch.object(server, "_safe_embed", side_effect=record),
             patch.object(server, "_embedder", return_value=object()),
         ]
@@ -105,8 +106,8 @@ class TestPrefixDefaults(unittest.TestCase):
     def test_no_model_config_means_empty_prefixes(self):
         # No model_config.json in the test environment → symmetric defaults,
         # byte-identical embedding input.
-        self.assertEqual(server.EMBED_QUERY_PREFIX, "")
-        self.assertEqual(server.EMBED_DOC_PREFIX, "")
+        self.assertEqual(config.EMBED_QUERY_PREFIX, "")
+        self.assertEqual(config.EMBED_DOC_PREFIX, "")
         recorded = []
         with patch.object(server, "_safe_embed", side_effect=lambda t: recorded.append(t) or EMBEDDING):
             server._embed_query("hello")

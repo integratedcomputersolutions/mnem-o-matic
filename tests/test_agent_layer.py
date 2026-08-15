@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import patch
 
 import mnemomatic.server as server
+from mnemomatic import config
 from mnemomatic.db import Database
 from mnemomatic.models import Knowledge, Note
 from tests._support import axis, mix
@@ -62,7 +63,7 @@ class TestSimilarOnStore(ToolTestCase):
 
     def test_threshold_zero_disables(self):
         self._store_with_vector("original", axis(0))
-        with patch.object(server, "SIMILAR_THRESHOLD", 0):
+        with patch.object(config, "SIMILAR_THRESHOLD", 0):
             second = self._store_with_vector("copy", axis(0))
         self.assertNotIn("similar", second)
 
