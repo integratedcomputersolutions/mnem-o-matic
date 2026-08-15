@@ -5,6 +5,10 @@ what registers their tools, resources, and prompts on the shared app. Import
 order is the registration order clients see, so it is kept stable.
 """
 
+# ruff: noqa: I001 — the tools_* imports below are in tool-registration order,
+# not alphabetical, and sorting this file's imports would change the published
+# tool list. See the comment above them.
+
 import logging
 
 import uvicorn
@@ -23,9 +27,14 @@ from mnemomatic.runtime import (
     mcp,
 )
 
-# Imported for their registration side effects; the order below is the order
-# tools appear to a client.
-from mnemomatic import tools_content, tools_search, tools_history, tools_admin  # noqa: F401,E402
+# Imported for their registration side effects. The order below is the order
+# tools appear to a client, so it must not be alphabetised — an import sorter
+# would silently rearrange the published tool list. tests/test_tool_registration.py
+# pins the result so that change cannot pass unnoticed.
+from mnemomatic import tools_content  # noqa: F401
+from mnemomatic import tools_search   # noqa: F401
+from mnemomatic import tools_history  # noqa: F401
+from mnemomatic import tools_admin    # noqa: F401
 from mnemomatic.tools_admin import _export_route, _make_export, _server_version, _settings_info
 
 logger = logging.getLogger("mnemomatic")

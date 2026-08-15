@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pydantic import ValidationError
 
 from mnemomatic import config, runtime
-from mnemomatic.db import CHUNK_THRESHOLD, _SPEC_BY_ITEM_TYPE, Database
+from mnemomatic.db import _SPEC_BY_ITEM_TYPE, CHUNK_THRESHOLD, Database
 from mnemomatic.models import Document, Knowledge, Note
 from mnemomatic.runtime import (
     _audit,

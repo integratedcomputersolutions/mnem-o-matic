@@ -3,7 +3,6 @@ import json
 import logging
 from importlib.metadata import PackageNotFoundError, version
 
-
 from mnemomatic import config, runtime
 from mnemomatic.db import CHUNK_OVERLAP, CHUNK_SIZE, CHUNK_THRESHOLD
 from mnemomatic.runtime import _audit, mcp

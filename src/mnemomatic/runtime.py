@@ -288,4 +288,3 @@ def _audit(op: str, *, item_type: str | None = None, item_id: str | None = None,
                            detail=detail or None)
     except Exception as e:
         logger.warning("Audit write failed: %s: %s", type(e).__name__, e)
-
