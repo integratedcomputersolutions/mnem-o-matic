@@ -10,10 +10,14 @@
 #   amaretto-embed-148m   — sliced EmbeddingGemma distillation: 768 dims,
 #                           8 Latin-script languages + code, near-Gemma quality
 #                           at ~130 ms/embed and ~297 MB (weight-only INT8)
+#   arctic-embed-xs       — Snowflake Arctic Embed xs: 384 dims, English,
+#                           MiniLM's architecture and size (~23 MB INT8) with a
+#                           newer retrieval recipe. CLS pooling + query prefix
 # Selecting a model bakes its weights and a model_config.json (dimension, task
 # prefixes, token limit) into the image — no runtime configuration needed.
-# Switching models on an existing database requires one MNEMOMATIC_REINDEX=1
-# restart (see docs/installation.md, "Switching Embedding Models").
+# Switching models on an existing database requires a reindex — set
+# MNEMOMATIC_REINDEX=auto (see docs/installation.md, "Switching Embedding
+# Models"). Same-dimension swaps are caught by the recorded model identity.
 ARG EMBED_MODEL=minilm
 
 # ── Builder base ──────────────────────────────────────────────────────────────
@@ -121,6 +125,26 @@ MODELS = {
         "config": {"model": "amaretto-embed-148m", "dim": 768, "max_tokens": 2048,
                    "query_prefix": "task: search result | query: ",
                    "doc_prefix": "title: none | text: "},
+    },
+    # Snowflake's retrain of all-MiniLM-L6-v2: same architecture, same 384
+    # dims, same ~23 MB INT8 footprint, materially better retrieval. Two
+    # differences from minilm that the config below carries: it pools the CLS
+    # token rather than the mean, and queries take a prefix while documents
+    # take none.
+    "arctic-embed-xs": {
+        "repo": "Snowflake/snowflake-arctic-embed-xs",
+        "revision": "d8c86521100d3556476a063fc2342036d45c106f",
+        "files": [
+            ("onnx/model_int8.onnx", "model.onnx",
+             "e6aa5e656466a73d7c3111e9a3378bd13e5b93af30eaac2b3f13fd56692589a1"),
+            ("tokenizer.json", "tokenizer.json",
+             "91f1def9b9391fdabe028cd3f3fcc4efd34e5d1f08c3bf2de513ebb5911a1854"),
+        ],
+        "quantize": False,
+        "config": {"model": "snowflake-arctic-embed-xs", "dim": 384, "max_tokens": 512,
+                   "pooling": "cls",
+                   "query_prefix": "Represent this sentence for searching relevant passages: ",
+                   "doc_prefix": ""},
     },
 }
 

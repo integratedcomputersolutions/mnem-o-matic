@@ -20,6 +20,17 @@ TOKENIZER_PATH = os.environ.get("MNEMOMATIC_TOKENIZER_PATH", "/app/model/tokeniz
 MODEL_MAX_TOKENS = int(os.environ.get(
     "MNEMOMATIC_MODEL_MAX_TOKENS", model_config.CONFIG.get("max_tokens", 512)
 ))
+# How token embeddings become one vector, when the ONNX graph does not already
+# do it. Must match what the model was trained with: mean-pooling a model
+# trained on its CLS token produces vectors that are not wrong enough to error,
+# only wrong enough to retrieve badly. Defaults to mean — what MiniLM and
+# multilingual-e5 use, and what every pre-existing build assumed.
+#
+# Deliberately not overridable by environment: pooling changes the vectors just
+# as the model does, but unlike the model name it is not part of the recorded
+# embedding identity, so a mismatch would invalidate the index with nothing to
+# catch it. Tying it to the bundled model's config keeps the two inseparable.
+POOLING = str(model_config.CONFIG.get("pooling", "mean")).lower()
 EMBED_TIMEOUT = int(os.environ.get("MNEMOMATIC_EMBED_TIMEOUT", "30"))
 # Concurrent requests used by HttpEmbedder.embed_batch (chunked documents).
 EMBED_CONCURRENCY = int(os.environ.get("MNEMOMATIC_EMBED_CONCURRENCY", "8"))
@@ -56,8 +67,9 @@ class OnnxEmbedder:
     - Sentence-transformers exports (the EmbeddingGemma build option) declare
       a ``sentence_embedding`` output with pooling, projection layers, and
       normalization baked into the graph — it is used as-is.
-    - Plain transformer exports (MiniLM, multilingual-e5) only produce token
-      embeddings; those are mean-pooled and normalized here.
+    - Plain transformer exports (MiniLM, multilingual-e5, arctic-embed) only
+      produce token embeddings; those are pooled here according to POOLING —
+      mean by default, CLS for models trained that way — then normalized.
     """
 
     def __init__(self):
@@ -101,6 +113,7 @@ class OnnxEmbedder:
         # part of the graph; pooling token embeddings ourselves would silently
         # skip those layers and produce garbage vectors.
         self._sentence_output = "sentence_embedding" if "sentence_embedding" in output_names else None
+        self._pooling = POOLING
         self.embed = functools.lru_cache(maxsize=256)(self._embed)
 
     @property
@@ -127,8 +140,13 @@ class OnnxEmbedder:
             pooled = self.session.run([self._sentence_output], feed)[0].astype(np.float32)  # (1, dim)
         else:
             token_embeddings = self.session.run(None, feed)[0].astype(np.float32)  # (1, seq, dim)
-            mask = attention_mask[..., np.newaxis].astype(np.float32)
-            pooled = (token_embeddings * mask).sum(1) / mask.sum(1).clip(min=1e-9)
+            if self._pooling == "cls":
+                # The first token carries the sentence representation for models
+                # trained that way (BERT-style [CLS]); the rest are ignored.
+                pooled = token_embeddings[:, 0, :]
+            else:
+                mask = attention_mask[..., np.newaxis].astype(np.float32)
+                pooled = (token_embeddings * mask).sum(1) / mask.sum(1).clip(min=1e-9)
         # Normalize both paths: quantized sentence_embedding outputs can drift
         # slightly off unit length, and the score math needs unit vectors.
         norm = np.linalg.norm(pooled, axis=1, keepdims=True).clip(min=1e-9)
