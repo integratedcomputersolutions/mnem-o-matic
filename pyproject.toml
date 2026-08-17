@@ -13,7 +13,12 @@ dependencies = [
 
 [project.optional-dependencies]
 onnx = [
-    "onnxruntime>=1.20,<2.0",
+    # Capped below 1.29: onnxruntime 1.29.0 segfaults on `import onnxruntime`
+    # under gcr.io/distroless/python3-debian12, the base both runtime images
+    # use. 1.28.0 is fine there, and 1.29.0 imports fine on Debian slim, so
+    # this is specific to the distroless runtime rather than to our build.
+    # Raise the cap once a 1.29.x is confirmed working on that base.
+    "onnxruntime>=1.20,<1.29",
     "tokenizers>=0.15",
     "numpy>=1.24,<2.0",
 ]
