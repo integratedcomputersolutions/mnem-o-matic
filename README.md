@@ -104,6 +104,7 @@ The database records which embedding model built its vector index, so swapping m
 ## Documentation
 
 - [Installation Guide](docs/installation.md) — prerequisites, Docker profiles, TLS setup, configuration, development
+- [Upgrading from v1.x to v2.0](docs/installation.md#upgrading-from-v1x-to-v20) — two breaking changes: non-root containers and the replaced default model
 - [Usage Guide](docs/usage.md) — connecting clients, authentication, tools, search, resources, web viewer
 - [Tech Stack](docs/tech-stack.md) — architecture decisions, embeddings, concurrency, performance
 
