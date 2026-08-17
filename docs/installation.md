@@ -235,6 +235,23 @@ docker compose up --build -d
 docker compose down
 ```
 
+## Health Endpoint
+
+`GET /health` reports liveness and is **reachable without credentials**, so a container healthcheck, load balancer, or uptime monitor can poll it even when `MNEMOMATIC_API_KEY` is set:
+
+```bash
+curl http://your-server:8000/health
+# {"status": "ok"}
+```
+
+The response is deliberately that and nothing more. Version, embedding model, and configuration stay behind authentication — an unauthenticated caller learns only what an open port already tells them. Every other path, `/export` included, still requires the Bearer token.
+
+Both images ship a `HEALTHCHECK` that polls it, so `docker compose up --wait` and orchestrator readiness gates work without configuration.
+
+**There is no separate readiness endpoint, because the startup sequence provides one.** Any reindex runs *before* the server binds its port, so connections are refused until the server is ready to serve. A refused connection means "still starting", which matters when re-embedding a large store takes minutes — a health endpoint that answered during that window would be actively misleading.
+
+`/health` does not touch the database. Polling it on every probe would add load and turn a momentary SQLite lock into a flapping health state; process liveness plus the bind-ordering above is the more useful signal.
+
 ## Running as a Non-Root User
 
 Both images run as an unprivileged user — uid/gid **65532**, the `nonroot` account from the distroless base — rather than root. Nothing in the server needs privilege: it listens on port 8000, which is unprivileged, and writes only inside `/data`.

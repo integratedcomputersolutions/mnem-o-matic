@@ -40,6 +40,23 @@ def _make_export(namespace: str | None) -> tuple[bytes, str]:
     return build_export_zip(runtime._db(), namespace, server_version=_server_version())
 
 
+async def _health_route(request):
+    """GET /health — liveness, reachable without credentials.
+
+    Deliberately says only that the process is serving. It does not touch the
+    database: polling it on every probe adds load and turns a momentary SQLite
+    lock into a flapping health state, which is worse than not checking.
+
+    Readiness needs no separate endpoint. The startup reindex runs before the
+    ASGI server binds, so the port simply does not accept connections until the
+    server is ready to serve — a connection refused *is* "not ready yet", which
+    matters when a reindex on a large store takes minutes.
+    """
+    from starlette.responses import JSONResponse
+
+    return JSONResponse({"status": "ok"})
+
+
 async def _export_route(request):
     """GET /export[?namespace=...] — zip download, behind the Bearer middleware."""
     from starlette.responses import JSONResponse, Response

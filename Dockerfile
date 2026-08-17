@@ -287,6 +287,13 @@ ENV MNEMOMATIC_PORT=8000
 # unprivileged, so nothing needs root to bind it.
 USER 65532:65532
 
+# Liveness for orchestrators and `docker compose up --wait`. Distroless has no
+# shell or curl, so the check runs through the image's own Python. The port is
+# not bound until after any startup reindex, so "connection refused" correctly
+# reads as not-ready-yet rather than unhealthy.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD ["/usr/bin/python3", "-c", "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('MNEMOMATIC_PORT','8000')+'/health',timeout=4).read()"]
+
 EXPOSE 8000
 
 CMD ["-c", "from mnemomatic.server import main; main()"]
@@ -314,6 +321,13 @@ ENV MNEMOMATIC_PORT=8000
 # here keeps the image correct if that ever changes upstream. Port 8000 is
 # unprivileged, so nothing needs root to bind it.
 USER 65532:65532
+
+# Liveness for orchestrators and `docker compose up --wait`. Distroless has no
+# shell or curl, so the check runs through the image's own Python. The port is
+# not bound until after any startup reindex, so "connection refused" correctly
+# reads as not-ready-yet rather than unhealthy.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD ["/usr/bin/python3", "-c", "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('MNEMOMATIC_PORT','8000')+'/health',timeout=4).read()"]
 
 EXPOSE 8000
 

@@ -75,6 +75,15 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         method = request.method
         path = request.url.path
 
+        # Liveness probes cannot usually present credentials — a container
+        # HEALTHCHECK, a load balancer, an uptime monitor. /health is therefore
+        # always reachable, and deliberately answers with nothing but
+        # {"status": "ok"}: no version, no configuration, nothing an
+        # unauthenticated caller could not already infer from the port being
+        # open. Everything descriptive stays behind auth.
+        if path == "/health":
+            return await call_next(request)
+
         # The web viewer under /ui carries its own shared-secret gate, so the
         # MCP Bearer token does not apply to it. Only honored when the viewer
         # is actually registered — otherwise /ui is protected like any path.
