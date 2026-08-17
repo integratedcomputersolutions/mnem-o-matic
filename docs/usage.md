@@ -571,6 +571,8 @@ Alongside the MCP transport, the server exposes two plain HTTP routes:
 | Route | Auth | Purpose |
 | ----- | ---- | ------- |
 | `GET /health` | **none** | Liveness — `{"status": "ok"}`. Used by the images' `HEALTHCHECK`; see [Health Endpoint](installation.md#health-endpoint) |
+
+Both routes are served on the server's own port (8000 inside the container). With the bundled Caddy setup that port is not published — reach them through the proxy: `https://your-server-hostname/export`, and `/health` on either `https://your-server-hostname/health` or plain `http://your-server-hostname/health`, which Caddy serves without the HTTPS redirect so probes work without TLS.
 | `GET /export` | Bearer | The full store as a zip; optional `?namespace=` filter (see [Export](#export)) |
 
 ## Available Resources

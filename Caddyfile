@@ -3,9 +3,19 @@
     auto_https off
 }
 
-# Redirect plain HTTP to HTTPS
+# Plain HTTP redirects to HTTPS, with one exception: liveness probes.
+# Container healthchecks, load balancers, and uptime monitors frequently
+# cannot follow a 301 or trust a private CA, and /health is unauthenticated
+# by design and returns nothing but {"status": "ok"} — so it is served
+# directly here rather than bounced to TLS.
 :80 {
-    redir https://{host}{uri} permanent
+    handle /health {
+        reverse_proxy mnemomatic:8000
+    }
+
+    handle {
+        redir https://{host}{uri} permanent
+    }
 }
 
 # HTTPS reverse proxy

@@ -15,6 +15,113 @@
 
 Choose the profile that fits your setup. The `full` image is self-contained and works out of the box; its bundled embedding model is chosen with the `EMBED_MODEL` build argument (see [Choosing the built-in embedding model](#choosing-the-built-in-embedding-model)). The `lite` image is significantly smaller and delegates embedding to an Ollama instance (or any compatible API), or runs keyword-only search if no embedder is configured.
 
+## Upgrading from v1.x to v2.0
+
+v2.0 has two breaking changes. Neither touches your data, but the server will refuse to start until both are addressed.
+
+### Before you start: take a backup
+
+The schema moved from version 1 to version 4 across this release. A v1.x image **cannot** safely read a database that v2.0 has opened — superseded knowledge entries and revision history did not exist in v1.x, and an older server does not know to hide or preserve them. Rolling back means restoring a copy, not pointing the old image at the new database.
+
+```bash
+docker compose down
+cp data/mnemomatic.db data/mnemomatic.db.v1-backup
+```
+
+Or take a portable export first — `GET /export`, the web viewer, or the CLI — which is independent of both schema and embedding model.
+
+### 1. The containers now run as a non-root user
+
+Both images run as uid/gid **65532**. An existing `./data` directory was created by a root-running container, so the new server cannot write to it and fails at startup with:
+
+```
+sqlite3.OperationalError: unable to open database file
+```
+
+Fix it one of two ways:
+
+```bash
+# Give the container's user ownership
+sudo chown -R 65532:65532 ./data
+```
+
+```yaml
+# ...or run as the user that already owns the directory
+services:
+  mnemomatic:
+    user: "1000:1000"        # your uid:gid — `id -u` / `id -g`
+```
+
+Named volumes need no action; they inherit ownership from the image.
+
+### 2. `minilm` is gone, and the default model changed
+
+`all-MiniLM-L6-v2` has been replaced by `snowflake-arctic-embed-xs` — same architecture, same 384 dimensions, same ~23 MB, same Apache-2.0 licence, and materially better retrieval. `minilm` is no longer a valid `EMBED_MODEL`; a build pinned to it fails immediately:
+
+```
+Unknown EMBED_MODEL 'minilm' — expected one of: arctic-embed-xs,
+gte-multilingual-base, embeddinggemma, amaretto-embed-148m
+```
+
+**What this means for you depends on what you were running:**
+
+| You were on | What happens | What to do |
+| ----------- | ------------ | ---------- |
+| `minilm` (the old default) | You get `arctic-embed-xs`. Both are 384-dim, so the dimension check **cannot** detect the change — the recorded embedding identity does, and the server refuses to start | Set `MNEMOMATIC_REINDEX=auto` (below) |
+| `gte-multilingual-base`, `embeddinggemma`, or `amaretto-embed-148m` | Nothing changes; your model is untouched | Keep your `EMBED_MODEL` build argument as-is |
+| An external embedder (`MNEMOMATIC_EMBED_URL`) | Nothing changes | Nothing |
+
+If you explicitly set `EMBED_MODEL: minilm`, either remove the line to take the new default or choose another model from the list.
+
+### 3. Upgrade
+
+```yaml
+services:
+  mnemomatic:
+    environment:
+      - MNEMOMATIC_REINDEX=auto     # re-embeds only if the embedder changed
+    volumes:
+      - ./data:/data                # add `:z` on SELinux hosts — see below
+```
+
+```bash
+sudo chown -R 65532:65532 ./data    # unless using `user:` instead
+docker compose up -d --build
+docker compose logs -f mnemomatic
+```
+
+`MNEMOMATIC_REINDEX=auto` is safe to leave set permanently: it does nothing unless the configured embedder differs from the one that built the index. If your model did change, startup rebuilds the vector index and re-embeds every item before serving — the port stays closed until that finishes, so a refused connection during the run means "still working", not "broken". Content, timestamps, revisions, and the audit log are untouched; only vectors are recomputed.
+
+### 4. Verify
+
+```bash
+# Through the bundled Caddy (the default compose setup)
+curl -k https://your-server-hostname/health   # {"status": "ok"} — no credentials needed
+
+docker compose ps                             # STATUS should read "healthy"
+```
+
+The bundled Caddy config also serves `/health` directly on port 80, so a probe that cannot do TLS works without a redirect:
+
+```bash
+curl http://your-server-hostname/health
+```
+
+Everything else on port 80 still redirects to HTTPS. If you uncommented the server's direct-access `ports:` line, `http://localhost:8686/health` works too.
+
+From an MCP client, `embedding_info()` should report `matches_index: true` with the model you expect. If a reindex ran, `list_audit(op="reindex")` shows it with per-type counts and a failure count.
+
+### Troubleshooting
+
+**`unable to open database file`** has two unrelated causes, and they look identical:
+
+1. **Ownership** — the fix in step 1.
+2. **SELinux** (Fedora, RHEL) — bind mounts need a relabel. Append `:z` (shared) or `:Z` (private): `./data:/data:z`. This applies to containers generally rather than to this release, but it produces the same message.
+
+If you have already applied the chown and still see the error, it is the second one.
+
+**The server refuses to start naming an embedding mismatch.** That is the identity check doing its job — it means the configured model is not the one that built your index. Either restore the previous `EMBED_MODEL`, or set `MNEMOMATIC_REINDEX=auto` to rebuild once.
+
 ## TLS Setup (LAN deployments)
 
 When running on a machine that other devices on your network will connect to, use the included Caddy reverse proxy for HTTPS. Caddy terminates TLS and proxies to the Mnem-O-matic container — the app itself stays HTTP-only on the internal Docker network.
@@ -240,9 +347,20 @@ docker compose down
 `GET /health` reports liveness and is **reachable without credentials**, so a container healthcheck, load balancer, or uptime monitor can poll it even when `MNEMOMATIC_API_KEY` is set:
 
 ```bash
-curl http://your-server:8000/health
+# Through the bundled Caddy reverse proxy
+curl -k https://your-server-hostname/health
 # {"status": "ok"}
 ```
+
+The default `docker-compose.yml` publishes only Caddy's ports 80 and 443; the server's own 8000 stays on the internal Docker network.
+
+`/health` is also served **directly on port 80**, without the HTTPS redirect that applies to every other path — monitors and load balancers frequently cannot follow a 301 or trust a private CA, and this endpoint is unauthenticated by design:
+
+```bash
+curl http://your-server-hostname/health
+```
+
+The container's own `HEALTHCHECK` is unaffected either way: it runs inside the container against `127.0.0.1`, so it never crosses the proxy.
 
 The response is deliberately that and nothing more. Version, embedding model, and configuration stay behind authentication — an unauthenticated caller learns only what an open port already tells them. Every other path, `/export` included, still requires the Bearer token.
 
