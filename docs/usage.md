@@ -564,6 +564,15 @@ After connecting Claude Code, you can interact naturally:
 
 > "What do you know about the database setup?"
 
+## HTTP Endpoints
+
+Alongside the MCP transport, the server exposes two plain HTTP routes:
+
+| Route | Auth | Purpose |
+| ----- | ---- | ------- |
+| `GET /health` | **none** | Liveness — `{"status": "ok"}`. Used by the images' `HEALTHCHECK`; see [Health Endpoint](installation.md#health-endpoint) |
+| `GET /export` | Bearer | The full store as a zip; optional `?namespace=` filter (see [Export](#export)) |
+
 ## Available Resources
 
 MCP resources provide read-only access to browse stored data:

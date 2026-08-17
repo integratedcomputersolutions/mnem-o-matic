@@ -35,7 +35,13 @@ from mnemomatic import tools_content  # noqa: F401
 from mnemomatic import tools_search   # noqa: F401
 from mnemomatic import tools_history  # noqa: F401
 from mnemomatic import tools_admin    # noqa: F401
-from mnemomatic.tools_admin import _export_route, _make_export, _server_version, _settings_info
+from mnemomatic.tools_admin import (
+    _export_route,
+    _health_route,
+    _make_export,
+    _server_version,
+    _settings_info,
+)
 
 logger = logging.getLogger("mnemomatic")
 
@@ -156,10 +162,12 @@ def main():
     logger.info("Building ASGI application...")
     app = mcp.streamable_http_app()
 
-    # Zip export download. Inserted ahead of the MCP catch-all; NOT exempt
-    # from Bearer auth — it returns the entire store.
+    # Both inserted ahead of the MCP catch-all. /export is NOT exempt from
+    # Bearer auth — it returns the entire store. /health is exempt (see
+    # BearerAuthMiddleware) so probes that cannot present credentials still work.
     from starlette.routing import Route
     app.router.routes.insert(0, Route("/export", _export_route, methods=["GET"]))
+    app.router.routes.insert(0, Route("/health", _health_route, methods=["GET"]))
 
     # Optional read-only web viewer at /ui, gated by a single shared secret.
     # Disabled unless MNEMOMATIC_UI_TOKEN is set, so it never exposes data by default.
