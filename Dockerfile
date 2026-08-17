@@ -32,6 +32,10 @@ RUN apt-get update && \
 COPY pyproject.toml README.md ./
 COPY src/ src/
 
+# Seeds /data in the runtime images with non-root ownership (see the runtime
+# stages). Empty: it only exists to carry its own mode and owner.
+RUN mkdir -p /data-skel
+
 # ── Model download ─────────────────────────────────────────────────────────────
 # Isolated stage: downloads the ONNX embedding model selected by EMBED_MODEL,
 # never copied to lite. Alongside the weights it writes model_config.json
@@ -260,17 +264,28 @@ RUN find /install -name '*.pyc' -delete && \
 
 # ── Runtime: full ──────────────────────────────────────────────────────────────
 
-FROM gcr.io/distroless/python3-debian12 AS full
+FROM gcr.io/distroless/python3-debian12:nonroot AS full
 
 WORKDIR /app
 
 COPY --from=builder-full /install /usr/local
 COPY --from=model-builder /app/model /app/model
 
+# The database directory, owned by the unprivileged user the image runs as.
+# A named volume inherits this ownership when Docker first populates it; a
+# bind mount does not — the host directory's owner wins, so it must already be
+# writable by uid 65532 (see docs/installation.md, "Running as a non-root user").
+COPY --from=builder-base --chown=65532:65532 /data-skel /data
+
 ENV PYTHONPATH=/usr/local/lib/python3.11/site-packages
 ENV MNEMOMATIC_DB_PATH=/data/mnemomatic.db
 ENV MNEMOMATIC_HOST=0.0.0.0
 ENV MNEMOMATIC_PORT=8000
+
+# Drop privileges. The :nonroot base already selects uid/gid 65532; stating it
+# here keeps the image correct if that ever changes upstream. Port 8000 is
+# unprivileged, so nothing needs root to bind it.
+USER 65532:65532
 
 EXPOSE 8000
 
@@ -278,16 +293,27 @@ CMD ["-c", "from mnemomatic.server import main; main()"]
 
 # ── Runtime: lite ──────────────────────────────────────────────────────────────
 
-FROM gcr.io/distroless/python3-debian12 AS lite
+FROM gcr.io/distroless/python3-debian12:nonroot AS lite
 
 WORKDIR /app
 
 COPY --from=builder-lite /install /usr/local
 
+# The database directory, owned by the unprivileged user the image runs as.
+# A named volume inherits this ownership when Docker first populates it; a
+# bind mount does not — the host directory's owner wins, so it must already be
+# writable by uid 65532 (see docs/installation.md, "Running as a non-root user").
+COPY --from=builder-base --chown=65532:65532 /data-skel /data
+
 ENV PYTHONPATH=/usr/local/lib/python3.11/site-packages
 ENV MNEMOMATIC_DB_PATH=/data/mnemomatic.db
 ENV MNEMOMATIC_HOST=0.0.0.0
 ENV MNEMOMATIC_PORT=8000
+
+# Drop privileges. The :nonroot base already selects uid/gid 65532; stating it
+# here keeps the image correct if that ever changes upstream. Port 8000 is
+# unprivileged, so nothing needs root to bind it.
+USER 65532:65532
 
 EXPOSE 8000
 

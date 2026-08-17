@@ -235,6 +235,35 @@ docker compose up --build -d
 docker compose down
 ```
 
+## Running as a Non-Root User
+
+Both images run as an unprivileged user — uid/gid **65532**, the `nonroot` account from the distroless base — rather than root. Nothing in the server needs privilege: it listens on port 8000, which is unprivileged, and writes only inside `/data`.
+
+**Named volumes need no action.** Docker copies the image's ownership when it first populates the volume, and the images ship `/data` already owned by 65532.
+
+**Bind mounts do need action**, because the host directory's ownership wins. A directory the container cannot write produces this at startup:
+
+```
+sqlite3.OperationalError: unable to open database file
+```
+
+Two ways to fix it — pick either:
+
+```bash
+# 1. Give the container's user ownership of the data directory
+sudo chown -R 65532:65532 ./data
+
+# 2. Or run as yourself, so the container matches the directory you already own
+#    (docker compose: add `user: "${UID}:${GID}"` to the service)
+docker run --user "$(id -u):$(id -g)" -v "$(pwd)/data:/data" ...
+```
+
+Option 2 is usually easier when the data directory already exists and belongs to you; option 1 is tidier for a fresh deployment.
+
+> **Upgrading from an image that ran as root:** an existing `./data` is owned by root and the server will not start until one of the above is applied. Nothing in the database changes — this is a filesystem permission fix, not a migration.
+
+**On SELinux hosts (Fedora, RHEL):** bind mounts also need a relabel, appending `:z` (shared) or `:Z` (private) to the mount — `-v "$(pwd)/data:/data:Z"`, or `./data:/data:Z` in compose. This applies to containers generally rather than to this change specifically, but it produces the same "unable to open database file" error and is easy to mistake for a permissions problem.
+
 ## Configuration
 
 Environment variables (set in `docker-compose.yml` or passed to Docker):

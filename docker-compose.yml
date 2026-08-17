@@ -16,6 +16,10 @@ services:
     # No ports exposed directly — all traffic goes through Caddy
     # (or uncomment below for direct access: ports: ["${PORT:-8686}:8000"])
     volumes:
+      # The container runs as uid 65532, so this directory must be writable by
+      # it: `sudo chown -R 65532:65532 ./data`, or add `user: "${UID}:${GID}"`
+      # below to run as yourself. On SELinux hosts append `:z`. See
+      # docs/installation.md, "Running as a Non-Root User".
       - ./data:/data
     environment:
       - MNEMOMATIC_DB_PATH=/data/mnemomatic.db
