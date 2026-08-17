@@ -95,9 +95,19 @@ docker compose logs -f mnemomatic
 ### 4. Verify
 
 ```bash
-curl http://localhost:8000/health     # {"status": "ok"} — no credentials needed
-docker compose ps                     # STATUS should read "healthy"
+# Through the bundled Caddy (the default compose setup)
+curl -k https://your-server-hostname/health   # {"status": "ok"} — no credentials needed
+
+docker compose ps                             # STATUS should read "healthy"
 ```
+
+The bundled Caddy config also serves `/health` directly on port 80, so a probe that cannot do TLS works without a redirect:
+
+```bash
+curl http://your-server-hostname/health
+```
+
+Everything else on port 80 still redirects to HTTPS. If you uncommented the server's direct-access `ports:` line, `http://localhost:8686/health` works too.
 
 From an MCP client, `embedding_info()` should report `matches_index: true` with the model you expect. If a reindex ran, `list_audit(op="reindex")` shows it with per-type counts and a failure count.
 
@@ -337,9 +347,20 @@ docker compose down
 `GET /health` reports liveness and is **reachable without credentials**, so a container healthcheck, load balancer, or uptime monitor can poll it even when `MNEMOMATIC_API_KEY` is set:
 
 ```bash
-curl http://your-server:8000/health
+# Through the bundled Caddy reverse proxy
+curl -k https://your-server-hostname/health
 # {"status": "ok"}
 ```
+
+The default `docker-compose.yml` publishes only Caddy's ports 80 and 443; the server's own 8000 stays on the internal Docker network.
+
+`/health` is also served **directly on port 80**, without the HTTPS redirect that applies to every other path — monitors and load balancers frequently cannot follow a 301 or trust a private CA, and this endpoint is unauthenticated by design:
+
+```bash
+curl http://your-server-hostname/health
+```
+
+The container's own `HEALTHCHECK` is unaffected either way: it runs inside the container against `127.0.0.1`, so it never crosses the proxy.
 
 The response is deliberately that and nothing more. Version, embedding model, and configuration stay behind authentication — an unauthenticated caller learns only what an open port already tells them. Every other path, `/export` included, still requires the Bearer token.
 
