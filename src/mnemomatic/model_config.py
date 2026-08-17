@@ -8,7 +8,8 @@ arg) needs no matching runtime configuration. Explicit MNEMOMATIC_* env vars
 always override it.
 
 Native (non-Docker) runs usually have no config file; every consumer falls
-back to MiniLM-compatible defaults, matching the pre-existing behavior.
+back to conservative defaults (384 dims, no prefixes, 512 tokens, mean
+pooling) — the shape an unconfigured external embedder is most likely to have.
 """
 
 import json

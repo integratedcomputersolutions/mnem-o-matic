@@ -16,15 +16,15 @@ MODEL_PATH = os.environ.get("MNEMOMATIC_MODEL_PATH", "/app/model/model.onnx")
 TOKENIZER_PATH = os.environ.get("MNEMOMATIC_TOKENIZER_PATH", "/app/model/tokenizer.json")
 # Token truncation limit for the built-in model. Defaults to the bundled
 # model's context from model_config.json (2048 for EmbeddingGemma, 512 for
-# MiniLM/e5), falling back to 512 when no config exists.
+# arctic-embed/gte), falling back to 512 when no config exists.
 MODEL_MAX_TOKENS = int(os.environ.get(
     "MNEMOMATIC_MODEL_MAX_TOKENS", model_config.CONFIG.get("max_tokens", 512)
 ))
 # How token embeddings become one vector, when the ONNX graph does not already
 # do it. Must match what the model was trained with: mean-pooling a model
 # trained on its CLS token produces vectors that are not wrong enough to error,
-# only wrong enough to retrieve badly. Defaults to mean — what MiniLM and
-# multilingual-e5 use, and what every pre-existing build assumed.
+# only wrong enough to retrieve badly. Defaults to mean — what gte and
+# EmbeddingGemma use, and what every pre-existing build assumed.
 #
 # Deliberately not overridable by environment: pooling changes the vectors just
 # as the model does, but unlike the model name it is not part of the recorded
@@ -67,7 +67,7 @@ class OnnxEmbedder:
     - Sentence-transformers exports (the EmbeddingGemma build option) declare
       a ``sentence_embedding`` output with pooling, projection layers, and
       normalization baked into the graph — it is used as-is.
-    - Plain transformer exports (MiniLM, multilingual-e5, arctic-embed) only
+    - Plain transformer exports (arctic-embed, and older MiniLM/e5 builds) only
       produce token embeddings; those are pooled here according to POOLING —
       mean by default, CLS for models trained that way — then normalized.
     """
