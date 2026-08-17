@@ -3,7 +3,7 @@
 The Docker build writes /app/model/model_config.json describing the model the
 image was built with; server defaults (dimension, prefixes, token limit) are
 driven by it. The loader must return {} for anything unreadable — a broken
-config file must degrade to the MiniLM-compatible fallbacks, never crash the
+config file must degrade to the conservative fallbacks, never crash the
 server at import time.
 """
 

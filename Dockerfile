@@ -4,7 +4,7 @@
 #   arctic-embed-xs       — Snowflake Arctic Embed xs (default): 384 dims,
 #                           English, fastest (~10-15 ms/embed), tiny (~23 MB
 #                           INT8). CLS pooling + a query prefix
-#   gte-multilingual-base — 768 dims, ~70 languages, near-MiniLM query speed
+#   gte-multilingual-base — 768 dims, ~70 languages, near-arctic query speed
 #                           (~12 ms/embed), 8192-token context, ~325 MB
 #   embeddinggemma        — EmbeddingGemma-300m: 768 dims, best retrieval
 #                           quality, multilingual, ~200 ms/embed, ~330 MB
