@@ -113,6 +113,23 @@ From an MCP client, `embedding_info()` should report `matches_index: true` with 
 
 ### Troubleshooting
 
+**The container exits immediately with code 139 (`SIGSEGV`)**, logging `Initializing embedder...` and nothing after:
+
+```
+mnemomatic-MCP  | Initializing embedder...
+mnemomatic-MCP exited with code 139
+```
+
+That is `onnxruntime` crashing on import, not a problem with your data or your model. onnxruntime 1.29.0 segfaults under the distroless base both images use; the dependency is capped below it. If you hit this, rebuild from a checkout that includes the cap — a rebuild that resolved 1.29.0 will keep crashing until the dependency is re-resolved:
+
+```bash
+docker compose build --no-cache mnemomatic
+```
+
+The reverse proxy will log `502` and `dial tcp: lookup mnemomatic ... server misbehaving` alongside this, which is just the proxy reporting that the container is gone.
+
+### Troubleshooting
+
 **`unable to open database file`** has two unrelated causes, and they look identical:
 
 1. **Ownership** — the fix in step 1.
