@@ -132,9 +132,9 @@ Any OpenAI-compatible embedding endpoint works the same way — Ollama's `/v1/em
 |-----|-------------|
 | `latest-full` | Latest release, built-in ONNX embeddings |
 | `latest-lite` | Latest release, no ML stack |
-| `1.2.3-full` / `1.2.3-lite` | Exact version |
-| `1.2-full` / `1.2-lite` | Minor floating tag |
-| `1-full` / `1-lite` | Major floating tag |
+| `2.0.0-full` / `2.0.0-lite` | Exact version |
+| `2.0-full` / `2.0-lite` | Minor floating tag |
+| `2-full` / `2-lite` | Major floating tag |
 
 ---
 

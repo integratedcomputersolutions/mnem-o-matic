@@ -95,6 +95,12 @@ A **Settings** page shows the configuration the server is running with — embed
 
 See the [Usage Guide](docs/usage.md#web-viewer) for details and security notes.
 
+## Running It
+
+Both Docker images run as an unprivileged user (uid 65532) — nothing in the server needs root. `GET /health` reports liveness without credentials, and the images ship a `HEALTHCHECK` that polls it, so `docker compose up --wait` and orchestrator readiness gates work with no configuration. Everything else stays behind the API key.
+
+The database records which embedding model built its vector index, so swapping models cannot silently corrupt search: the server refuses to start on a mismatch and names what changed, and `MNEMOMATIC_REINDEX=auto` re-embeds once and then stays inert. The `embedding_info` tool reports the same state to an agent. [More →](docs/installation.md#switching-embedding-models)
+
 ## Documentation
 
 - [Installation Guide](docs/installation.md) — prerequisites, Docker profiles, TLS setup, configuration, development
