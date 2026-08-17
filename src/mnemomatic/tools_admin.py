@@ -63,6 +63,8 @@ async def _export_route(request):
 # model card (weights provenance, benchmarks, license), not the ONNX mirror
 # the image downloads from. Unknown/external models simply get no link.
 _HF_MODEL_PAGES = {
+    "snowflake-arctic-embed-xs": "https://huggingface.co/Snowflake/snowflake-arctic-embed-xs",
+    # Kept for databases built by earlier releases, which still report it.
     "all-MiniLM-L6-v2": "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2",
     "gte-multilingual-base": "https://huggingface.co/Alibaba-NLP/gte-multilingual-base",
     "embeddinggemma-300m": "https://huggingface.co/google/embeddinggemma-300m",

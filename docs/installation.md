@@ -166,9 +166,9 @@ The `full` image bundles one of four embedding models, selected with the `EMBED_
 
 | `EMBED_MODEL` | Dimensions | Languages | Query embed (CPU) | Model size | RAM (running) | Notes |
 | ------------- | ---------- | --------- | ----------------- | ---------- | ------------- | ----- |
-| `minilm` (default) | 384 | English | ~10–15 ms | ~23 MB | ~240 MB | `all-MiniLM-L6-v2` — fastest and smallest; compatible with databases created by earlier releases |
+| `arctic-embed-xs` (default) | 384 | English | ~10–15 ms | ~23 MB | ~240 MB | Snowflake Arctic Embed xs — fastest and smallest; Apache-2.0. CLS pooling and a query prefix, both applied automatically |
 | `amaretto-embed-148m` | 768 | 8 Latin-script + code | ~130 ms | ~297 MB | ~470 MB | A vocabulary-sliced distillation of EmbeddingGemma — most of its retrieval quality at ~40% of the RAM; 2048-token context; weights under the [Gemma Terms of Use](https://ai.google.dev/gemma/terms) |
-| `gte-multilingual-base` | 768 | ~70 | ~12 ms | ~325 MB | ~880 MB | Strong multilingual retrieval at near-MiniLM query speed; 8192-token context; no task prefixes |
+| `gte-multilingual-base` | 768 | ~70 | ~12 ms | ~325 MB | ~880 MB | Strong multilingual retrieval at near-arctic query speed; 8192-token context; no task prefixes |
 | `embeddinggemma` | 768 | 100+ | ~160–225 ms | ~330 MB | ~1.2 GB | EmbeddingGemma-300m — best retrieval quality, 2048-token context; weights under the [Gemma Terms of Use](https://ai.google.dev/gemma/terms) |
 
 RAM figures are steady-state container usage measured on the same production deployment (they include the server itself plus SQLite's page cache and memory-mapped database file, not just the model). The INT8 weights are compact on disk, but `onnxruntime` expands parts of the larger models at load time, so their resident memory runs well above the model file size.
@@ -177,9 +177,9 @@ RAM figures are steady-state container usage measured on the same production dep
 
 The models were compared on the same real-world corpus (~90 items of technical notes and documents) on a modest x86 server, measuring end-to-end MCP search latency and ranking quality on probe queries:
 
-- **`minilm` — English content, smallest image.** Semantic search completes in ~30 ms end to end. On English technical content it ranked the correct result first with solid margins in every probe. Its limits: English only, and as a symmetric 2021-era model it is the weakest of the four at paraphrase-style queries where the query shares no vocabulary with the stored text.
+- **`arctic-embed-xs` — English content, smallest image.** The lightest option: ~240 MB of memory and a query embedded in ~10–15 ms. Snowflake's retrain of all-MiniLM-L6-v2 on the same architecture, scoring **50.15 vs 41.95** on MTEB Retrieval-15 — a ~20% relative gain for the same footprint, which is why it replaced MiniLM as the default. English only. One known limit, found on a real store rather than a benchmark: on corpora where most content covers closely related subject matter it discriminates poorly, scoring everything in a narrow band. If your store is dense, homogeneous technical material, prefer `amaretto-embed-148m` or `embeddinggemma`.
 - **`amaretto-embed-148m` — near-EmbeddingGemma quality on a smaller budget.** A vocabulary-sliced distillation of EmbeddingGemma (262k → 60.5k token vocabulary, 148M encoder parameters) that retains ~99.5% of the teacher's retrieval nDCG@10 while using roughly 40% of its RAM and about half its query latency. It takes the same task prefixes as EmbeddingGemma and, having been distilled to preserve the teacher's vector space, ranks much like it: on technical content probes it put the correct chunk first with clear margins, and Italian queries retrieved English content at least as well as the English equivalents did. Two limits worth knowing: coverage is 8 Latin-script languages plus code — non-Latin scripts fall back to byte-level tokens and degrade badly — and on generic, low-jargon queries its score range compresses, so rank order among near-ties is less dependable than EmbeddingGemma's.
-- **`gte-multilingual-base` — multilingual content without the latency cost.** Queries embed in ~12 ms — as fast as MiniLM — because most of its parameters sit in the vocabulary matrix, which costs little for short inputs (longer chunks take ~150 ms each at store time). Cross-lingual retrieval is strong: in probes, an Italian query separated the correct English answer from a distractor *better* than the equivalent English query did (0.71 vs 0.32). No task prefixes needed. Its trade-off is image size (~325 MB, Gemma-class). *(`multilingual-e5-small` was evaluated for this slot and dropped: it underperformed MiniLM on English content and its compressed score range made rankings unreliable.)*
+- **`gte-multilingual-base` — multilingual content without the latency cost.** Queries embed in ~12 ms — as fast as arctic-embed-xs — because most of its parameters sit in the vocabulary matrix, which costs little for short inputs (longer chunks take ~150 ms each at store time). Cross-lingual retrieval is strong: in probes, an Italian query separated the correct English answer from a distractor *better* than the equivalent English query did (0.71 vs 0.32). No task prefixes needed. Its trade-off is image size (~325 MB, Gemma-class). *(`multilingual-e5-small` was evaluated for this slot and dropped: on English content it underperformed the then-default MiniLM, and its compressed score range made rankings unreliable.)*
 - **`embeddinggemma` — best retrieval quality, paraphrase-robust.** The quality winner: it separates relevant from irrelevant results by an order of magnitude larger margins and reliably resolves zero-word-overlap queries ("how do I get back into my account?" → password-reset content) that smaller models rank flat or miss. The cost is CPU time: ~200 ms per query embedding (imperceptible in agent workflows) and ~0.5–1 s per chunk when storing large documents — a 20-chunk document takes ~10–20 s to store. Pick it unless storage throughput or very weak hardware is a concern.
 
 ```bash
@@ -234,6 +234,35 @@ docker compose up --build -d
 # Stop
 docker compose down
 ```
+
+## Running as a Non-Root User
+
+Both images run as an unprivileged user — uid/gid **65532**, the `nonroot` account from the distroless base — rather than root. Nothing in the server needs privilege: it listens on port 8000, which is unprivileged, and writes only inside `/data`.
+
+**Named volumes need no action.** Docker copies the image's ownership when it first populates the volume, and the images ship `/data` already owned by 65532.
+
+**Bind mounts do need action**, because the host directory's ownership wins. A directory the container cannot write produces this at startup:
+
+```
+sqlite3.OperationalError: unable to open database file
+```
+
+Two ways to fix it — pick either:
+
+```bash
+# 1. Give the container's user ownership of the data directory
+sudo chown -R 65532:65532 ./data
+
+# 2. Or run as yourself, so the container matches the directory you already own
+#    (docker compose: add `user: "${UID}:${GID}"` to the service)
+docker run --user "$(id -u):$(id -g)" -v "$(pwd)/data:/data" ...
+```
+
+Option 2 is usually easier when the data directory already exists and belongs to you; option 1 is tidier for a fresh deployment.
+
+> **Upgrading from an image that ran as root:** an existing `./data` is owned by root and the server will not start until one of the above is applied. Nothing in the database changes — this is a filesystem permission fix, not a migration.
+
+**On SELinux hosts (Fedora, RHEL):** bind mounts also need a relabel, appending `:z` (shared) or `:Z` (private) to the mount — `-v "$(pwd)/data:/data:Z"`, or `./data:/data:Z` in compose. This applies to containers generally rather than to this change specifically, but it produces the same "unable to open database file" error and is easy to mistake for a permissions problem.
 
 ## Configuration
 
@@ -332,7 +361,7 @@ Either way out works: restore the previous setting, or reindex.
 
 > **Upgrading an existing database:** the first start after upgrading to a release with this check records whatever embedder is configured then, logs a warning, and starts normally — nothing breaks. It cannot detect a swap that already happened, so if you changed models earlier without reindexing, run `MNEMOMATIC_REINDEX=1` once now (`auto` will not fire — as far as the record is concerned nothing has changed). Running FTS-only (no embedder configured) neither triggers the check nor disturbs a recorded identity.
 
-> **Compatibility note:** the default `minilm` build uses the same model and quantization pipeline as earlier releases, so databases created by previous images keep working without a reindex. Only an actual model change triggers the flow above.
+> **Upgrading from a release that defaulted to `minilm`:** the default model changed, so a database built by an earlier image needs one reindex. Set `MNEMOMATIC_REINDEX=auto` and restart — the recorded embedding identity detects the change and rebuilds the index once. Both models are 384-dim, so the dimension check alone would not catch this; the identity check is what does.
 
 ## Schema Migrations
 

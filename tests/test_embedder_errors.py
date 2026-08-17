@@ -321,7 +321,7 @@ class TestOpenAIWireFormat(unittest.TestCase):
     """The default (openai) wire format: request body, response parsing, errors."""
 
     def setUp(self):
-        self.embedder = HttpEmbedder("http://dante:8181/v1/embeddings", model="embeddinggemma")
+        self.embedder = HttpEmbedder("http://embed-host:8181/v1/embeddings", model="embeddinggemma")
 
     def _respond(self, payload):
         mock_resp = MagicMock()
@@ -374,12 +374,12 @@ class TestOpenAIWireFormat(unittest.TestCase):
             HttpEmbedder("http://ollama:11434/api/embeddings", api="openai")
         self.assertIn("MNEMOMATIC_EMBED_API=ollama", cm.output[0])
         with self.assertLogs("mnemomatic", level="WARNING") as cm:
-            HttpEmbedder("http://dante:8181/v1/embeddings", api="ollama")
+            HttpEmbedder("http://embed-host:8181/v1/embeddings", api="ollama")
         self.assertIn("MNEMOMATIC_EMBED_API=openai", cm.output[0])
 
     def test_matching_flavor_does_not_warn(self):
         with self.assertNoLogs("mnemomatic", level="WARNING"):
-            HttpEmbedder("http://dante:8181/v1/embeddings", api="openai")
+            HttpEmbedder("http://embed-host:8181/v1/embeddings", api="openai")
             HttpEmbedder("http://ollama:11434/api/embeddings", api="ollama")
 
 

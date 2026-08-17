@@ -16,7 +16,8 @@ from mnemomatic.models import Document, Knowledge, Note, SearchResult
 logger = logging.getLogger("mnemomatic")
 
 # Defaults to the bundled model's dimension (model_config.json, written by the
-# Docker build for the EMBED_MODEL chosen), falling back to 384 (MiniLM-class)
+# Docker build for the EMBED_MODEL chosen), falling back to 384 (a conservative
+# default for an unconfigured external embedder)
 # when no config exists. Changing dimension requires a reindex once
 # to rebuild the index — the server fails fast on the mismatch otherwise.
 EMBEDDING_DIM = int(os.environ.get("MNEMOMATIC_EMBED_DIM", model_config.CONFIG.get("dim", 384)))

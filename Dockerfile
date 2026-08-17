@@ -1,9 +1,10 @@
 # syntax=docker/dockerfile:1
 
 # Built-in embedding model for the full image. One of:
-#   minilm                — all-MiniLM-L6-v2 (default): 384 dims, English,
-#                           fastest (~10-15 ms/embed), tiny (~23 MB INT8)
-#   gte-multilingual-base — 768 dims, ~70 languages, near-MiniLM query speed
+#   arctic-embed-xs       — Snowflake Arctic Embed xs (default): 384 dims,
+#                           English, fastest (~10-15 ms/embed), tiny (~23 MB
+#                           INT8). CLS pooling + a query prefix
+#   gte-multilingual-base — 768 dims, ~70 languages, near-arctic query speed
 #                           (~12 ms/embed), 8192-token context, ~325 MB
 #   embeddinggemma        — EmbeddingGemma-300m: 768 dims, best retrieval
 #                           quality, multilingual, ~200 ms/embed, ~330 MB
@@ -12,9 +13,10 @@
 #                           at ~130 ms/embed and ~297 MB (weight-only INT8)
 # Selecting a model bakes its weights and a model_config.json (dimension, task
 # prefixes, token limit) into the image — no runtime configuration needed.
-# Switching models on an existing database requires one MNEMOMATIC_REINDEX=1
-# restart (see docs/installation.md, "Switching Embedding Models").
-ARG EMBED_MODEL=minilm
+# Switching models on an existing database requires a reindex — set
+# MNEMOMATIC_REINDEX=auto (see docs/installation.md, "Switching Embedding
+# Models"). Same-dimension swaps are caught by the recorded model identity.
+ARG EMBED_MODEL=arctic-embed-xs
 
 # ── Builder base ──────────────────────────────────────────────────────────────
 # Shared setup: system tools and source code only
@@ -30,6 +32,10 @@ RUN apt-get update && \
 COPY pyproject.toml README.md ./
 COPY src/ src/
 
+# Seeds /data in the runtime images with non-root ownership (see the runtime
+# stages). Empty: it only exists to carry its own mode and owner.
+RUN mkdir -p /data-skel
+
 # ── Model download ─────────────────────────────────────────────────────────────
 # Isolated stage: downloads the ONNX embedding model selected by EMBED_MODEL,
 # never copied to lite. Alongside the weights it writes model_config.json
@@ -40,12 +46,10 @@ COPY src/ src/
 # known SHA-256 digest so a compromised or moved upstream file fails the build
 # instead of shipping.
 #
-# minilm is downloaded as FP32 and quantized to INT8 here at build time — the
-# same pipeline previous releases used, keeping its vectors compatible with
-# databases embedded by those releases. The other models publish INT8 variants
-# pre-made. EmbeddingGemma's graph references its weights by the fixed name
-# `model_quantized.onnx_data`, which must keep that name next to model.onnx;
-# its export also bakes the full sentence-transformers stack (mean pooling,
+# Every model here publishes a pre-quantized INT8 variant, so nothing is
+# quantized at build time. EmbeddingGemma's graph references its weights by the
+# fixed name `model_quantized.onnx_data`, which must keep that name next to
+# model.onnx; its export also bakes the full sentence-transformers stack (mean pooling,
 # dense projection layers, normalization) into the graph as a
 # `sentence_embedding` output.
 
@@ -53,27 +57,28 @@ FROM builder-base AS model-builder
 
 ARG EMBED_MODEL
 
-# Quantization toolchain, only needed for the minilm FP32→INT8 conversion
-RUN if [ "$EMBED_MODEL" = "minilm" ]; then \
-        pip install --no-cache-dir --no-compile --target=/tmp/quant onnx onnxruntime sympy; \
-    fi
-
 RUN python3 << 'PYTHON_EOF'
 import hashlib, json, os, urllib.request
 
 MODELS = {
-    "minilm": {
-        "repo": "Qdrant/all-MiniLM-L6-v2-onnx",
-        "revision": "5f1b8cd78bc4fb444dd171e59b18f3a3af89a079",
+    # Snowflake's retrain of all-MiniLM-L6-v2, which this replaces: same
+    # architecture, same 384 dims, same ~23 MB INT8 footprint, and +8 nDCG@10
+    # on MTEB Retrieval-15 (50.15 vs 41.95). Two differences the config below
+    # carries: it pools the CLS token rather than the mean, and queries take a
+    # prefix while documents take none.
+    "arctic-embed-xs": {
+        "repo": "Snowflake/snowflake-arctic-embed-xs",
+        "revision": "d8c86521100d3556476a063fc2342036d45c106f",
         "files": [
-            ("model.onnx", "model.onnx",
-             "bbd7b466f6d58e646fdc2bd5fd67b2f5e93c0b687011bd4548c420f7bd46f0c5"),
+            ("onnx/model_int8.onnx", "model.onnx",
+             "e6aa5e656466a73d7c3111e9a3378bd13e5b93af30eaac2b3f13fd56692589a1"),
             ("tokenizer.json", "tokenizer.json",
-             "da0e79933b9ed51798a3ae27893d3c5fa4a201126cef75586296df9b4d2c62a0"),
+             "91f1def9b9391fdabe028cd3f3fcc4efd34e5d1f08c3bf2de513ebb5911a1854"),
         ],
-        "quantize": True,
-        "config": {"model": "all-MiniLM-L6-v2", "dim": 384, "max_tokens": 512,
-                   "query_prefix": "", "doc_prefix": ""},
+        "config": {"model": "snowflake-arctic-embed-xs", "dim": 384, "max_tokens": 512,
+                   "pooling": "cls",
+                   "query_prefix": "Represent this sentence for searching relevant passages: ",
+                   "doc_prefix": ""},
     },
     "gte-multilingual-base": {
         "repo": "onnx-community/gte-multilingual-base",
@@ -84,7 +89,6 @@ MODELS = {
             ("tokenizer.json", "tokenizer.json",
              "3a56def25aa40facc030ea8b0b87f3688e4b3c39eb8b45d5702b3a1300fe2a20"),
         ],
-        "quantize": False,
         "config": {"model": "gte-multilingual-base", "dim": 768, "max_tokens": 8192,
                    "query_prefix": "", "doc_prefix": ""},
     },
@@ -99,7 +103,6 @@ MODELS = {
             ("tokenizer.json", "tokenizer.json",
              "4dda02faaf32bc91031dc8c88457ac272b00c1016cc679757d1c441b248b9c47"),
         ],
-        "quantize": False,
         "config": {"model": "embeddinggemma-300m", "dim": 768, "max_tokens": 2048,
                    "query_prefix": "task: search result | query: ",
                    "doc_prefix": "title: none | text: "},
@@ -117,7 +120,6 @@ MODELS = {
             ("tokenizer.json", "tokenizer.json",
              "557d686df474db4ed5612819752c7b1e9996e697170f9ae74577ee616cb4179c"),
         ],
-        "quantize": False,
         "config": {"model": "amaretto-embed-148m", "dim": 768, "max_tokens": 2048,
                    "query_prefix": "task: search result | query: ",
                    "doc_prefix": "title: none | text: "},
@@ -150,17 +152,6 @@ with open("/app/model/model_config.json", "w") as f:
 print(f"Wrote model_config.json: {model['config']}")
 PYTHON_EOF
 
-# FP32 → INT8 for minilm (~4x smaller, 2-3x faster on CPU). The quantization
-# toolchain lives in /tmp and is never copied to the runtime image.
-RUN if [ "$EMBED_MODEL" = "minilm" ]; then \
-        PYTHONPATH=/tmp/quant python3 -c "\
-from onnxruntime.quantization import quantize_dynamic, QuantType; import os; \
-orig = os.path.getsize('/app/model/model.onnx'); \
-quantize_dynamic('/app/model/model.onnx', '/app/model/model_int8.onnx', weight_type=QuantType.QUInt8); \
-quant = os.path.getsize('/app/model/model_int8.onnx'); \
-os.replace('/app/model/model_int8.onnx', '/app/model/model.onnx'); \
-print(f'Quantized: {orig/1024/1024:.1f}MB -> {quant/1024/1024:.1f}MB')"; \
-    fi
 
 # ── Full builder ───────────────────────────────────────────────────────────────
 # Installs all deps including the ML stack (onnxruntime, numpy, tokenizers)
@@ -273,17 +264,28 @@ RUN find /install -name '*.pyc' -delete && \
 
 # ── Runtime: full ──────────────────────────────────────────────────────────────
 
-FROM gcr.io/distroless/python3-debian12 AS full
+FROM gcr.io/distroless/python3-debian12:nonroot AS full
 
 WORKDIR /app
 
 COPY --from=builder-full /install /usr/local
 COPY --from=model-builder /app/model /app/model
 
+# The database directory, owned by the unprivileged user the image runs as.
+# A named volume inherits this ownership when Docker first populates it; a
+# bind mount does not — the host directory's owner wins, so it must already be
+# writable by uid 65532 (see docs/installation.md, "Running as a non-root user").
+COPY --from=builder-base --chown=65532:65532 /data-skel /data
+
 ENV PYTHONPATH=/usr/local/lib/python3.11/site-packages
 ENV MNEMOMATIC_DB_PATH=/data/mnemomatic.db
 ENV MNEMOMATIC_HOST=0.0.0.0
 ENV MNEMOMATIC_PORT=8000
+
+# Drop privileges. The :nonroot base already selects uid/gid 65532; stating it
+# here keeps the image correct if that ever changes upstream. Port 8000 is
+# unprivileged, so nothing needs root to bind it.
+USER 65532:65532
 
 EXPOSE 8000
 
@@ -291,16 +293,27 @@ CMD ["-c", "from mnemomatic.server import main; main()"]
 
 # ── Runtime: lite ──────────────────────────────────────────────────────────────
 
-FROM gcr.io/distroless/python3-debian12 AS lite
+FROM gcr.io/distroless/python3-debian12:nonroot AS lite
 
 WORKDIR /app
 
 COPY --from=builder-lite /install /usr/local
 
+# The database directory, owned by the unprivileged user the image runs as.
+# A named volume inherits this ownership when Docker first populates it; a
+# bind mount does not — the host directory's owner wins, so it must already be
+# writable by uid 65532 (see docs/installation.md, "Running as a non-root user").
+COPY --from=builder-base --chown=65532:65532 /data-skel /data
+
 ENV PYTHONPATH=/usr/local/lib/python3.11/site-packages
 ENV MNEMOMATIC_DB_PATH=/data/mnemomatic.db
 ENV MNEMOMATIC_HOST=0.0.0.0
 ENV MNEMOMATIC_PORT=8000
+
+# Drop privileges. The :nonroot base already selects uid/gid 65532; stating it
+# here keeps the image correct if that ever changes upstream. Port 8000 is
+# unprivileged, so nothing needs root to bind it.
+USER 65532:65532
 
 EXPOSE 8000
 
