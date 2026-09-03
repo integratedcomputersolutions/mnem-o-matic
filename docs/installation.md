@@ -559,6 +559,13 @@ mnemomatic
 mnemomatic-cli --help
 ```
 
+The Docker images do not resolve dependencies at build time: they install
+exactly what `uv.lock` pins, with hash verification. Changing a dependency
+therefore means refreshing the lock — `uv lock --upgrade-package starlette`
+for one package, `uv lock --upgrade` for all of them — and committing
+`uv.lock` alongside `pyproject.toml`. A stale lock fails the build rather
+than shipping a different resolution than the one that was tested.
+
 ## Tests
 
 ### Unit tests
