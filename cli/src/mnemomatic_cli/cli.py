@@ -160,6 +160,20 @@ def _cmd_tool(tool: str, args, client: MCPClient, pretty: bool,
 # Export (plain HTTP download, no MCP involved)
 # ---------------------------------------------------------------------------
 
+def _suggested_name(disposition: str) -> str:
+    """The filename to use from a Content-Disposition header.
+
+    Only the basename is kept. The server is trusted with the data it returns,
+    but not with where that data lands: a `filename="../../.bashrc"` would
+    otherwise write outside the directory the user named with -o.
+    """
+    match = re.search(r'filename="([^"]+)"', disposition)
+    suggested = Path(match.group(1)).name if match else ""
+    if not suggested or suggested in (".", ".."):
+        return "mnemomatic-export.zip"
+    return suggested
+
+
 def _cmd_export(args, server_url: str, api_key: str) -> None:
     """Download the zip export; write it where -o points, atomically.
 
@@ -192,8 +206,7 @@ def _cmd_export(args, server_url: str, api_key: str) -> None:
         sys.stdout.buffer.write(data)
         return
 
-    match = re.search(r'filename="([^"]+)"', disposition)
-    suggested = match.group(1) if match else "mnemomatic-export.zip"
+    suggested = _suggested_name(disposition)
     target = Path(args.output)
     # A trailing separator means "directory" even if it doesn't exist yet.
     if target.is_dir() or args.output.endswith(os.sep):
