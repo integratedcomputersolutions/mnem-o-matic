@@ -30,6 +30,30 @@ UI_TOKEN = os.environ.get("MNEMOMATIC_UI_TOKEN", "").strip()
 MAX_SEARCH_LIMIT = 100
 MAX_LIST_LIMIT = 200
 
+
+def _trusted_proxies() -> list[str]:
+    """Reverse proxies whose X-Forwarded-For / X-Forwarded-Proto are believed.
+
+    Comma-separated IPs or CIDRs, or "*" when the server port is only reachable
+    from the proxy (the shipped compose file). Empty — the default — means the
+    socket peer is the client, which is right for direct connections; behind an
+    untrusted proxy it means every client shares the proxy's address for
+    throttling and the audit log. The list goes to uvicorn, which does the
+    trust check itself.
+    """
+    raw = os.environ.get("MNEMOMATIC_TRUSTED_PROXIES", "")
+    return [p.strip() for p in raw.split(",") if p.strip()]
+
+
+TRUSTED_PROXIES = _trusted_proxies()
+
+# Largest request body the server will read. The biggest legitimate request is
+# a store_document call at the model limits (100 KB of content plus 50 metadata
+# values of 10 KB each), which stays well under 1 MB even after JSON escaping,
+# so this leaves room to spare. Deliberately not configurable: the validation
+# limits are the contract, and nothing legitimate needs a larger body.
+MAX_BODY_BYTES = 4 * 1024 * 1024
+
 # Scheduled backups of the export archive — disabled unless a directory is set.
 BACKUP_DIR = os.environ.get("MNEMOMATIC_BACKUP_DIR", "").strip()
 BACKUP_INTERVAL_HOURS = float(os.environ.get("MNEMOMATIC_BACKUP_INTERVAL", "24"))

@@ -6,9 +6,10 @@ fixed period regardless of what it sends. State is process-local — restarts
 clear it — which is the right trade-off for a single-instance server: it
 raises the cost of online guessing without adding storage or configuration.
 
-Note: when the server sits behind a reverse proxy all requests share the
-proxy's IP, so a lockout triggered by one attacker also blocks other clients
-behind that proxy until it expires. That is the safe failure mode.
+Note: the client key is the connection's peer address, so behind a reverse
+proxy every request shares the proxy's IP and one attacker's lockout blocks
+everyone behind it. Set MNEMOMATIC_TRUSTED_PROXIES so uvicorn resolves the
+real client from X-Forwarded-For and each client gets its own bucket.
 """
 
 import threading

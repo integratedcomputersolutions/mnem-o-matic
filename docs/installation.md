@@ -192,6 +192,23 @@ mkcert -CAROOT
 
 Alternatively, install mkcert on each client machine and run `mkcert -install` — they will share the same CA if you copy the `rootCA.pem` and `rootCA-key.pem` files from the server's CAROOT directory to the client's CAROOT directory first.
 
+### 4. Tell the server the proxy is trustworthy
+
+With Caddy in front, every request reaches the server from Caddy's address, so without further configuration the server sees one client rather than many. That matters in three places: the brute-force lockout would be shared (five wrong keys from anyone would lock out everybody for five minutes), the audit log's `ip` column would record the proxy, and the viewer's session cookie would never be marked `Secure` because the server only sees plain HTTP on the internal network.
+
+The shipped `docker-compose.yml` therefore sets:
+
+```yaml
+services:
+  mnemomatic:
+    environment:
+      - MNEMOMATIC_TRUSTED_PROXIES=*
+```
+
+`*` is safe there because the server's port is not published — Caddy on the internal Docker network is the only thing that can reach it, so its `X-Forwarded-For` and `X-Forwarded-Proto` are the only ones that can arrive. **If you publish the server port directly** (the commented-out `ports:` line), replace `*` with the proxy's address or the Docker network's CIDR — for example `MNEMOMATIC_TRUSTED_PROXIES=172.16.0.0/12`. Left as `*` on a directly reachable port, any client could set `X-Forwarded-For` itself and pick which address it is throttled and audited as.
+
+Leaving it unset is the conservative choice for a server nobody proxies: the connection's own peer address is used, and no forwarded header is believed from anyone.
+
 ## Quick Start (Pre-built Images)
 
 Pre-built images for `linux/amd64` and `linux/arm64` are published to the GitHub Container Registry on every release. No build step required.
@@ -427,6 +444,7 @@ Environment variables (set in `docker-compose.yml` or passed to Docker):
 | `MNEMOMATIC_PORT`           | `8000`                      | Server port (inside container)                           |
 | `MNEMOMATIC_API_KEY`        | *(unset)*                   | API key for Bearer token auth. Auth disabled when unset. |
 | `MNEMOMATIC_UI_TOKEN`       | *(unset)*                   | Shared secret for the read-only web viewer at `/ui`. Viewer disabled when unset. |
+| `MNEMOMATIC_TRUSTED_PROXIES` | *(unset)*                  | Reverse proxies whose `X-Forwarded-For` / `X-Forwarded-Proto` are believed: comma-separated IPs or CIDRs, or `*` when only the proxy can reach the server port. Unset means the socket peer is treated as the client. See [TLS Setup](#tls-setup-lan-deployments). |
 | `MNEMOMATIC_BACKUP_DIR`     | *(unset)*                   | Directory for scheduled export-zip backups. Backups disabled when unset. |
 | `MNEMOMATIC_BACKUP_INTERVAL` | `24`                       | Hours between scheduled backups                          |
 | `MNEMOMATIC_BACKUP_KEEP`    | `7`                         | Scheduled backup archives to retain; older ones are pruned |

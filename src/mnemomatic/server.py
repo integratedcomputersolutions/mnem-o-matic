@@ -16,6 +16,7 @@ import uvicorn
 from mnemomatic import config, runtime
 from mnemomatic.audit import RequestMetaMiddleware
 from mnemomatic.auth import BearerAuthMiddleware
+from mnemomatic.bodylimit import BodyLimitMiddleware
 from mnemomatic.compact import CompactToolsMiddleware
 from mnemomatic.db import EMBEDDING_DIM
 from mnemomatic.runtime import (
@@ -188,6 +189,10 @@ def main():
     # /ui is exempt from Bearer auth only when the viewer is actually registered.
     app = BearerAuthMiddleware(app, api_key=config.API_KEY, exempt_ui=bool(config.UI_TOKEN))
 
+    # Outside auth so an oversized body is refused before anything buffers it,
+    # inside CORS so a 413 still carries the CORS headers a browser needs.
+    app = BodyLimitMiddleware(app, max_bytes=config.MAX_BODY_BYTES)
+
     if config.CORS_ORIGINS:
         from starlette.middleware.cors import CORSMiddleware
         origins = [o.strip() for o in config.CORS_ORIGINS.split(",") if o.strip()]
@@ -205,12 +210,21 @@ def main():
         )
         logger.info("CORS enabled for origins: %s", origins)
 
+    logger.info("Trusted proxies: %s", ", ".join(config.TRUSTED_PROXIES) or "none")
     logger.info("Starting server on %s:%d", config.HOST, config.PORT)
+    # With trusted proxies configured, uvicorn rewrites the client address and
+    # scheme from X-Forwarded-For / X-Forwarded-Proto — but only for requests
+    # whose socket peer is on the list. Everything downstream (the throttles,
+    # the audit log, the viewer's Secure cookie) then reads the real client
+    # without doing its own header parsing. Unset means no forwarded header is
+    # believed from anyone.
     uvicorn.run(
         app,
         host=config.HOST,
         port=config.PORT,
         log_level="info",
+        proxy_headers=bool(config.TRUSTED_PROXIES),
+        forwarded_allow_ips=config.TRUSTED_PROXIES,
     )
 
 
