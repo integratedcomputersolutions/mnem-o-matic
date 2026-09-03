@@ -29,7 +29,12 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends gcc binutils && \
     rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml README.md ./
+# Build tool only — it turns uv.lock into a hashed requirements file for the
+# builder stages below. Never copied into a runtime image. Pinned, since an
+# unpinned build tool would undo the reproducibility the lockfile buys.
+RUN pip install --no-cache-dir "uv==0.12.9"
+
+COPY pyproject.toml uv.lock README.md ./
 COPY src/ src/
 
 # Seeds /data in the runtime images with non-root ownership (see the runtime
@@ -158,7 +163,16 @@ PYTHON_EOF
 
 FROM builder-base AS builder-full
 
-RUN pip install --no-cache-dir --no-compile --prefix=/install ".[onnx]"
+# Dependencies come from uv.lock, not from the ranges in pyproject.toml, so
+# the image contains exactly what CI tested and every wheel is hash-verified.
+# `uv export --frozen` fails when the lock is stale, which is the point: a
+# dependency bump without a lock refresh should not build. The project itself
+# installs separately with --no-deps, since the lock already pinned its deps.
+RUN uv export --frozen --no-emit-project --extra onnx --format requirements-txt \
+        -o /tmp/requirements.txt && \
+    pip install --no-cache-dir --no-compile --prefix=/install \
+        --require-hashes -r /tmp/requirements.txt && \
+    pip install --no-cache-dir --no-compile --prefix=/install --no-deps .
 
 # Strip onnxruntime extras not needed for CPU inference
 RUN find /install/lib/python3.11/site-packages/onnxruntime -maxdepth 1 -type d \
@@ -230,7 +244,12 @@ RUN find /install -name '*.pyc' -delete && \
 
 FROM builder-base AS builder-lite
 
-RUN pip install --no-cache-dir --no-compile --prefix=/install .
+# Same lockfile install as the full builder, without the onnx extra.
+RUN uv export --frozen --no-emit-project --format requirements-txt \
+        -o /tmp/requirements.txt && \
+    pip install --no-cache-dir --no-compile --prefix=/install \
+        --require-hashes -r /tmp/requirements.txt && \
+    pip install --no-cache-dir --no-compile --prefix=/install --no-deps .
 
 # Strip pip/setuptools (not needed at runtime)
 RUN rm -rf /install/lib/python3.11/site-packages/pip* \
