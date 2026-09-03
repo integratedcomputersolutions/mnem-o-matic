@@ -108,6 +108,11 @@ All error responses include a `details` field explaining the exact issue.
 - The format must be: `Authorization: Bearer <token>`
 - Common mistake: using `Token` or `Basic` instead of `Bearer`
 
+**"Too many failed authentication attempts" (HTTP 429)**
+- Five wrong keys within a minute lock that client out for five minutes; the response carries `Retry-After`
+- The lockout is keyed on the client's address. Behind a reverse proxy, that address is the *proxy's* unless `MNEMOMATIC_TRUSTED_PROXIES` names it — so without that setting one client's failed attempts lock out everyone sharing the proxy. See [Configuration](installation.md#configuration)
+- Restarting the server clears all lockouts
+
 **Server starts with "Authentication disabled"**
 - `MNEMOMATIC_API_KEY` is not set or is empty
 - Set it in `docker-compose.yml` or pass it via `-e` flag:
@@ -134,7 +139,7 @@ A **Settings** page (`/ui/settings`, linked from the navbar) shows the configura
 
 Notes:
 - There are **no user accounts** — access is a single shared secret, separate from `MNEMOMATIC_API_KEY` (the viewer is exempt from MCP Bearer auth and uses its own gate; the exemption only exists while the viewer is enabled).
-- The session cookie is HttpOnly and stores a value **derived** from the token with a per-process key — never the token itself. It is marked `Secure` when the connection is HTTPS (directly or via a proxy that sets `X-Forwarded-Proto`). Restarting the server invalidates existing sessions, so viewers re-enter the token.
+- The session cookie is HttpOnly and stores a value **derived** from the token with a per-process key — never the token itself. It is marked `Secure` when the connection is HTTPS — directly, or via a proxy listed in `MNEMOMATIC_TRUSTED_PROXIES` (the header alone is not believed from an arbitrary client). Restarting the server invalidates existing sessions, so viewers re-enter the token.
 - Repeated wrong tokens from the same client trigger a temporary lockout (HTTP 429). The same applies to repeated invalid MCP API keys.
 - The viewer is served on the same host/port as the MCP endpoint. Because that port is typically bound to `0.0.0.0`, the shared secret is what keeps it private — choose a strong token, or additionally restrict the port at the network level (VPN, reverse proxy, firewall).
 - When `MNEMOMATIC_UI_TOKEN` is unset, `/ui` is not registered at all.
@@ -218,7 +223,7 @@ Each event carries the timestamp, operation (`store`, `update`, `supersede`, `de
 |-------|--------|-------|
 | `actor` | The client's `X-Mnemomatic-Actor` request header, if it sends one | Self-declared — fine among cooperating clients, not authenticated |
 | `client` | The `User-Agent` header | What the connecting software reports |
-| `ip` | The connection's peer address | Behind a reverse proxy this is the proxy's address |
+| `ip` | The connection's peer address, or the forwarded client address when the peer is a trusted proxy | Behind a reverse proxy this is the proxy's own address unless `MNEMOMATIC_TRUSTED_PROXIES` names it |
 
 To label a client, add the header to its MCP configuration:
 
@@ -438,6 +443,7 @@ Mnem-O-matic validates all inputs to prevent silent failures:
 | **Metadata value** | ≤ 10,000 chars | Keep values reasonably sized |
 | **Confidence (knowledge)** | 0.0 to 1.0 | Must be a valid probability |
 | **Embedding dimension** | Must match embedder | Mismatch causes search errors; server warns at startup |
+| **Request body** | ≤ 4 MB | Applies to every HTTP request; larger bodies are refused with `413` before anything reads them. Sized so a store call at all the limits above fits several times over — it is not configurable |
 
 If validation fails, tools return an error with details — fix the input and retry.
 
@@ -571,6 +577,8 @@ Alongside the MCP transport, the server exposes two plain HTTP routes:
 | Route | Auth | Purpose |
 | ----- | ---- | ------- |
 | `GET /health` | **none** | Liveness — `{"status": "ok"}`. Used by the images' `HEALTHCHECK`; see [Health Endpoint](installation.md#health-endpoint) |
+
+Every request to either route — and to the MCP endpoint — is capped at a 4 MB body; anything larger gets `413 Request body too large` without being read (see [Input Validation & Limits](#input-validation--limits)).
 
 Both routes are served on the server's own port (8000 inside the container). With the bundled Caddy setup that port is not published — reach them through the proxy: `https://your-server-hostname/export`, and `/health` on either `https://your-server-hostname/health` or plain `http://your-server-hostname/health`, which Caddy serves without the HTTPS redirect so probes work without TLS.
 | `GET /export` | Bearer | The full store as a zip; optional `?namespace=` filter (see [Export](#export)) |

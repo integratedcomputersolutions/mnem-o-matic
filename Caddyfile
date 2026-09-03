@@ -22,5 +22,12 @@
 :443 {
     tls /etc/caddy/certs/cert.pem /etc/caddy/certs/key.pem
 
+    # A second ceiling on top of the app's own 4 MB limit, so an oversized
+    # upload is refused whichever layer notices it first. The :80 block needs
+    # none — it only serves /health and redirects.
+    request_body {
+        max_size 4MB
+    }
+
     reverse_proxy mnemomatic:8000
 }

@@ -62,11 +62,11 @@ class WebUITestBase(unittest.TestCase):
         self.db = Database(self._tmp.name)
         self.ids = _seed(self.db)
         self.settings_info = dict(MODEL_INFO)
-        app = Starlette()
-        register_webui(app, lambda: self.db, TOKEN,
+        self.app = Starlette()
+        register_webui(self.app, lambda: self.db, TOKEN,
                        settings_info=lambda: self.settings_info,
                        make_export=lambda ns: (b"PK\x05\x06" + b"\x00" * 18, "test-export.zip"))
-        self.client = TestClient(app, follow_redirects=False)
+        self.client = TestClient(self.app, follow_redirects=False)
 
     def tearDown(self):
         self.db.close()
@@ -140,6 +140,25 @@ class TestGate(WebUITestBase):
         self.assertEqual(resp.status_code, 429)
         self.assertIn("Retry-After", resp.headers)
         self.assertNotIn(COOKIE_NAME, self.client.cookies)
+
+    def test_cookie_not_secure_over_plain_http(self):
+        resp = self.client.post("/ui/login", data={"token": TOKEN})
+        self.assertNotIn("Secure", resp.headers["set-cookie"])
+
+    def test_forwarded_proto_header_alone_does_not_set_secure(self):
+        # The Secure flag follows the connection scheme, which uvicorn resolves
+        # from X-Forwarded-Proto only for proxies named in
+        # MNEMOMATIC_TRUSTED_PROXIES. Read straight off the request, the header
+        # would be believed from any client.
+        resp = self.client.post("/ui/login", data={"token": TOKEN},
+                                headers={"X-Forwarded-Proto": "https"})
+        self.assertNotIn("Secure", resp.headers["set-cookie"])
+
+    def test_cookie_secure_over_https(self):
+        client = TestClient(self.app, base_url="https://testserver", follow_redirects=False)
+        resp = client.post("/ui/login", data={"token": TOKEN})
+        self.assertEqual(resp.status_code, 303)
+        self.assertIn("Secure", resp.headers["set-cookie"])
 
     def test_namespace_view_requires_auth(self):
         resp = self.client.get("/ui/ns/proj")

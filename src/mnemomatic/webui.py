@@ -50,10 +50,14 @@ def _authed(request: Request, session_value: str) -> bool:
 
 
 def _is_https(request: Request) -> bool:
-    """True when the client connection is HTTPS, honoring the reverse proxy's
-    X-Forwarded-Proto (Caddy and nginx set it by default)."""
-    proto = request.headers.get("x-forwarded-proto", request.url.scheme)
-    return proto.strip().lower() == "https"
+    """True when the client connection is HTTPS.
+
+    Behind a reverse proxy this depends on MNEMOMATIC_TRUSTED_PROXIES, which
+    lets uvicorn resolve the scheme from X-Forwarded-Proto — but only for
+    proxies on the trust list. Reading that header here instead would believe
+    it from anyone.
+    """
+    return request.url.scheme == "https"
 
 
 def _ns_href(namespace: str) -> str:

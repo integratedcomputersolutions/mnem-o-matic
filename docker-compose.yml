@@ -23,6 +23,12 @@ services:
       - ./data:/data
     environment:
       - MNEMOMATIC_DB_PATH=/data/mnemomatic.db
+      # Caddy is the only thing that can reach this port, so its X-Forwarded-For
+      # and X-Forwarded-Proto are believed: clients get their own brute-force
+      # lockout bucket, the audit log records the real address, and the viewer's
+      # cookie is marked Secure. If you publish the port directly (ports: above),
+      # replace * with the proxy's IP or the Docker network CIDR.
+      - MNEMOMATIC_TRUSTED_PROXIES=*
       # - MNEMOMATIC_API_KEY=  # set a strong key: openssl rand -base64 32
       # - MNEMOMATIC_UI_TOKEN=  # enable the read-only web viewer at /ui; shared secret, not a user account
       # - MNEMOMATIC_BACKUP_DIR=/data/backups                       # enable scheduled export-zip backups; keep it inside the mounted volume

@@ -5,7 +5,8 @@ API key the server has no authenticated user identity, so the honest answer
 is layered:
 
 - ip / user-agent: what the connection itself reveals. Behind a reverse
-  proxy the ip is the proxy's until trusted X-Forwarded-For handling exists.
+  proxy the ip is the proxy's own unless MNEMOMATIC_TRUSTED_PROXIES names it,
+  which lets uvicorn resolve the real client from X-Forwarded-For.
 - actor: an optional self-declared label from the ``X-Mnemomatic-Actor``
   request header (e.g. set per client in its MCP config). Trustworthy among
   cooperating clients, not authenticated.
