@@ -29,5 +29,10 @@
         max_size 4MB
     }
 
+    # HSTS belongs here, where TLS is terminated. No includeSubDomains and no
+    # preload: this is a LAN deployment behind a private CA, and the operator
+    # may well serve other things on subdomains of the same host.
+    header Strict-Transport-Security "max-age=31536000"
+
     reverse_proxy mnemomatic:8000
 }
