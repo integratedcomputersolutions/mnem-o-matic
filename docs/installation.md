@@ -209,6 +209,12 @@ services:
 
 Leaving it unset is the conservative choice for a server nobody proxies: the connection's own peer address is used, and no forwarded header is believed from anyone.
 
+### 5. HSTS
+
+The bundled Caddy config sends `Strict-Transport-Security: max-age=31536000` on HTTPS responses, so once a browser has loaded the site it refuses plain HTTP to that hostname for a year. `includeSubDomains` and `preload` are deliberately left off — this is a LAN deployment behind a private CA, and the same hostname may serve other things.
+
+If you later move that hostname to plain HTTP, browsers that already saw the header will keep refusing it until the year is up. Clear it per browser (Chrome: `chrome://net-internals/#hsts` → "Delete domain security policies"; Firefox: forget the site in History), or drop the `header Strict-Transport-Security` line from the `Caddyfile` before that migration and give browsers time to expire it.
+
 ## Quick Start (Pre-built Images)
 
 Pre-built images for `linux/amd64` and `linux/arm64` are published to the GitHub Container Registry on every release. No build step required.

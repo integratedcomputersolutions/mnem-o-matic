@@ -4,11 +4,15 @@ A minimal, server-rendered HTML browser for the stored documents, knowledge,
 and notes. It is strictly read-only — no create, edit, or delete — and has no
 user accounts. Access is gated by a single pre-shared secret
 (``MNEMOMATIC_UI_TOKEN``): the visitor enters it once on a login page. The
-cookie stores a session value derived from the token with a per-process HMAC
-key — never the token itself — so a captured cookie can't reveal the secret
-and stops working when the server restarts. Repeated wrong tokens from the
-same client trigger a temporary lockout. When the token is unset the viewer is
-not registered at all, so it stays off by default.
+cookie carries a random session id issued at login and held in memory — never
+the token itself — so a captured cookie reveals nothing about the secret,
+logging out revokes it server-side, and a restart ends every session. Repeated
+wrong tokens from the same client trigger a temporary lockout. When the token
+is unset the viewer is not registered at all, so it stays off by default.
+
+The pages carry a strict Content-Security-Policy: the viewer ships no
+JavaScript at all, so scripts are refused outright. Escaping every rendered
+value is still what prevents injection; the policy is the second line.
 
 The routes live under ``/ui`` on the same ASGI app as the MCP endpoint;
 ``BearerAuthMiddleware`` exempts that prefix because the viewer carries its own
@@ -18,13 +22,13 @@ Styling is stock Bootstrap 5 (vendored under ``static/`` and served at
 ``/ui/static/bootstrap.min.css``) — defaults only, no custom CSS.
 """
 
-import hashlib
 import hmac
 import html
 import secrets
+import time
 from datetime import timezone
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote
 
 from starlette.requests import Request
 from starlette.responses import FileResponse, HTMLResponse, RedirectResponse, Response
@@ -35,6 +39,12 @@ from mnemomatic.throttle import FailureThrottle
 COOKIE_NAME = "mnemomatic_ui"
 STATIC_DIR = Path(__file__).parent / "static"
 
+# Live sessions are held in a dict, so cap it: 256 concurrent viewers is far
+# more than a shared-secret viewer sees, and past that the oldest is evicted
+# rather than letting repeated logins grow the table without bound.
+_MAX_SESSIONS = 256
+_SESSION_MAX_AGE = 30 * 86400
+
 # Per-type detail rendering: which getter to call to fetch a single item.
 _ITEM_GETTERS = {
     "document": "get_document",
@@ -43,10 +53,46 @@ _ITEM_GETTERS = {
 }
 
 
-def _authed(request: Request, session_value: str) -> bool:
-    """True when the request carries a cookie matching the derived session value."""
-    cookie = request.cookies.get(COOKIE_NAME, "")
-    return bool(session_value) and hmac.compare_digest(cookie, session_value)
+# Sent with every HTML page. The viewer has no JavaScript whatsoever, so
+# scripts are denied outright rather than allow-listed; the only styling is the
+# vendored Bootstrap file plus two inline `style=` attributes on table headers,
+# hence 'self' and 'unsafe-inline' for styles alone.
+_SECURITY_HEADERS = {
+    "Content-Security-Policy": (
+        "default-src 'none'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+    ),
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+}
+
+_FORM_CONTENT_TYPE = "application/x-www-form-urlencoded"
+
+
+def _html(body: str, status_code: int = 200, headers: dict | None = None) -> HTMLResponse:
+    """An HTMLResponse carrying the viewer's fixed security headers.
+
+    Every HTML route goes through here so the headers cannot be forgotten on a
+    new page. Per-response headers (Retry-After) are merged on top.
+    """
+    return HTMLResponse(body, status_code=status_code,
+                        headers={**_SECURITY_HEADERS, **(headers or {})})
+
+
+async def _form_token(request: Request) -> str | None:
+    """The submitted token, or None when the body is not a plain urlencoded form.
+
+    Parsed with the standard library on purpose. The login page is reachable
+    without credentials, so Starlette's form parsing put a general multipart
+    parser — considerably more code than a one-field form needs — in front of
+    the gate. Body size is already bounded by BodyLimitMiddleware.
+    """
+    content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if content_type != _FORM_CONTENT_TYPE:
+        return None
+    body = await request.body()
+    fields = parse_qs(body.decode("utf-8", "replace"), keep_blank_values=True)
+    return fields.get("token", [""])[0].strip()
 
 
 def _is_https(request: Request) -> bool:
@@ -178,62 +224,91 @@ def build_routes(db_getter, token: str, settings_info=None, make_export=None) ->
             filename) powering the settings page's export download (see
             server._make_export). When None the section and route are absent.
     """
-    # The cookie carries this derived value, never the token itself. The HMAC
-    # key is random per process, so cookies stop working across restarts and a
-    # captured cookie cannot be turned back into the shared secret.
-    session_value = hmac.new(secrets.token_bytes(32), token.encode(), hashlib.sha256).hexdigest()
+    # Session ids issued at login, mapped to their expiry. In memory only: a
+    # restart ends every session, which is also how a rotated MNEMOMATIC_UI_TOKEN
+    # takes effect. Bounded so a flood of logins cannot grow it without limit.
+    sessions: dict[str, float] = {}
     throttle = FailureThrottle()
+
+    def _authed(request: Request) -> bool:
+        """True when the request carries a live session cookie."""
+        # A 256-bit random id looked up in a dict is not a timing oracle worth
+        # defending: the comparison is against a hash of the presented value,
+        # not against a secret-derived string, so compare_digest buys nothing
+        # here. (It is still what checks the shared token below.)
+        sid = request.cookies.get(COOKIE_NAME, "")
+        expiry = sessions.get(sid)
+        if expiry is None:
+            return False
+        if expiry <= time.monotonic():
+            sessions.pop(sid, None)
+            return False
+        return True
+
+    def _new_session() -> str:
+        if len(sessions) >= _MAX_SESSIONS:
+            sessions.pop(min(sessions, key=sessions.get), None)
+        sid = secrets.token_urlsafe(32)
+        sessions[sid] = time.monotonic() + _SESSION_MAX_AGE
+        return sid
 
     def _client(request: Request) -> str:
         return request.client.host if request.client else "unknown"
 
     def static_css(request: Request) -> Response:
-        # Public asset (no cookie) so the login page is styled too.
-        return FileResponse(STATIC_DIR / "bootstrap.min.css", media_type="text/css")
+        # Public asset (no cookie) so the login page is styled too. Only
+        # nosniff applies — it is a stylesheet, not a document with a policy.
+        return FileResponse(STATIC_DIR / "bootstrap.min.css", media_type="text/css",
+                            headers={"X-Content-Type-Options": "nosniff"})
 
     def login_form(request: Request) -> Response:
-        if _authed(request, session_value):
+        if _authed(request):
             return RedirectResponse("/ui", status_code=303)
-        return HTMLResponse(_login_page())
+        return _html(_login_page())
 
     async def login_submit(request: Request) -> Response:
         client = _client(request)
         wait = throttle.retry_after(client)
         if wait:
-            return HTMLResponse(
+            return _html(
                 _login_page(f"Too many failed attempts. Try again in {wait} seconds."),
                 status_code=429,
                 headers={"Retry-After": str(wait)},
             )
-        form = await request.form()
-        supplied = (form.get("token") or "").strip()
+        supplied = await _form_token(request)
+        if supplied is None:
+            return _html(_login_page("Unsupported form encoding."), status_code=415)
         if not hmac.compare_digest(supplied, token):
             throttle.record_failure(client)
-            return HTMLResponse(_login_page("Incorrect token."), status_code=401)
+            return _html(_login_page("Incorrect token."), status_code=401)
         throttle.record_success(client)
         resp = RedirectResponse("/ui", status_code=303)
         # HttpOnly so client JS can't read it; SameSite=Lax is fine for a viewer.
         # Secure whenever the client connected over HTTPS (directly or via proxy).
         resp.set_cookie(
-            COOKIE_NAME, session_value, httponly=True, samesite="lax",
-            secure=_is_https(request), max_age=30 * 86400,
+            COOKIE_NAME, _new_session(), httponly=True, samesite="lax",
+            secure=_is_https(request), max_age=_SESSION_MAX_AGE,
         )
         return resp
 
     def logout(request: Request) -> Response:
+        # Drop the session server-side, not just the browser's copy of it —
+        # otherwise a captured cookie outlives the logout that was meant to
+        # end it.
+        sessions.pop(request.cookies.get(COOKIE_NAME, ""), None)
         resp = RedirectResponse("/ui/login", status_code=303)
         resp.delete_cookie(COOKIE_NAME)
         return resp
 
     def index(request: Request) -> Response:
-        if not _authed(request, session_value):
+        if not _authed(request):
             return RedirectResponse("/ui/login", status_code=303)
         # COUNT queries only — the old per-namespace list_*() calls loaded
         # every row including full document content just to len() them.
         counts = db_getter().namespace_counts()
         if not counts:
             body = '<h1 class="h3 mb-3">Namespaces</h1><div class="alert alert-secondary">No data yet.</div>'
-            return HTMLResponse(_page("Namespaces", body))
+            return _html(_page("Namespaces", body))
         rows = []
         for ns, c in counts.items():
             rows.append(
@@ -249,10 +324,10 @@ def build_routes(db_getter, token: str, settings_info=None, make_export=None) ->
             '<th class="text-end">Knowledge</th><th class="text-end">Notes</th></tr></thead>'
             f'<tbody>{"".join(rows)}</tbody></table>'
         )
-        return HTMLResponse(_page("Namespaces", body))
+        return _html(_page("Namespaces", body))
 
     def namespace_view(request: Request) -> Response:
-        if not _authed(request, session_value):
+        if not _authed(request):
             return RedirectResponse("/ui/login", status_code=303)
         ns = request.path_params["namespace"]
         db = db_getter()
@@ -282,10 +357,10 @@ def build_routes(db_getter, token: str, settings_info=None, make_export=None) ->
             + section("Knowledge", db.list_knowledge(ns), "knowledge", "subject", "Source", "source")
             + section("Notes", db.list_notes(ns), "note", "title", "Source", "source")
         )
-        return HTMLResponse(_page(ns, body))
+        return _html(_page(ns, body))
 
     def settings_view(request: Request) -> Response:
-        if not _authed(request, session_value):
+        if not _authed(request):
             return RedirectResponse("/ui/login", status_code=303)
         info = settings_info() if settings_info is not None else {}
 
@@ -386,13 +461,13 @@ def build_routes(db_getter, token: str, settings_info=None, make_export=None) ->
             + table(chunk_rows)
             + export_html
         )
-        return HTMLResponse(_page("Settings", body))
+        return _html(_page("Settings", body))
 
     def export_download(request: Request) -> Response:
-        if not _authed(request, session_value):
+        if not _authed(request):
             return RedirectResponse("/ui/login", status_code=303)
         if make_export is None:
-            return HTMLResponse(
+            return _html(
                 _page("Not found", '<div class="alert alert-warning">Export is not available.</div>'),
                 status_code=404,
             )
@@ -404,19 +479,19 @@ def build_routes(db_getter, token: str, settings_info=None, make_export=None) ->
         )
 
     def item_view(request: Request) -> Response:
-        if not _authed(request, session_value):
+        if not _authed(request):
             return RedirectResponse("/ui/login", status_code=303)
         item_type = request.path_params["item_type"]
         item_id = request.path_params["id"]
         getter_name = _ITEM_GETTERS.get(item_type)
         if getter_name is None:
-            return HTMLResponse(
+            return _html(
                 _page("Not found", '<div class="alert alert-warning">Unknown item type.</div>'),
                 status_code=404,
             )
         item = getattr(db_getter(), getter_name)(item_id)
         if item is None:
-            return HTMLResponse(
+            return _html(
                 _page("Not found", '<div class="alert alert-warning">Item not found.</div>'),
                 status_code=404,
             )
@@ -467,7 +542,7 @@ def build_routes(db_getter, token: str, settings_info=None, make_export=None) ->
             + f'<pre class="border rounded bg-light p-3"><code>{_esc(long_value)}</code></pre>'
             + metadata_html
         )
-        return HTMLResponse(_page(heading, body))
+        return _html(_page(heading, body))
 
     return [
         Route("/ui", index, methods=["GET"]),

@@ -1,12 +1,15 @@
 """Tests for the read-only web viewer (mnemomatic.webui).
 
-Covers the shared-secret gate, navigation, content rendering with HTML
-escaping, and the BearerAuthMiddleware /ui exemption.
+Covers the shared-secret gate, per-login sessions, the security headers on
+every page, navigation, content rendering with HTML escaping, and the
+BearerAuthMiddleware /ui exemption.
 """
 
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 from urllib.parse import quote
 
 from starlette.applications import Starlette
@@ -15,7 +18,8 @@ from starlette.testclient import TestClient
 from mnemomatic.auth import BearerAuthMiddleware
 from mnemomatic.db import Database
 from mnemomatic.models import Document, Knowledge, Note
-from mnemomatic.webui import COOKIE_NAME, register_webui
+from mnemomatic import webui
+from mnemomatic.webui import _MAX_SESSIONS, _SESSION_MAX_AGE, COOKIE_NAME, register_webui
 
 TOKEN = "s3cret-token"
 
@@ -118,7 +122,7 @@ class TestGate(WebUITestBase):
         self.assertEqual(self.client.get("/ui/logout").status_code, 405)
 
     def test_cookie_does_not_contain_token(self):
-        # The cookie must hold a derived session value, never the shared secret.
+        # The cookie must hold a random session id, never the shared secret.
         self._auth()
         self.assertNotEqual(self.client.cookies[COOKIE_NAME], TOKEN)
         self.assertNotIn(TOKEN, self.client.cookies[COOKIE_NAME])
@@ -160,6 +164,38 @@ class TestGate(WebUITestBase):
         self.assertEqual(resp.status_code, 303)
         self.assertIn("Secure", resp.headers["set-cookie"])
 
+    def test_multipart_login_rejected(self):
+        # The login route is reachable without credentials, so it accepts only
+        # the one encoding its form actually uses — no multipart parser runs
+        # ahead of the gate.
+        resp = self.client.post("/ui/login", files={"token": (None, TOKEN)})
+        self.assertEqual(resp.status_code, 415)
+        self.assertNotIn(COOKIE_NAME, self.client.cookies)
+
+    def test_login_without_content_type_rejected(self):
+        resp = self.client.request("POST", "/ui/login", content=b"token=" + TOKEN.encode())
+        self.assertEqual(resp.status_code, 415)
+
+    def test_urlencoded_login_still_works(self):
+        resp = self.client.post(
+            "/ui/login",
+            content=b"token=" + TOKEN.encode(),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        self.assertEqual(resp.status_code, 303)
+
+    def test_login_form_encoding_tolerates_a_charset_parameter(self):
+        resp = self.client.post(
+            "/ui/login",
+            content=b"token=" + TOKEN.encode(),
+            headers={"Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"},
+        )
+        self.assertEqual(resp.status_code, 303)
+
+    def test_missing_token_field_is_a_wrong_token_not_a_crash(self):
+        resp = self.client.post("/ui/login", data={"other": "x"})
+        self.assertEqual(resp.status_code, 401)
+
     def test_namespace_view_requires_auth(self):
         resp = self.client.get("/ui/ns/proj")
         self.assertEqual(resp.status_code, 303)
@@ -179,6 +215,121 @@ class TestGate(WebUITestBase):
         resp = self.client.get("/ui/export")
         self.assertEqual(resp.status_code, 303)
         self.assertEqual(resp.headers["location"], "/ui/login")
+
+
+class TestSessions(WebUITestBase):
+    """Session ids are per login, revocable, bounded, and expiring."""
+
+    def _login(self, client=None):
+        client = client or TestClient(self.app, follow_redirects=False)
+        resp = client.post("/ui/login", data={"token": TOKEN})
+        self.assertEqual(resp.status_code, 303)
+        return client.cookies[COOKIE_NAME]
+
+    def test_two_logins_get_different_cookies(self):
+        self.assertNotEqual(self._login(), self._login())
+
+    def test_logout_revokes_the_session_server_side(self):
+        # Deleting the browser's copy is not enough: a captured cookie must
+        # stop working, which means the server has to forget it.
+        stale = self._login(self.client)
+        self.client.post("/ui/logout")
+        self.client.cookies.set(COOKIE_NAME, stale)
+        resp = self.client.get("/ui")
+        self.assertEqual(resp.status_code, 303)
+        self.assertEqual(resp.headers["location"], "/ui/login")
+
+    def test_logout_leaves_other_sessions_alone(self):
+        other = TestClient(self.app, follow_redirects=False)
+        self._login(other)
+        self._login(self.client)
+        self.client.post("/ui/logout")
+        self.assertEqual(other.get("/ui").status_code, 200)
+
+    def test_oldest_session_evicted_when_the_table_is_full(self):
+        first = self._login()
+        for _ in range(_MAX_SESSIONS - 1):
+            self._login()
+        self.assertEqual(self._with_cookie(first).get("/ui").status_code, 200)
+        self._login()  # one past the cap — the oldest goes
+        self.assertEqual(self._with_cookie(first).get("/ui").status_code, 303)
+
+    def test_expired_session_rejected(self):
+        cookie = self._login()
+        client = self._with_cookie(cookie)
+        self.assertEqual(client.get("/ui").status_code, 200)
+        later = time.monotonic() + _SESSION_MAX_AGE + 1
+        with patch.object(webui, "time") as clock:
+            clock.monotonic.return_value = later
+            self.assertEqual(client.get("/ui").status_code, 303)
+        # The expired lookup drops the id, so it stays rejected afterwards.
+        self.assertEqual(client.get("/ui").status_code, 303)
+
+    def _with_cookie(self, value):
+        client = TestClient(self.app, follow_redirects=False)
+        client.cookies.set(COOKIE_NAME, value)
+        return client
+
+
+class TestSecurityHeaders(WebUITestBase):
+    """Every HTML page carries the same policy; the other responses do not
+    pretend to be documents."""
+
+    CSP = "default-src 'none'"
+
+    def setUp(self):
+        super().setUp()
+        self._auth()
+
+    def _assert_html_headers(self, resp):
+        self.assertIn(self.CSP, resp.headers["content-security-policy"])
+        self.assertEqual(resp.headers["x-content-type-options"], "nosniff")
+        self.assertEqual(resp.headers["referrer-policy"], "no-referrer")
+
+    def test_every_html_page_carries_the_headers(self):
+        paths = [
+            "/ui",
+            "/ui/ns/proj",
+            f"/ui/item/document/{self.ids['document']}",
+            "/ui/settings",
+            "/ui/item/widget/x",          # 404, unknown type
+            "/ui/item/document/nope",     # 404, missing item
+        ]
+        for path in paths:
+            with self.subTest(path=path):
+                self._assert_html_headers(self.client.get(path))
+
+    def test_login_pages_carry_the_headers(self):
+        fresh = TestClient(self.app, follow_redirects=False)
+        self._assert_html_headers(fresh.get("/ui/login"))
+        self._assert_html_headers(fresh.post("/ui/login", data={"token": "nope"}))
+
+    def test_throttled_login_keeps_both_the_headers_and_retry_after(self):
+        fresh = TestClient(self.app, follow_redirects=False)
+        for _ in range(5):
+            fresh.post("/ui/login", data={"token": "nope"})
+        resp = fresh.post("/ui/login", data={"token": TOKEN})
+        self.assertEqual(resp.status_code, 429)
+        self.assertIn("Retry-After", resp.headers)
+        self._assert_html_headers(resp)
+
+    def test_policy_forbids_scripts_and_framing(self):
+        csp = self.client.get("/ui").headers["content-security-policy"]
+        # No script-src directive is needed to block scripts: default-src 'none'
+        # covers them, and nothing relaxes it.
+        self.assertNotIn("script-src", csp)
+        self.assertIn("frame-ancestors 'none'", csp)
+        self.assertIn("form-action 'self'", csp)
+
+    def test_stylesheet_gets_nosniff_but_no_policy(self):
+        resp = self.client.get("/ui/static/bootstrap.min.css")
+        self.assertEqual(resp.headers["x-content-type-options"], "nosniff")
+        self.assertNotIn("content-security-policy", resp.headers)
+
+    def test_export_download_is_not_an_html_page(self):
+        resp = self.client.get("/ui/export")
+        self.assertEqual(resp.headers["content-type"], "application/zip")
+        self.assertNotIn("content-security-policy", resp.headers)
 
 
 class TestViews(WebUITestBase):
