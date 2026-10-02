@@ -1,5 +1,5 @@
 <div align="center">
-<img src="assets/mnem-o-matic.png" alt="Mnem-O-matic logo" width="512" height="512">
+<img src="assets/banner.png" alt="Mnem-O-matic — shared memory for your agents" width="960">
 
 [![CI](https://github.com/integratedcomputersolutions/mnem-o-matic/actions/workflows/ci.yml/badge.svg)](https://github.com/integratedcomputersolutions/mnem-o-matic/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
