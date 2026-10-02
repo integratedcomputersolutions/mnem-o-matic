@@ -115,7 +115,7 @@ class TestAssembledStack(unittest.TestCase):
 
     def test_https_endpoints_report_off(self):
         self.login()
-        self.assertEqual(self.client.get("/api/admin/https").json(), {"state": "off"})
+        self.assertEqual(self.client.get("/api/admin/https").json(), {"state": "off", "trusted_proxies": []})
         self.assertEqual(self.client.get("/api/connect").json()["builtin_ca"], False)
 
 

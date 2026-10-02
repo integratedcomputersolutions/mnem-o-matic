@@ -93,7 +93,17 @@
 
 {#if status}
   {#if status.state === 'off'}
-    <div class="alert">Built-in TLS is off (<code>MNEMOMATIC_TLS=off</code>). This deployment terminates TLS in its own reverse proxy; set <code>MNEMOMATIC_TRUSTED_PROXIES</code> so client addresses are right.</div>
+    <Card title="TLS is terminated by your reverse proxy">
+      <p class="dim">Built-in TLS is off (<code>MNEMOMATIC_TLS=off</code>): no certificate authority to distribute and nothing to confirm here. The proxy in front handles certificates.</p>
+      {#if status.trusted_proxies?.length}
+        <div class="row"><span class="dim">Trusted proxies</span>
+          <span class="pill-list">{#each status.trusted_proxies as p}<code>{p}</code>{/each}</span>
+          <StatusBadge tone="good" label="Client addresses come from X-Forwarded-For" /></div>
+        <p class="help mt">Login throttling, the audit log's addresses and the cookie's Secure flag all follow the real client.</p>
+      {:else}
+        <div class="alert warn">No trusted proxy is configured, so every request appears to come from the proxy's own address: one person's failed sign-ins would throttle everyone, the audit log would record the proxy, and session cookies would never be marked Secure. Set <code>MNEMOMATIC_TRUSTED_PROXIES</code> to the proxy's address, or <code>*</code> when only the proxy can reach this server.</div>
+      {/if}
+    </Card>
   {:else if status.state === 'external'}
     <Card title="Your own certificate is in use">
       <p>Serving <b>{status.name}</b> from <code>custom.crt</code> / <code>custom.key</code>. No CA to distribute. Expires {fmtDay(status.leaf_not_after)}.</p>

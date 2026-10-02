@@ -243,7 +243,9 @@ def build_api_routes(*, identity, db_getter, settings_info, first_run: FirstRun,
 
     def https_status() -> dict:
         if https is None or config.TLS_MODE == "off":
-            return {"state": "off"}
+            # Nothing to manage here; what matters in this mode is whether the
+            # proxy in front is trusted, so the page can say so instead of nagging.
+            return {"state": "off", "trusted_proxies": list(config.TRUSTED_PROXIES)}
         return https.status()
 
     def endpoint(fn, *, admin: bool = False):

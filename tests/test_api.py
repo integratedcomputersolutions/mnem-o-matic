@@ -136,7 +136,7 @@ class TestSessionAndLogin(ApiCase):
         self.assertEqual(body["authenticated"], False)
         self.assertEqual(body["first_run"], False)
         self.assertEqual(body["version"], "3.0.0-test")
-        self.assertEqual(body["https"], {"state": "off"})
+        self.assertEqual(body["https"]["state"], "off")
 
     def test_login_logout_round_trip(self):
         resp = self.post("/api/login", {"username": "Admin", "password": IdentityFixture.ADMIN_PASSWORD})
@@ -427,7 +427,7 @@ class TestConnectSettingsHttps(ApiCase):
     def test_settings(self):
         body = self.client.get("/api/settings", cookies=self.user()).json()
         self.assertEqual(body["version"], "3.0.0-test")
-        self.assertEqual(body["tls"], {"state": "off"})
+        self.assertEqual(body["tls"]["state"], "off")
         self.assertIn("audit_keep_days", body)
         self.assertIsNone(body["backup"])
 
@@ -439,7 +439,9 @@ class TestConnectSettingsHttps(ApiCase):
 
     def test_https_endpoints_without_builtin_tls(self):
         cookies = self.admin()
-        self.assertEqual(self.client.get("/api/admin/https", cookies=cookies).json(), {"state": "off"})
+        self.assertEqual(self.client.get("/api/admin/https", cookies=cookies).json(), {"state": "off", "trusted_proxies": []})
+        with patch.object(config, "TRUSTED_PROXIES", ["*"]):
+            self.assertEqual(self.client.get("/api/admin/https", cookies=cookies).json()["trusted_proxies"], ["*"])
         resp = self.post("/api/admin/https/name", {"name": "memory.example"}, cookies=cookies)
         self.assertEqual(resp.status_code, 409)
         self.assertEqual(resp.json()["error"], "tls_disabled")
