@@ -7,21 +7,22 @@
   import ErrorBox from '../components/ErrorBox.svelte';
   import Empty from '../components/Empty.svelte';
   import { api } from '../lib/api.js';
+  import { remote } from '../lib/load.svelte.js';
   import { session, isAdmin } from '../lib/session.svelte.js';
   import { seg } from '../lib/router.svelte.js';
   import { fmtNumber, fmtRelative } from '../lib/format.js';
 
-  let namespaces = $state([]);
-  let settings = $state(null);
-  let events = $state([]);
-  let error = $state(null);
-
+  const overview = remote({ namespaces: [], settings: null, events: [] });
   $effect(() => {
-    Promise.all([api.get('/api/namespaces'), api.get('/api/settings'), api.get('/api/audit?limit=8')])
-      .then(([n, s, a]) => { namespaces = n.namespaces; settings = s; events = a.events; })
-      .catch((e) => (error = e));
+    overview.load(async () => {
+      const [n, s, a] = await Promise.all([api.get('/api/namespaces'), api.get('/api/settings'), api.get('/api/audit?limit=8')]);
+      return { namespaces: n.namespaces, settings: s, events: a.events };
+    });
   });
 
+  const namespaces = $derived(overview.data.namespaces);
+  const settings = $derived(overview.data.settings);
+  const events = $derived(overview.data.events);
   const totals = $derived(namespaces.reduce(
     (t, n) => ({ documents: t.documents + n.documents, knowledge: t.knowledge + n.knowledge, notes: t.notes + n.notes }),
     { documents: 0, knowledge: 0, notes: 0 },
@@ -36,7 +37,7 @@
 </script>
 
 <PageHeader title="Dashboard" subtitle={`Welcome back, ${session.user?.display_name || session.user?.username}.`} />
-<ErrorBox {error} />
+<ErrorBox error={overview.error} />
 
 <div class="grid mb">
   <StatTile label="Documents" value={fmtNumber(totals.documents)} href="/browse" />

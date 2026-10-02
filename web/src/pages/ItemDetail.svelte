@@ -5,36 +5,37 @@
   import TypeBadge from '../components/TypeBadge.svelte';
   import StatusBadge from '../components/StatusBadge.svelte';
   import { api } from '../lib/api.js';
+  import { remote } from '../lib/load.svelte.js';
   import { seg } from '../lib/router.svelte.js';
   import { fmtDate, fmtNumber, itemTitle, typeLabel } from '../lib/format.js';
 
   let { ns, type, id } = $props();
-  let item = $state(null);
-  let revisions = $state([]);
-  let related = $state(null);
-  let error = $state(null);
-
+  const item = remote();
+  const revisions = remote([]);
+  const related = remote();
   $effect(() => {
-    api.get(`/api/items/${type}/${seg(id)}`).then((r) => (item = r.item)).catch((e) => (error = e));
-    api.get(`/api/items/${type}/${seg(id)}/revisions`).then((r) => (revisions = r.revisions)).catch(() => {});
-    api.get(`/api/items/${type}/${seg(id)}/related`).then((r) => (related = r)).catch(() => {});
+    const base = `/api/items/${type}/${seg(id)}`;
+    item.load(() => api.get(base).then((r) => r.item));
+    revisions.load(() => api.get(`${base}/revisions`).then((r) => r.revisions));
+    related.load(() => api.get(`${base}/related`));
   });
 
-  const body = $derived(item ? (type === 'knowledge' ? item.fact : item.content) : '');
-  const metaEntries = $derived(item ? Object.entries(item.metadata || {}) : []);
+  const body = $derived(item.data ? (type === 'knowledge' ? item.data.fact : item.data.content) : '');
+  const metaEntries = $derived(item.data ? Object.entries(item.data.metadata || {}) : []);
 </script>
 
-<PageHeader title={item ? itemTitle(item) : '…'} subtitle={typeLabel(type)}>
+<PageHeader title={item.data ? itemTitle(item.data) : '…'} subtitle={typeLabel(type)}>
   <p class="small mt"><a href="/browse">Browse</a> › <a href={`/browse/${seg(ns)}`}>{ns}</a> › <a href={`/browse/${seg(ns)}/${type}`}>{typeLabel(type)}</a></p>
 </PageHeader>
-<ErrorBox {error} />
+<ErrorBox error={item.error} />
 
-{#if item}
+{#if item.data}
+  {@const it = item.data}
   <div class="layout">
     <div class="stack">
       <Card title={type === 'knowledge' ? 'Fact' : 'Content'}>
-        {#if type === 'knowledge' && item.valid_until}
-          <div class="alert warn mb">This fact was superseded on {fmtDate(item.valid_until)}{#if item.superseded_by} by <a href={`/browse/${seg(ns)}/knowledge/${seg(item.superseded_by)}`}>a newer entry</a>{/if}.</div>
+        {#if type === 'knowledge' && it.valid_until}
+          <div class="alert warn mb">This fact was superseded on {fmtDate(it.valid_until)}{#if it.superseded_by} by <a href={`/browse/${seg(ns)}/knowledge/${seg(it.superseded_by)}`}>a newer entry</a>{/if}.</div>
         {/if}
         <pre class="content">{body}</pre>
       </Card>
@@ -47,12 +48,12 @@
           </dl>
         </Card>
       {/if}
-      {#if revisions.length}
+      {#if revisions.data.length}
         <Card title="Revisions" subtitle="Earlier states captured on update or delete" flush>
           <table class="table">
             <thead><tr><th>#</th><th>Change</th><th>Title then</th><th>Captured</th></tr></thead>
             <tbody>
-              {#each revisions as r (r.id)}
+              {#each revisions.data as r (r.id)}
                 <tr><td class="muted">{r.id}</td><td><code>{r.op}</code></td><td>{r.title}</td><td class="muted nowrap">{fmtDate(r.revised_at)}</td></tr>
               {/each}
             </tbody>
@@ -65,27 +66,27 @@
       <Card title="Details">
         <dl class="kv">
           <dt>Type</dt><dd><TypeBadge {type} /></dd>
-          <dt>Namespace</dt><dd><a href={`/browse/${seg(ns)}`}>{item.namespace}</a></dd>
-          <dt>ID</dt><dd><code class="small">{item.id}</code></dd>
-          {#if type === 'document'}<dt>MIME</dt><dd>{item.mime_type}</dd>{/if}
-          {#if type !== 'document'}<dt>Source</dt><dd>{item.source}</dd>{/if}
-          {#if type === 'knowledge'}<dt>Confidence</dt><dd>{item.confidence}</dd>{/if}
-          <dt>Tags</dt><dd><span class="pill-list">{#each item.tags || [] as t}<span class="badge">{t}</span>{:else}<span class="muted">none</span>{/each}</span></dd>
-          <dt>Created</dt><dd>{fmtDate(item.created_at)}</dd>
-          <dt>Updated</dt><dd>{fmtDate(item.updated_at)}</dd>
-          <dt>Retrieved</dt><dd>{fmtNumber(item.retrieval_count)} times{#if item.last_accessed}, last {fmtDate(item.last_accessed)}{/if}</dd>
+          <dt>Namespace</dt><dd><a href={`/browse/${seg(ns)}`}>{it.namespace}</a></dd>
+          <dt>ID</dt><dd><code class="small">{it.id}</code></dd>
+          {#if type === 'document'}<dt>MIME</dt><dd>{it.mime_type}</dd>{/if}
+          {#if type !== 'document'}<dt>Source</dt><dd>{it.source}</dd>{/if}
+          {#if type === 'knowledge'}<dt>Confidence</dt><dd>{it.confidence}</dd>{/if}
+          <dt>Tags</dt><dd><span class="pill-list">{#each it.tags || [] as t}<span class="badge">{t}</span>{:else}<span class="muted">none</span>{/each}</span></dd>
+          <dt>Created</dt><dd>{fmtDate(it.created_at)}</dd>
+          <dt>Updated</dt><dd>{fmtDate(it.updated_at)}</dd>
+          <dt>Retrieved</dt><dd>{fmtNumber(it.retrieval_count)} times{#if it.last_accessed}, last {fmtDate(it.last_accessed)}{/if}</dd>
         </dl>
       </Card>
       <Card title="Related" subtitle="Nearest by embedding">
-        {#if !related}
+        {#if !related.data}
           <span class="muted">…</span>
-        {:else if related.unavailable}
-          <StatusBadge tone="neutral" label={related.unavailable} />
-        {:else if related.related.length === 0}
+        {:else if related.data.unavailable}
+          <StatusBadge tone="neutral" label={related.data.unavailable} />
+        {:else if related.data.related.length === 0}
           <span class="muted">Nothing similar enough.</span>
         {:else}
           <ul class="rel">
-            {#each related.related as r (r.id)}
+            {#each related.data.related as r (r.id)}
               <li>
                 <a href={`/browse/${seg(r.namespace)}/${r.type}/${seg(r.id)}`}>{r.title}</a>
                 <span class="muted small"> · {r.namespace} · {Math.round(r.score * 100) / 100}</span>

@@ -5,13 +5,11 @@
   import ErrorBox from '../../components/ErrorBox.svelte';
   import StatusBadge from '../../components/StatusBadge.svelte';
   import { api } from '../../lib/api.js';
+  import { remote } from '../../lib/load.svelte.js';
 
-  let s = $state(null);
-  let error = $state(null);
-  $effect(() => {
-    api.get('/api/settings').then((r) => (s = r)).catch((e) => (error = e));
-  });
-
+  const settings = remote();
+  $effect(() => { settings.load(() => api.get('/api/settings')); });
+  const s = $derived(settings.data);
   const dimOk = $derived(s && (s.dim_database == null || s.dim_database === s.dim_configured));
   const modelOk = $derived(s && (!s.model_database || s.model_database === s.model));
 </script>
@@ -19,7 +17,7 @@
 <PageHeader title="Settings" subtitle="What this server is running with. Changed through the environment, shown here.">
   {#snippet actions()}<a class="btn" href="/export" download>Download export (.zip)</a>{/snippet}
 </PageHeader>
-<ErrorBox {error} />
+<ErrorBox error={settings.error} />
 
 {#if s}
   <div class="grid two">

@@ -1,15 +1,20 @@
 <script>
-  // tabs: [[id, label], ...]
-  let { tabs = [], active = $bindable(), children = undefined } = $props();
+  // tabs: [[id, label], ...]. `active` may be bound, or driven from outside
+  // (a URL) with `onchange` asked to navigate.
+  let { tabs = [], active = $bindable(), onchange = undefined, children = undefined } = $props();
   $effect(() => {
     if (active === undefined && tabs.length) active = tabs[0][0];
   });
+  function pick(id) {
+    active = id;
+    onchange?.(id);
+  }
 </script>
 
 <div class="tabs" role="tablist">
   {#each tabs as [id, label] (id)}
     <button type="button" role="tab" aria-selected={active === id} class="tab" class:on={active === id}
-            onclick={() => (active = id)}>{label}</button>
+            onclick={() => pick(id)}>{label}</button>
   {/each}
 </div>
 {@render children?.()}

@@ -6,6 +6,7 @@
   import ErrorBox from '../components/ErrorBox.svelte';
   import Pager from '../components/Pager.svelte';
   import { api, qs } from '../lib/api.js';
+  import { remote } from '../lib/load.svelte.js';
   import { seg } from '../lib/router.svelte.js';
   import { fmtDate } from '../lib/format.js';
 
@@ -13,12 +14,8 @@
   let filters = $state({ op: '', actor: '', namespace: '', item_type: '' });
   let applied = $state({ op: '', actor: '', namespace: '', item_type: '' });
   let offset = $state(0);
-  let page = $state(null);
-  let error = $state(null);
-
-  $effect(() => {
-    api.get(`/api/audit${qs({ ...applied, limit: LIMIT, offset })}`).then((r) => (page = r)).catch((e) => (error = e));
-  });
+  const page = remote();
+  $effect(() => { page.load(() => api.get(`/api/audit${qs({ ...applied, limit: LIMIT, offset })}`)); });
 
   function apply(e) {
     e.preventDefault();
@@ -29,13 +26,12 @@
     if (!d) return '';
     const copy = { ...d };
     if (copy.token) { copy.token = copy.token.hint; }
-    const parts = Object.entries(copy).map(([k, v]) => `${k}=${typeof v === 'string' ? v : JSON.stringify(v)}`);
-    return parts.join('  ');
+    return Object.entries(copy).map(([k, v]) => `${k}=${typeof v === 'string' ? v : JSON.stringify(v)}`).join('  ');
   }
 </script>
 
 <PageHeader title="Activity" subtitle="Every write and every sign-in, with who did it. Read-only here." />
-<ErrorBox {error} />
+<ErrorBox error={page.error} />
 
 <Card>
   <form class="filters" onsubmit={apply}>
@@ -50,15 +46,15 @@
   </form>
 </Card>
 
-{#if page}
-  {#if page.events.length === 0}
+{#if page.data}
+  {#if page.data.events.length === 0}
     <div class="mt"><Empty text="No matching events." /></div>
   {:else}
     <div class="mt"><Card flush>
       <div class="table-wrap"><table class="table">
         <thead><tr><th>When</th><th>Actor</th><th>Operation</th><th>Item</th><th>Via</th><th>Detail</th></tr></thead>
         <tbody>
-          {#each page.events as e (e.id)}
+          {#each page.data.events as e (e.id)}
             <tr>
               <td class="nowrap muted small">{fmtDate(e.ts)}</td>
               <td>{e.actor || '—'}</td>
@@ -77,7 +73,7 @@
           {/each}
         </tbody>
       </table></div>
-      <div style="padding:0 16px 12px"><Pager total={page.total} limit={LIMIT} bind:offset /></div>
+      <div style="padding:0 16px 12px"><Pager total={page.data.total} limit={LIMIT} bind:offset /></div>
     </Card></div>
   {/if}
 {/if}
