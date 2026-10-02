@@ -7,6 +7,27 @@ on:
     branches: ["**"]
 
 jobs:
+  web-ui:
+    name: Web UI
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5.0.0
+        with:
+          node-version-file: web/.nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - run: npm ci --no-audit --no-fund
+      - run: npm run check
+      - run: npm run build
+      - run: test -f ../src/mnemomatic/static/app/index.html
+
   unit-tests:
     name: Unit Tests
     runs-on: ubuntu-latest
@@ -56,6 +77,16 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86  # v5.4.2
+
+      - name: Smoke-test the served web UI
+        run: |
+          curl -fsS -H 'Accept: text/html' -o index.html -D headers.txt http://localhost:8686/
+          grep -i 'content-security-policy:.*script-src .self.' headers.txt
+          grep -iq 'cache-control: no-cache' headers.txt
+          asset=$(grep -oE '/assets/[^"]+\.js' index.html | head -1)
+          test -n "$asset"
+          curl -fsSI "http://localhost:8686$asset" | grep -i 'immutable'
+          test "$(curl -s -o /dev/null -w '%{http_code}' -H 'Accept: application/json' http://localhost:8686/.well-known/oauth-authorization-server)" = 404
 
       - name: Run integration tests
         run: uv run --with pytest --with "mnemomatic-cli @ ./cli" python -m pytest tests/test_mcp_api.py

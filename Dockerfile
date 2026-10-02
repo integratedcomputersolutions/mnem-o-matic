@@ -21,6 +21,19 @@ ARG EMBED_MODEL=arctic-embed-xs
 # ── Builder base ──────────────────────────────────────────────────────────────
 # Shared setup: system tools and source code only
 
+# ── Web UI build ──────────────────────────────────────────────────────────────
+# Produces the Vite bundle the Python package ships. Node never reaches a
+# runtime image. Package manifests are copied first so `npm ci` caches
+# across edits to the UI sources.
+FROM --platform=$BUILDPLATFORM node:22-bookworm-slim AS web-builder
+
+WORKDIR /app/web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY web/ ./
+RUN npm run build
+
+
 FROM python:3.11-slim AS builder-base
 
 WORKDIR /app
@@ -36,6 +49,8 @@ RUN pip install --no-cache-dir "uv==0.12.9"
 
 COPY pyproject.toml uv.lock README.md ./
 COPY src/ src/
+# The built web UI, into the package where spa.py serves it from.
+COPY --from=web-builder /app/src/mnemomatic/static/app src/mnemomatic/static/app
 
 # Seeds /data in the runtime images with non-root ownership (see the runtime
 # stages). Empty: it only exists to carry its own mode and owner.

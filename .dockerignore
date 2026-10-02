@@ -4,3 +4,5 @@ __pycache__
 .venv
 tests
 *.egg-info
+web/node_modules
+src/mnemomatic/static/app
