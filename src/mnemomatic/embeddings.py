@@ -235,47 +235,33 @@ class HttpEmbedder:
             headers={"Content-Type": "application/json"},
         )
 
+        # Failures raise without logging here: the caller (runtime._safe_embed,
+        # embed_batch) logs the RuntimeError, so its text carries every detail.
         try:
             with urllib.request.urlopen(req, timeout=EMBED_TIMEOUT) as resp:
                 response_data = resp.read()
         except urllib.error.HTTPError as e:
-            logger.error(
-                "Embedding service HTTP error: status=%d, url=%s",
-                e.code, self.url,
-            )
             raise RuntimeError(
                 f"Embedding service returned HTTP {e.code} at {self.url}"
             )
         except urllib.error.URLError as e:
-            logger.error(
-                "Embedding service unreachable: %s (url=%s)",
-                e.reason, self.url,
-            )
             raise RuntimeError(
                 f"Cannot reach embedding service at {self.url}: {e.reason}"
             )
         except socket.timeout:
-            logger.error("Embedding service timeout after %ds: %s", EMBED_TIMEOUT, self.url)
             raise RuntimeError(
                 f"Embedding service at {self.url} did not respond within {EMBED_TIMEOUT}s"
             )
         except Exception as e:
-            logger.error(
-                "Unexpected error contacting embedding service: %s: %s",
-                type(e).__name__, e,
-            )
             raise RuntimeError(f"Failed to contact embedding service: {type(e).__name__}: {e}")
 
         # Parse response
         try:
             data = json.loads(response_data)
         except json.JSONDecodeError as e:
-            logger.error(
-                "Embedding service returned invalid JSON: %s (first 200 chars: %s)",
-                e, response_data[:200],
-            )
             raise RuntimeError(
-                f"Embedding service at {self.url} returned invalid JSON: {e}"
+                f"Embedding service at {self.url} returned invalid JSON: {e} "
+                f"(first 200 bytes: {response_data[:200]!r})"
             )
 
         # Extract embedding; normalize so downstream cosine scoring holds for
@@ -291,12 +277,8 @@ class HttpEmbedder:
         except (KeyError, IndexError):
             expected = "data[0].embedding" if self.api == "openai" else "embedding"
             got = list(data.keys()) if isinstance(data, dict) else type(data).__name__
-            logger.error(
-                "Embedding service response missing '%s' field. Got: %s", expected, got,
-            )
             raise RuntimeError(
                 f"Embedding service response missing '{expected}' field. Got: {got}"
             )
         except (TypeError, ValueError) as e:
-            logger.error("Embedding value is invalid: %s", e)
             raise RuntimeError(f"Embedding service returned invalid embedding: {e}")

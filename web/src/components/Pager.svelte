@@ -14,5 +14,6 @@
 </div>
 
 <style>
-  .pager { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0 0; }
+  /* Sits at the foot of a flush table card, so it brings its own inset. */
+  .pager { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 16px 12px; }
 </style>

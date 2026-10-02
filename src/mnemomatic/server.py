@@ -23,16 +23,13 @@ from mnemomatic.audit import RequestMetaMiddleware
 from mnemomatic.auth import AuthMiddleware
 from mnemomatic.bodylimit import BodyLimitMiddleware
 from mnemomatic.compact import CompactToolsMiddleware
-from mnemomatic.db import EMBEDDING_DIM
+from mnemomatic.db import _SPECS, EMBEDDING_DIM
 from mnemomatic.spa import APP_DIR, ListenerTag, PlainPortGate, build_spa_routes, build_tls_routes
 from mnemomatic.tlsca import TlsState, start_renewal_thread
 from mnemomatic.identity import IdentityError, ensure_bootstrap
 from mnemomatic.runtime import (
     _audit,
-    _embed_content,
-    _embed_document_body,
-    _knowledge_embed_text,
-    _note_embed_text,
+    _embed_item,
     mcp,
 )
 
@@ -47,7 +44,6 @@ from mnemomatic import tools_admin    # noqa: F401
 from mnemomatic.tools_admin import (
     _export_route,
     _health_route,
-    _make_export,
     _server_version,
     _settings_info,
 )
@@ -94,32 +90,24 @@ def _run_reindex() -> None:
         )
     database.rebuild_vec_tables()
 
-    counts = {"documents": 0, "knowledge": 0, "notes": 0, "failed": 0}
+    counts = {**dict.fromkeys(_SPECS, 0), "failed": 0}
     for namespace in database.list_namespaces():
-        for doc in database.list_documents(namespace):
-            embedding, chunks = _embed_document_body(doc.title, doc.content)
-            database.replace_document_chunks(doc.id, chunks)
-            if embedding is not None:
-                database.set_embedding("document", doc.id, embedding)
-            if embedding is None and chunks is None:
-                counts["failed"] += 1
-                logger.error("Reindex: embedding failed for document %s (%r)", doc.id, doc.title)
-            else:
-                counts["documents"] += 1
-        for k in database.list_knowledge(namespace):
-            embedding = _embed_content(_knowledge_embed_text(k.subject, k.fact))
-            if embedding is not None and database.set_embedding("knowledge", k.id, embedding):
-                counts["knowledge"] += 1
-            else:
-                counts["failed"] += 1
-                logger.error("Reindex: embedding failed for knowledge %s (%r)", k.id, k.subject)
-        for note in database.list_notes(namespace):
-            embedding = _embed_content(_note_embed_text(note.title, note.content))
-            if embedding is not None and database.set_embedding("note", note.id, embedding):
-                counts["notes"] += 1
-            else:
-                counts["failed"] += 1
-                logger.error("Reindex: embedding failed for note %s (%r)", note.id, note.title)
+        for spec in _SPECS.values():
+            for item in database.list_items(spec.item_type, namespace):
+                embedding, chunks = _embed_item(spec.item_type, item)
+                if spec.item_type == "document":
+                    database.replace_document_chunks(item.id, chunks)
+                # A chunked document is embedded through its chunks alone.
+                if embedding is not None:
+                    ok = database.set_embedding(spec.item_type, item.id, embedding)
+                else:
+                    ok = chunks is not None
+                if ok:
+                    counts[spec.table] += 1
+                else:
+                    counts["failed"] += 1
+                    logger.error("Reindex: embedding failed for %s %s (%r)", spec.item_type, item.id,
+                                 getattr(item, spec.title_field))
 
     logger.info(
         "Reindex complete: %d documents, %d knowledge, %d notes re-embedded, %d failed",

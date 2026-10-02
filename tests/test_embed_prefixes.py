@@ -11,7 +11,7 @@ this test environment — and for external endpoints, defaults are empty.
 import unittest
 from unittest.mock import MagicMock, patch
 
-import mnemomatic.server as server
+import mnemomatic.server  # noqa: F401 — registers the full tool surface
 from mnemomatic import config
 from mnemomatic import runtime
 from mnemomatic import tools_content
@@ -97,7 +97,7 @@ class TestDocumentPrefix(PrefixTestBase):
 
         content = ("chunk sentence. " * 40 + "\n\n") * 5  # over CHUNK_THRESHOLD
         with patch.object(runtime, "_safe_embed_batch", side_effect=fake_batch):
-            embedding, chunks = server._embed_document_body("T", content)
+            embedding, chunks = runtime._embed_document_body("T", content)
         self.assertIsNone(embedding)
         self.assertTrue(all(t.startswith("D>> ") for t in batch_calls[0]))
         # Stored chunk text is the raw content — the prefix never persists.
@@ -114,7 +114,7 @@ class TestPrefixDefaults(unittest.TestCase):
         recorded = []
         with patch.object(runtime, "_safe_embed", side_effect=lambda t: recorded.append(t) or EMBEDDING):
             tools_search._embed_query("hello")
-            server._embed_content("world")
+            runtime._embed_content("world")
         self.assertEqual(recorded, ["hello", "world"])
 
 

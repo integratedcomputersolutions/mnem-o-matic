@@ -24,6 +24,8 @@ import re
 import zipfile
 from datetime import datetime, timezone
 
+from mnemomatic.db import _SPECS
+
 # Windows-forbidden characters plus control chars; the superset is safe everywhere.
 _INVALID_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _EXT_BY_MIME = {
@@ -82,6 +84,22 @@ def _export_section(zf: zipfile.ZipFile, folder: str,
               datetime.now(timezone.utc))
 
 
+def _extension(item) -> str:
+    """A document's extension follows its MIME type; everything else is Markdown."""
+    return _EXT_BY_MIME.get(getattr(item, "mime_type", None), ".md")
+
+
+def _sidecar_meta(spec, item) -> dict:
+    """The sidecar record: every column but the body (which is the file) and
+    the temporal bookkeeping (exports hold current items only), in column order."""
+    meta = {}
+    for col in spec.columns:
+        if col not in (spec.snippet_field, "valid_until", "superseded_by"):
+            value = getattr(item, col)
+            meta[col] = value.isoformat() if isinstance(value, datetime) else value
+    return meta
+
+
 def build_export_zip(db, namespace: str | None = None, *,
                      server_version: str) -> tuple[bytes, str]:
     """Build the archive for one namespace (or all) and suggest a filename.
@@ -92,55 +110,29 @@ def build_export_zip(db, namespace: str | None = None, *,
     now = datetime.now(timezone.utc)
     namespaces = [namespace] if namespace else db.list_namespaces()
 
-    counts = {"documents": 0, "knowledge": 0, "notes": 0}
+    counts = dict.fromkeys(_SPECS, 0)
     folder_by_ns: dict[str, str] = {}
     used_folders: set[str] = set()
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for ns in namespaces:
-            docs = db.list_documents(ns)
-            knowledge = db.list_knowledge(ns)
-            notes = db.list_notes(ns)
-            if not (docs or knowledge or notes):
+            by_table = {t: db.list_items(spec.item_type, ns) for t, spec in _SPECS.items()}
+            if not any(by_table.values()):
                 continue
             # Namespace folder names collide the same way filenames do.
             folder = _unique(_safe_name(ns, "namespace"), used_folders, ns)
             folder_by_ns[folder] = ns
 
-            if docs:
-                counts["documents"] += len(docs)
-                _export_section(zf, f"{folder}/documents", [
-                    (d.id, d.title, _EXT_BY_MIME.get(d.mime_type, ".md"), d.content,
-                     {"id": d.id, "namespace": ns, "title": d.title,
-                      "mime_type": d.mime_type, "tags": d.tags, "metadata": d.metadata,
-                      "created_at": d.created_at.isoformat(),
-                      "updated_at": d.updated_at.isoformat()},
-                     d.updated_at)
-                    for d in docs
-                ])
-            if knowledge:
-                counts["knowledge"] += len(knowledge)
-                _export_section(zf, f"{folder}/knowledge", [
-                    (k.id, k.subject, ".md", k.fact,
-                     {"id": k.id, "namespace": ns, "subject": k.subject,
-                      "confidence": k.confidence, "source": k.source,
-                      "tags": k.tags, "metadata": k.metadata,
-                      "created_at": k.created_at.isoformat(),
-                      "updated_at": k.updated_at.isoformat()},
-                     k.updated_at)
-                    for k in knowledge
-                ])
-            if notes:
-                counts["notes"] += len(notes)
-                _export_section(zf, f"{folder}/notes", [
-                    (n.id, n.title, ".md", n.content,
-                     {"id": n.id, "namespace": ns, "title": n.title,
-                      "source": n.source, "tags": n.tags, "metadata": n.metadata,
-                      "created_at": n.created_at.isoformat(),
-                      "updated_at": n.updated_at.isoformat()},
-                     n.updated_at)
-                    for n in notes
+            for table, items in by_table.items():
+                if not items:
+                    continue
+                spec = _SPECS[table]
+                counts[table] += len(items)
+                _export_section(zf, f"{folder}/{table}", [
+                    (it.id, getattr(it, spec.title_field), _extension(it),
+                     getattr(it, spec.snippet_field), _sidecar_meta(spec, it), it.updated_at)
+                    for it in items
                 ])
 
         manifest = {

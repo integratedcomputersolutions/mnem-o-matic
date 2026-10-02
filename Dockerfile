@@ -18,9 +18,6 @@
 # Models"). Same-dimension swaps are caught by the recorded model identity.
 ARG EMBED_MODEL=arctic-embed-xs
 
-# ── Builder base ──────────────────────────────────────────────────────────────
-# Shared setup: system tools and source code only
-
 # ── Web UI build ──────────────────────────────────────────────────────────────
 # Produces the Vite bundle the Python package ships. Node never reaches a
 # runtime image. Package manifests are copied first so `npm ci` caches
@@ -33,6 +30,9 @@ RUN npm ci --no-audit --no-fund
 COPY web/ ./
 RUN npm run build
 
+# ── Builder base ──────────────────────────────────────────────────────────────
+# Shared setup for the Python builders: system tools, source code, and the
+# install script both builders run.
 
 FROM python:3.11-slim AS builder-base
 
@@ -55,6 +55,45 @@ COPY --from=web-builder /app/src/mnemomatic/static/app src/mnemomatic/static/app
 # Seeds /data in the runtime images with non-root ownership (see the runtime
 # stages). Empty: it only exists to carry its own mode and owner.
 RUN mkdir -p /data-skel
+
+# Installs the server into /install and strips what neither image needs at
+# runtime. Arguments go to `uv export`: the full builder passes --extra onnx.
+#
+# Dependencies come from uv.lock, not from the ranges in pyproject.toml, so
+# the image contains exactly what CI tested and every wheel is hash-verified.
+# `uv export --frozen` fails when the lock is stale, which is the point: a
+# dependency bump without a lock refresh should not build. The project itself
+# installs separately with --no-deps, since the lock already pinned its deps.
+#
+# Stripped from both images:
+#   pip/setuptools, dist-info RECORDs — not needed at runtime
+#   rich/pygments/markdown_it/mdurl/typer/shellingham — pulled in transitively via the MCP
+#     SDK's CLI deps and unused by the server (which logs via the stdlib). rich is removed,
+#     not just pygments: rich imports pygments lazily when rendering tracebacks, so stripping
+#     pygments alone leaves rich to crash at runtime with "No module named 'pygments'".
+#     With rich gone, the SDK's optional-import falls back cleanly to a plain log handler.
+#   debug symbols in shared libraries, __pycache__ and .pyc files
+COPY --chmod=755 <<'EOF' /usr/local/bin/install-server
+#!/bin/sh
+set -eu
+uv export --frozen --no-emit-project "$@" --format requirements-txt -o /tmp/requirements.txt
+pip install --no-cache-dir --no-compile --prefix=/install --require-hashes -r /tmp/requirements.txt
+pip install --no-cache-dir --no-compile --prefix=/install --no-deps .
+
+sp=/install/lib/python3.11/site-packages
+rm -rf "$sp"/pip* "$sp"/setuptools* "$sp"/*.dist-info/RECORD
+rm -rf \
+    "$sp"/pygments "$sp"/Pygments-*.dist-info \
+    "$sp"/rich "$sp"/rich-*.dist-info \
+    "$sp"/markdown_it "$sp"/markdown_it_py-*.dist-info \
+    "$sp"/mdurl "$sp"/mdurl-*.dist-info \
+    "$sp"/typer "$sp"/typer-*.dist-info \
+    "$sp"/shellingham "$sp"/shellingham-*.dist-info
+
+find /install -name '*.so*' -type f -exec strip --strip-debug {} + 2>/dev/null || true
+find /install -name '*.pyc' -delete && \
+    find /install -type d -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true
+EOF
 
 # ── Model download ─────────────────────────────────────────────────────────────
 # Isolated stage: downloads the ONNX embedding model selected by EMBED_MODEL,
@@ -178,39 +217,20 @@ PYTHON_EOF
 
 FROM builder-base AS builder-full
 
-# Dependencies come from uv.lock, not from the ranges in pyproject.toml, so
-# the image contains exactly what CI tested and every wheel is hash-verified.
-# `uv export --frozen` fails when the lock is stale, which is the point: a
-# dependency bump without a lock refresh should not build. The project itself
-# installs separately with --no-deps, since the lock already pinned its deps.
-RUN uv export --frozen --no-emit-project --extra onnx --format requirements-txt \
-        -o /tmp/requirements.txt && \
-    pip install --no-cache-dir --no-compile --prefix=/install \
-        --require-hashes -r /tmp/requirements.txt && \
-    pip install --no-cache-dir --no-compile --prefix=/install --no-deps .
+RUN install-server --extra onnx
 
 # Strip onnxruntime extras not needed for CPU inference
 RUN find /install/lib/python3.11/site-packages/onnxruntime -maxdepth 1 -type d \
     \( -name 'transformers' -o -name 'quantization' -o -name 'tools' -o -name 'datasets' \) \
     -exec rm -rf {} + 2>/dev/null || true
 
-# Strip pip/setuptools (not needed at runtime)
-RUN rm -rf /install/lib/python3.11/site-packages/pip* \
-           /install/lib/python3.11/site-packages/setuptools* \
-           /install/lib/python3.11/site-packages/*.dist-info/RECORD
-
-# Strip packages not needed at runtime:
+# Strip packages only the ML stack pulls in and nothing uses at runtime:
 #   sympy/mpmath  — onnxruntime optional deps for shape inference (build-time only)
 #   flatbuffers/packaging/protobuf(google) — onnxruntime declares these but only its
 #     training/quantization/conversion tooling (already removed above) imports them; a
 #     real InferenceSession loads and runs the model entirely in native C++.
 #   huggingface_hub/hf_xet/fsspec/pyyaml/tqdm/filelock — pulled in by fastembed for model
 #     download only (tqdm = progress bars, filelock = cache locking); unused at runtime.
-#   rich/pygments/markdown_it/mdurl/typer/shellingham — pulled in transitively via the MCP
-#     SDK's CLI deps and unused by the server (which logs via the stdlib). rich is removed,
-#     not just pygments: rich imports pygments lazily when rendering tracebacks, so stripping
-#     pygments alone leaves rich to crash at runtime with "No module named 'pygments'".
-#     With rich gone, the SDK's optional-import falls back cleanly to a plain log handler.
 RUN rm -rf \
     /install/lib/python3.11/site-packages/sympy \
     /install/lib/python3.11/site-packages/sympy-*.dist-info \
@@ -233,136 +253,59 @@ RUN rm -rf \
     /install/lib/python3.11/site-packages/filelock \
     /install/lib/python3.11/site-packages/filelock-*.dist-info \
     /install/lib/python3.11/site-packages/yaml \
-    /install/lib/python3.11/site-packages/PyYAML-*.dist-info \
-    /install/lib/python3.11/site-packages/pygments \
-    /install/lib/python3.11/site-packages/Pygments-*.dist-info \
-    /install/lib/python3.11/site-packages/rich \
-    /install/lib/python3.11/site-packages/rich-*.dist-info \
-    /install/lib/python3.11/site-packages/markdown_it \
-    /install/lib/python3.11/site-packages/markdown_it_py-*.dist-info \
-    /install/lib/python3.11/site-packages/mdurl \
-    /install/lib/python3.11/site-packages/mdurl-*.dist-info \
-    /install/lib/python3.11/site-packages/typer \
-    /install/lib/python3.11/site-packages/typer-*.dist-info \
-    /install/lib/python3.11/site-packages/shellingham \
-    /install/lib/python3.11/site-packages/shellingham-*.dist-info
-
-# Strip debug symbols from all shared libraries
-RUN find /install -name '*.so*' -type f -exec strip --strip-debug {} + 2>/dev/null || true
-
-# Strip __pycache__ and .pyc files
-RUN find /install -name '*.pyc' -delete && \
-    find /install -type d -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true
+    /install/lib/python3.11/site-packages/PyYAML-*.dist-info
 
 # ── Lite builder ───────────────────────────────────────────────────────────────
 # Installs only core deps — no ML stack. Semantic search requires MNEMOMATIC_EMBED_URL.
 
 FROM builder-base AS builder-lite
 
-# Same lockfile install as the full builder, without the onnx extra.
-RUN uv export --frozen --no-emit-project --format requirements-txt \
-        -o /tmp/requirements.txt && \
-    pip install --no-cache-dir --no-compile --prefix=/install \
-        --require-hashes -r /tmp/requirements.txt && \
-    pip install --no-cache-dir --no-compile --prefix=/install --no-deps .
+RUN install-server
 
-# Strip pip/setuptools (not needed at runtime)
-RUN rm -rf /install/lib/python3.11/site-packages/pip* \
-           /install/lib/python3.11/site-packages/setuptools* \
-           /install/lib/python3.11/site-packages/*.dist-info/RECORD
+# ── Runtime base ───────────────────────────────────────────────────────────────
+# Everything the full and lite images share; each adds only its own /install
+# (and, for full, the model).
 
-# Strip packages not needed at runtime:
-#   rich/pygments/markdown_it/mdurl/typer/shellingham — MCP SDK CLI deps, unused by the
-#     server. rich is removed too (not just pygments): rich imports pygments lazily when
-#     rendering tracebacks, so stripping pygments alone leaves rich to crash at runtime.
-RUN rm -rf \
-    /install/lib/python3.11/site-packages/pygments \
-    /install/lib/python3.11/site-packages/Pygments-*.dist-info \
-    /install/lib/python3.11/site-packages/rich \
-    /install/lib/python3.11/site-packages/rich-*.dist-info \
-    /install/lib/python3.11/site-packages/markdown_it \
-    /install/lib/python3.11/site-packages/markdown_it_py-*.dist-info \
-    /install/lib/python3.11/site-packages/mdurl \
-    /install/lib/python3.11/site-packages/mdurl-*.dist-info \
-    /install/lib/python3.11/site-packages/typer \
-    /install/lib/python3.11/site-packages/typer-*.dist-info \
-    /install/lib/python3.11/site-packages/shellingham \
-    /install/lib/python3.11/site-packages/shellingham-*.dist-info
+FROM gcr.io/distroless/python3-debian12:nonroot AS runtime-base
 
-# Strip debug symbols from all shared libraries
-RUN find /install -name '*.so*' -type f -exec strip --strip-debug {} + 2>/dev/null || true
+WORKDIR /app
 
-# Strip __pycache__ and .pyc files
-RUN find /install -name '*.pyc' -delete && \
-    find /install -type d -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true
+# The database directory, owned by the unprivileged user the image runs as.
+# A named volume inherits this ownership when Docker first populates it; a
+# bind mount does not — the host directory's owner wins, so it must already be
+# writable by uid 65532 (see docs/installation.md, "Running as a non-root user").
+COPY --from=builder-base --chown=65532:65532 /data-skel /data
+
+ENV PYTHONPATH=/usr/local/lib/python3.11/site-packages
+ENV MNEMOMATIC_DB_PATH=/data/mnemomatic.db
+ENV MNEMOMATIC_HOST=0.0.0.0
+ENV MNEMOMATIC_PORT=8000
+
+# Drop privileges. The :nonroot base already selects uid/gid 65532; stating it
+# here keeps the image correct if that ever changes upstream. Port 8000 is
+# unprivileged, so nothing needs root to bind it.
+USER 65532:65532
+
+# Liveness for orchestrators and `docker compose up --wait`. Distroless has no
+# shell or curl, so the check runs through the image's own Python. The port is
+# not bound until after any startup reindex, so "connection refused" correctly
+# reads as not-ready-yet rather than unhealthy.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD ["/usr/bin/python3", "-c", "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('MNEMOMATIC_PORT','8000')+'/health',timeout=4).read()"]
+
+EXPOSE 8000 8443
+
+CMD ["-c", "from mnemomatic.server import main; main()"]
 
 # ── Runtime: full ──────────────────────────────────────────────────────────────
 
-FROM gcr.io/distroless/python3-debian12:nonroot AS full
-
-WORKDIR /app
+FROM runtime-base AS full
 
 COPY --from=builder-full /install /usr/local
 COPY --from=model-builder /app/model /app/model
 
-# The database directory, owned by the unprivileged user the image runs as.
-# A named volume inherits this ownership when Docker first populates it; a
-# bind mount does not — the host directory's owner wins, so it must already be
-# writable by uid 65532 (see docs/installation.md, "Running as a non-root user").
-COPY --from=builder-base --chown=65532:65532 /data-skel /data
-
-ENV PYTHONPATH=/usr/local/lib/python3.11/site-packages
-ENV MNEMOMATIC_DB_PATH=/data/mnemomatic.db
-ENV MNEMOMATIC_HOST=0.0.0.0
-ENV MNEMOMATIC_PORT=8000
-
-# Drop privileges. The :nonroot base already selects uid/gid 65532; stating it
-# here keeps the image correct if that ever changes upstream. Port 8000 is
-# unprivileged, so nothing needs root to bind it.
-USER 65532:65532
-
-# Liveness for orchestrators and `docker compose up --wait`. Distroless has no
-# shell or curl, so the check runs through the image's own Python. The port is
-# not bound until after any startup reindex, so "connection refused" correctly
-# reads as not-ready-yet rather than unhealthy.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD ["/usr/bin/python3", "-c", "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('MNEMOMATIC_PORT','8000')+'/health',timeout=4).read()"]
-
-EXPOSE 8000 8443
-
-CMD ["-c", "from mnemomatic.server import main; main()"]
-
 # ── Runtime: lite ──────────────────────────────────────────────────────────────
 
-FROM gcr.io/distroless/python3-debian12:nonroot AS lite
-
-WORKDIR /app
+FROM runtime-base AS lite
 
 COPY --from=builder-lite /install /usr/local
-
-# The database directory, owned by the unprivileged user the image runs as.
-# A named volume inherits this ownership when Docker first populates it; a
-# bind mount does not — the host directory's owner wins, so it must already be
-# writable by uid 65532 (see docs/installation.md, "Running as a non-root user").
-COPY --from=builder-base --chown=65532:65532 /data-skel /data
-
-ENV PYTHONPATH=/usr/local/lib/python3.11/site-packages
-ENV MNEMOMATIC_DB_PATH=/data/mnemomatic.db
-ENV MNEMOMATIC_HOST=0.0.0.0
-ENV MNEMOMATIC_PORT=8000
-
-# Drop privileges. The :nonroot base already selects uid/gid 65532; stating it
-# here keeps the image correct if that ever changes upstream. Port 8000 is
-# unprivileged, so nothing needs root to bind it.
-USER 65532:65532
-
-# Liveness for orchestrators and `docker compose up --wait`. Distroless has no
-# shell or curl, so the check runs through the image's own Python. The port is
-# not bound until after any startup reindex, so "connection refused" correctly
-# reads as not-ready-yet rather than unhealthy.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD ["/usr/bin/python3", "-c", "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('MNEMOMATIC_PORT','8000')+'/health',timeout=4).read()"]
-
-EXPOSE 8000 8443
-
-CMD ["-c", "from mnemomatic.server import main; main()"]

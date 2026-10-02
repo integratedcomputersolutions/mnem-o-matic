@@ -61,3 +61,6 @@ export function matchPath(pattern, path) {
 }
 
 export const seg = (s) => encodeURIComponent(s);
+
+// The detail page of one stored item.
+export const itemHref = (ns, type, id) => `/browse/${seg(ns)}/${type}/${seg(id)}`;

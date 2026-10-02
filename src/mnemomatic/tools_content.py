@@ -1,23 +1,24 @@
 """Content tools: storing, updating, deleting, and tagging items.
 
-The three item types share their update and delete bodies through
-_handle_update/_handle_delete; only genuinely per-type behaviour lives in
-_OPS. Each MCP tool stays its own function because its name, signature,
-and docstring are the agent-facing API.
+The three item types share their store tails, update, and delete bodies
+through _finish_store/_handle_update/_handle_delete; only genuinely per-type
+behaviour (how an update re-embeds) lives in _EMBED_UPDATE. Each MCP tool
+stays its own function because its name, signature, and docstring are the
+agent-facing API.
 """
 import sqlite3
 from collections.abc import Callable
-from dataclasses import dataclass
 
 from pydantic import ValidationError
 
 from mnemomatic import config, runtime
-from mnemomatic.db import _SPEC_BY_ITEM_TYPE, CHUNK_THRESHOLD, Database
+from mnemomatic.db import _SPEC_BY_ITEM_TYPE, CHUNK_THRESHOLD
 from mnemomatic.models import Document, Knowledge, Note
 from mnemomatic.runtime import (
     _audit,
     _embed_content,
     _embed_document_body,
+    _embed_item,
     _format_validation_error,
     _knowledge_embed_text,
     _note_embed_text,
@@ -75,16 +76,9 @@ def store_document(
     except ValidationError as e:
         return {"error": "Invalid document", "details": _format_validation_error(e)}
 
-    embedding, chunks = _embed_document_body(title, content)
-
+    embedding, chunks = _embed_item("document", doc)
     stored, created = runtime._db().store_document(doc, embedding, chunks)
-    response = {"id": stored.id, "namespace": stored.namespace, "title": stored.title, "created": created}
-    similar = _similar_items("documents", stored.id, namespace, embedding)
-    if similar:
-        response["similar"] = similar
-    _audit("store", item_type="document", item_id=stored.id, namespace=stored.namespace,
-           title=stored.title, created=created)
-    return response
+    return _finish_store("document", stored, created, embedding)
 
 
 @mcp.tool(annotations=config.ANN_STORE)
@@ -142,17 +136,25 @@ def store_knowledge(
     except ValidationError as e:
         return {"error": "Invalid knowledge entry", "details": _format_validation_error(e)}
 
-    embedding = _embed_content(_knowledge_embed_text(subject, fact))
+    embedding, _ = _embed_item("knowledge", k)
     stored, created, superseded = runtime._db().store_knowledge(k, embedding)
-    response = {"id": stored.id, "namespace": stored.namespace, "subject": stored.subject, "created": created}
-    if superseded:
-        response["superseded"] = superseded
-    similar = _similar_items("knowledge", stored.id, namespace, embedding)
+    return _finish_store("knowledge", stored, created, embedding, superseded)
+
+
+def _finish_store(item_type: str, stored, created: bool, embedding: list[float] | None,
+                  superseded: str | None = None) -> dict:
+    """Shared tail of the store_* tools: the response (with any near-duplicates
+    flagged) and the audit event."""
+    spec = _SPEC_BY_ITEM_TYPE[item_type]
+    key = spec.title_field
+    extra = {"superseded": superseded} if superseded else {}
+    response = {"id": stored.id, "namespace": stored.namespace, key: getattr(stored, key),
+                "created": created, **extra}
+    similar = _similar_items(spec.table, stored.id, stored.namespace, embedding)
     if similar:
         response["similar"] = similar
-    _audit("store", item_type="knowledge", item_id=stored.id, namespace=stored.namespace,
-           title=stored.subject, created=created,
-           **({"superseded": superseded} if superseded else {}))
+    _audit("store", item_type=item_type, item_id=stored.id, namespace=stored.namespace,
+           title=getattr(stored, key), created=created, **extra)
     return response
 
 
@@ -191,44 +193,13 @@ def _note_update_embedding(id: str, existing: Note, fields: dict) -> list[float]
     return None
 
 
-@dataclass(frozen=True)
-class _ItemOps:
-    """The per-type database calls the tools dispatch through.
-
-    Only genuinely per-type behaviour lives here. Everything descriptive —
-    model, title field, resource shape — comes from the table spec in db.py,
-    so the two never disagree about what a "note" is.
-    """
-
-    get: Callable                # (db, id) -> item | None
-    delete: Callable             # (db, id) -> bool
-    list: Callable               # (db, namespace) -> [item]
-    update: Callable             # (db, id, embedding, fields) -> item | None
-    embed_update: Callable       # (id, existing, fields) -> embedding | None
-
-
-_OPS: dict[str, _ItemOps] = {
-    "document": _ItemOps(
-        get=Database.get_document,
-        delete=Database.delete_document,
-        list=Database.list_documents,
-        update=lambda db, id, emb, fields: db.update_document(id, embedding=emb, **fields),
-        embed_update=_document_update_embedding,
-    ),
-    "knowledge": _ItemOps(
-        get=Database.get_knowledge,
-        delete=Database.delete_knowledge,
-        list=Database.list_knowledge,
-        update=lambda db, id, emb, fields: db.update_knowledge(id, embedding=emb, **fields),
-        embed_update=_knowledge_update_embedding,
-    ),
-    "note": _ItemOps(
-        get=Database.get_note,
-        delete=Database.delete_note,
-        list=Database.list_notes,
-        update=lambda db, id, emb, fields: db.update_note(id, embedding=emb, **fields),
-        embed_update=_note_update_embedding,
-    ),
+# How an update recomputes each type's embedding — the one genuinely per-type
+# step in the shared update path. Everything descriptive (model, title field,
+# resource shape) comes from the table spec in db.py.
+_EMBED_UPDATE: dict[str, Callable] = {   # (id, existing, fields) -> embedding | None
+    "document": _document_update_embedding,
+    "knowledge": _knowledge_update_embedding,
+    "note": _note_update_embedding,
 }
 
 
@@ -240,9 +211,9 @@ def _handle_update(item_type: str, id: str, fields: dict) -> dict:
     change to the fact itself supersedes (closes the current entry and inserts
     a successor) instead of overwriting.
     """
-    ops, spec = _OPS[item_type], _SPEC_BY_ITEM_TYPE[item_type]
+    spec = _SPEC_BY_ITEM_TYPE[item_type]
     db = runtime._db()
-    existing = ops.get(db, id)
+    existing = db.get_item(item_type, id)
     if existing is None:
         return {"error": f"{item_type.capitalize()} {id} not found"}
     if item_type == "knowledge" and existing.valid_until is not None:
@@ -258,8 +229,8 @@ def _handle_update(item_type: str, id: str, fields: dict) -> dict:
     if item_type == "knowledge" and "fact" in fields and fields["fact"] != existing.fact:
         return _supersede_update(existing, fields)
 
-    embedding = ops.embed_update(id, existing, fields)
-    updated = ops.update(db, id, embedding, fields)
+    embedding = _EMBED_UPDATE[item_type](id, existing, fields)
+    updated = db.update_item(item_type, id, embedding, **fields)
     if updated is None:
         return {"error": f"{item_type.capitalize()} {id} not found"}
     key = spec.title_field
@@ -276,8 +247,8 @@ def _handle_delete(item_type: str, id: str) -> dict:
     written. A delete that removed nothing is not an event.
     """
     db = runtime._db()
-    existing = _OPS[item_type].get(db, id)
-    deleted = _OPS[item_type].delete(db, id)
+    existing = db.get_item(item_type, id)
+    deleted = db.delete_item(item_type, id)
     if deleted:
         title_field = _SPEC_BY_ITEM_TYPE[item_type].title_field
         _audit("delete", item_type=item_type, item_id=id,
@@ -293,7 +264,7 @@ def _supersede_update(existing: Knowledge, fields: dict) -> dict:
                   "retrieval_count", "last_accessed"):
         data.pop(reset, None)
     successor = Knowledge(**data)  # fresh id and timestamps; merged fields pre-validated
-    embedding = _embed_content(_knowledge_embed_text(successor.subject, successor.fact))
+    embedding, _ = _embed_item("knowledge", successor)
     try:
         stored = runtime._db().supersede_knowledge(existing.id, successor, embedding)
     except sqlite3.IntegrityError:
@@ -446,15 +417,9 @@ def store_note(
     except ValidationError as e:
         return {"error": "Invalid note", "details": _format_validation_error(e)}
 
-    embedding = _embed_content(_note_embed_text(title, content))
+    embedding, _ = _embed_item("note", note)
     stored, created = runtime._db().store_note(note, embedding)
-    response = {"id": stored.id, "namespace": stored.namespace, "title": stored.title, "created": created}
-    similar = _similar_items("notes", stored.id, namespace, embedding)
-    if similar:
-        response["similar"] = similar
-    _audit("store", item_type="note", item_id=stored.id, namespace=stored.namespace,
-           title=stored.title, created=created)
-    return response
+    return _finish_store("note", stored, created, embedding)
 
 
 @mcp.tool(annotations=config.ANN_UPDATE)

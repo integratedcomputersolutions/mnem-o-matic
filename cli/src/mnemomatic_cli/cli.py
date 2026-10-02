@@ -20,6 +20,7 @@ _DEFAULT_MODE = "hybrid"
 _CONFIG_PATH = Path.home() / ".config" / "mnemomatic" / "config.toml"
 _ITEM_TYPES = ("document", "knowledge", "note")       # singular — used in tool calls
 _RESOURCE_TYPES = ("documents", "knowledge", "notes")  # plural  — used in resource URIs
+_SINGULAR = dict(zip(_RESOURCE_TYPES, _ITEM_TYPES))
 
 
 # ---------------------------------------------------------------------------
@@ -102,14 +103,6 @@ def _err(msg: str):
     sys.exit(1)
 
 
-def _run(fn, pretty: bool):
-    try:
-        result = fn()
-        _out(result, pretty)
-    except RuntimeError as exc:
-        _err(str(exc))
-
-
 # ---------------------------------------------------------------------------
 # Argument parsing helpers
 # ---------------------------------------------------------------------------
@@ -135,56 +128,62 @@ def _read_content(value: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Generic command helpers
+# Store / update: one field spec per item type
 # ---------------------------------------------------------------------------
 
-def _collect_params(args, fields: list[str], *, required: bool) -> dict:
-    """Build a params dict from *args* for the given field names.
+_CONTENT_HELP = "Content text, or '-' to read from stdin"
 
-    When *required* is True all fields are included unconditionally (store).
-    When False only non-None fields are included (update), and 'id' is always
-    added first.
-    """
-    params: dict = {}
-    if not required:
-        params["id"] = args.id
-    for field in fields:
-        val = getattr(args, field.replace("-", "_"), None)
-        if required or val is not None:
+# Per type: the fields `store` takes as positionals (after the namespace) and
+# `update` as flags, then the fields both take as flags. Tags and metadata are
+# common to every type. Defaults belong to the server, so a flag left out is
+# not sent; namespace is fixed at creation, so `update` takes an id instead.
+_FIELDS = {
+    "document": (("title", "content"), {
+        "mime_type": {"metavar": "TYPE", "help": "default: text/markdown"},
+    }),
+    "knowledge": (("subject", "fact"), {
+        "confidence": {"type": float, "metavar": "0.0-1.0", "help": "default: 1.0"},
+        "source": {"metavar": "SRC", "help": "default: unknown"},
+    }),
+    "note": (("title", "content"), {
+        "source": {"metavar": "SRC", "help": "default: text"},
+    }),
+}
+
+
+def _add_item_args(parser: argparse.ArgumentParser, item_type: str, *, store: bool):
+    main_fields, flag_fields = _FIELDS[item_type]
+    parser.add_argument("namespace" if store else "id")
+    for field in main_fields:
+        kwargs = {"help": _CONTENT_HELP} if field == "content" else {}
+        if store:
+            parser.add_argument(field, **kwargs)
+        else:
+            parser.add_argument(f"--{field}", metavar=field[0].upper(), **kwargs)
+    for field, kwargs in flag_fields.items():
+        if not store:  # an omitted flag leaves the field as it is, not at the default
+            kwargs = {k: v for k, v in kwargs.items() if k != "help"}
+        parser.add_argument("--" + field.replace("_", "-"), **kwargs)
+    parser.add_argument("--tag", action="append", metavar="TAG")
+    parser.add_argument("--meta", action="append", metavar="KEY=VALUE")
+
+
+def _item_params(args) -> dict:
+    """The tool arguments for a store/update command: every field given."""
+    main_fields, flag_fields = _FIELDS[args.item_type]
+    params = {}
+    for field in ("id", "namespace", *main_fields, *flag_fields):
+        val = getattr(args, field, None)
+        if val is not None:
             params[field] = val
-    if getattr(args, "tag", None):
+    if "content" in params:
+        params["content"] = _read_content(params["content"])
+    if args.tag:
         params["tags"] = args.tag
-    meta = _parse_meta(getattr(args, "meta", None))
+    meta = _parse_meta(args.meta)
     if meta:
         params["metadata"] = meta
     return params
-
-
-# Field lists per item type — shared by store and update command builders.
-_DOCUMENT_FIELDS = ["namespace", "title", "content", "mime_type"]
-_KNOWLEDGE_FIELDS = ["namespace", "subject", "fact", "confidence", "source"]
-_NOTE_FIELDS = ["namespace", "title", "content", "source"]
-
-# Update uses the same fields minus 'namespace' (immutable after creation).
-_UPDATE_FIELDS = {
-    "document": [f for f in _DOCUMENT_FIELDS if f != "namespace"],
-    "knowledge": [f for f in _KNOWLEDGE_FIELDS if f != "namespace"],
-    "note": [f for f in _NOTE_FIELDS if f != "namespace"],
-}
-
-_STORE_FIELDS = {
-    "document": _DOCUMENT_FIELDS,
-    "knowledge": _KNOWLEDGE_FIELDS,
-    "note": _NOTE_FIELDS,
-}
-
-
-def _cmd_tool(tool: str, args, client: MCPClient, pretty: bool,
-              fields: list[str], required: bool):
-    params = _collect_params(args, fields, required=required)
-    if "content" in params and isinstance(params["content"], str):
-        params["content"] = _read_content(params["content"])
-    _run(lambda: client.call_tool(tool, params), pretty)
 
 
 # ---------------------------------------------------------------------------
@@ -284,7 +283,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_search.add_argument("query")
     p_search.add_argument("-n", "--namespace", metavar="NS")
     p_search.add_argument("-t", "--type", metavar="TYPE",
-                          choices=["all", "documents", "knowledge", "notes"], default="all")
+                          choices=["all", *_RESOURCE_TYPES], default="all")
     p_search.add_argument("-l", "--limit", type=int, default=10, metavar="N")
     p_search.add_argument("-m", "--mode", metavar="MODE",
                           choices=["hybrid", "fulltext", "semantic"], default=None,
@@ -294,85 +293,26 @@ def _build_parser() -> argparse.ArgumentParser:
     p_search.add_argument("--updated-after", metavar="DATE",
                           help="Only items updated at or after this ISO date/datetime")
 
-    # -- store ----------------------------------------------------------------
-    p_store = sub.add_parser("store", help="Store content")
-    store_sub = p_store.add_subparsers(dest="store_type", metavar="TYPE")
-    store_sub.required = True
+    def per_type(command: str, help: str, item_help: str, types=_ITEM_TYPES):
+        """A `command TYPE ...` parser; returns the per-type subparsers."""
+        type_sub = sub.add_parser(command, help=help).add_subparsers(
+            dest="item_type", metavar="TYPE", required=True)
+        return {t: type_sub.add_parser(t, help=item_help.format(t)) for t in types}
 
-    p_store_doc = store_sub.add_parser("document", help="Store a document")
-    p_store_doc.add_argument("namespace")
-    p_store_doc.add_argument("title")
-    p_store_doc.add_argument("content", help="Content text, or '-' to read from stdin")
-    p_store_doc.add_argument("--mime-type", default="text/markdown", metavar="TYPE")
-    p_store_doc.add_argument("--tag", action="append", metavar="TAG")
-    p_store_doc.add_argument("--meta", action="append", metavar="KEY=VALUE")
+    # -- store / update -------------------------------------------------------
+    for item_type, p in per_type("store", "Store content", "Store a {}").items():
+        _add_item_args(p, item_type, store=True)
+    for item_type, p in per_type("update", "Update stored content", "Update a {}").items():
+        _add_item_args(p, item_type, store=False)
 
-    p_store_know = store_sub.add_parser("knowledge", help="Store a knowledge entry")
-    p_store_know.add_argument("namespace")
-    p_store_know.add_argument("subject")
-    p_store_know.add_argument("fact")
-    p_store_know.add_argument("--confidence", type=float, default=1.0, metavar="0.0-1.0")
-    p_store_know.add_argument("--source", default="unknown", metavar="SRC")
-    p_store_know.add_argument("--tag", action="append", metavar="TAG")
-
-    p_store_note = store_sub.add_parser("note", help="Store a note")
-    p_store_note.add_argument("namespace")
-    p_store_note.add_argument("title")
-    p_store_note.add_argument("content", help="Content text, or '-' to read from stdin")
-    p_store_note.add_argument("--source", metavar="SRC")
-    p_store_note.add_argument("--tag", action="append", metavar="TAG")
-
-    # -- update ---------------------------------------------------------------
-    p_update = sub.add_parser("update", help="Update stored content")
-    update_sub = p_update.add_subparsers(dest="update_type", metavar="TYPE")
-    update_sub.required = True
-
-    p_upd_doc = update_sub.add_parser("document", help="Update a document")
-    p_upd_doc.add_argument("id")
-    p_upd_doc.add_argument("--title", metavar="T")
-    p_upd_doc.add_argument("--content", metavar="C", help="Content text, or '-' to read from stdin")
-    p_upd_doc.add_argument("--mime-type", metavar="TYPE")
-    p_upd_doc.add_argument("--tag", action="append", metavar="TAG")
-    p_upd_doc.add_argument("--meta", action="append", metavar="KEY=VALUE")
-
-    p_upd_know = update_sub.add_parser("knowledge", help="Update a knowledge entry")
-    p_upd_know.add_argument("id")
-    p_upd_know.add_argument("--subject", metavar="S")
-    p_upd_know.add_argument("--fact", metavar="F")
-    p_upd_know.add_argument("--confidence", type=float, metavar="0.0-1.0")
-    p_upd_know.add_argument("--source", metavar="SRC")
-
-    p_upd_note = update_sub.add_parser("note", help="Update a note")
-    p_upd_note.add_argument("id")
-    p_upd_note.add_argument("--title", metavar="T")
-    p_upd_note.add_argument("--content", metavar="C", help="Content text, or '-' to read from stdin")
-    p_upd_note.add_argument("--source", metavar="SRC")
-
-    # -- delete ---------------------------------------------------------------
-    p_delete = sub.add_parser("delete", help="Delete stored content")
-    delete_sub = p_delete.add_subparsers(dest="delete_type", metavar="TYPE")
-    delete_sub.required = True
-
-    for dtype in _ITEM_TYPES:
-        p_del = delete_sub.add_parser(dtype, help=f"Delete a {dtype}")
-        p_del.add_argument("id")
-
-    # -- read -----------------------------------------------------------------
-    p_read = sub.add_parser("read", help="Read full content of an item by ID")
-    read_sub = p_read.add_subparsers(dest="read_type", metavar="TYPE")
-    read_sub.required = True
-    for rtype in _ITEM_TYPES:
-        p_r = read_sub.add_parser(rtype, help=f"Read a {rtype} by ID")
-        p_r.add_argument("id")
-
-    # -- get ------------------------------------------------------------------
-    p_get = sub.add_parser("get", help="Get a single item by ID (via resource URI)")
-    get_sub = p_get.add_subparsers(dest="get_type", metavar="TYPE")
-    get_sub.required = True
-
-    for gtype in _ITEM_TYPES:
-        p_g = get_sub.add_parser(gtype, help=f"Get a {gtype} by ID")
-        p_g.add_argument("id")
+    # -- delete / read / get --------------------------------------------------
+    for command, help, item_help in (
+        ("delete", "Delete stored content", "Delete a {}"),
+        ("read", "Read full content of an item by ID", "Read a {} by ID"),
+        ("get", "Get a single item by ID (via resource URI)", "Get a {} by ID"),
+    ):
+        for p in per_type(command, help, item_help).values():
+            p.add_argument("id")
 
     # -- tag ------------------------------------------------------------------
     p_tag = sub.add_parser("tag", help="Add/remove tags on an item")
@@ -403,17 +343,13 @@ def _build_parser() -> argparse.ArgumentParser:
                                "stdout (default: current directory)")
 
     # -- list -----------------------------------------------------------------
-    p_list = sub.add_parser("list", help="List content in a namespace")
-    list_sub = p_list.add_subparsers(dest="list_type", metavar="TYPE")
-    list_sub.required = True
-
-    for ltype in _RESOURCE_TYPES:
-        p_ls = list_sub.add_parser(ltype, help=f"List {ltype} in a namespace")
-        p_ls.add_argument("namespace")
-        p_ls.add_argument("-l", "--limit", type=int, default=None, metavar="N",
-                          help="Page size — switches to the paginated list_items tool (max 200)")
-        p_ls.add_argument("-o", "--offset", type=int, default=0, metavar="N",
-                          help="Items to skip, for fetching subsequent pages (requires --limit)")
+    for p in per_type("list", "List content in a namespace", "List {} in a namespace",
+                      _RESOURCE_TYPES).values():
+        p.add_argument("namespace")
+        p.add_argument("-l", "--limit", type=int, default=None, metavar="N",
+                       help="Page size — switches to the paginated list_items tool (max 200)")
+        p.add_argument("-o", "--offset", type=int, default=0, metavar="N",
+                       help="Items to skip, for fetching subsequent pages (requires --limit)")
 
     return root
 
@@ -456,8 +392,15 @@ def main():
     except (RuntimeError, ValueError) as exc:
         _err(str(exc))
 
-    pretty = args.pretty
+    try:
+        result = _dispatch(args, client)
+    except RuntimeError as exc:
+        _err(str(exc))
+    _out(result, args.pretty)
 
+
+def _dispatch(args, client: MCPClient):
+    """Make the one tool call or resource read *args* asks for."""
     match args.command:
         case "search":
             params = {
@@ -472,39 +415,30 @@ def main():
                 params["tags"] = args.tags
             if args.updated_after:
                 params["updated_after"] = args.updated_after
-            _run(lambda: client.call_tool("search", params), pretty)
-        case "store":
-            tool = f"store_{args.store_type}"
-            _cmd_tool(tool, args, client, pretty,
-                      _STORE_FIELDS[args.store_type], required=True)
-        case "update":
-            tool = f"update_{args.update_type}"
-            _cmd_tool(tool, args, client, pretty,
-                      _UPDATE_FIELDS[args.update_type], required=False)
+            return client.call_tool("search", params)
+        case "store" | "update":
+            return client.call_tool(f"{args.command}_{args.item_type}", _item_params(args))
         case "delete":
-            tool = f"delete_{args.delete_type}"
-            _run(lambda: client.call_tool(tool, {"id": args.id}), pretty)
+            return client.call_tool(f"delete_{args.item_type}", {"id": args.id})
         case "read":
-            _run(lambda: client.call_tool("read", {
-                "item_type": args.read_type, "id": args.id}), pretty)
+            return client.call_tool("read", {"item_type": args.item_type, "id": args.id})
         case "get":
-            uri = _GET_URI[args.get_type].format(id=args.id)
-            _run(lambda: client.read_resource(uri), pretty)
+            return client.read_resource(_GET_URI[args.item_type].format(id=args.id))
         case "tag":
-            params: dict = {"item_id": args.id, "item_type": args.type}
+            params = {"item_id": args.id, "item_type": args.type}
             if args.add:
                 params["add_tags"] = args.add
             if args.remove:
                 params["remove_tags"] = args.remove
-            _run(lambda: client.call_tool("tag", params), pretty)
+            return client.call_tool("tag", params)
         case "namespace":
             match args.ns_action:
                 case "list":
-                    _run(lambda: client.read_resource("mnemomatic://namespaces"), pretty)
+                    return client.read_resource("mnemomatic://namespaces")
                 case "rename":
-                    _run(lambda: client.call_tool("rename_namespace", {
+                    return client.call_tool("rename_namespace", {
                         "old_namespace": args.old_namespace,
-                        "new_namespace": args.new_namespace}), pretty)
+                        "new_namespace": args.new_namespace})
                 case "delete":
                     if not args.yes:
                         try:
@@ -514,21 +448,16 @@ def main():
                             )
                         except EOFError:
                             _err("Confirmation required. Use --yes to skip (for scripts and agents).")
-                        else:
-                            if confirm != args.namespace:
-                                _err("Aborted: namespace name did not match.")
-                    _run(lambda: client.call_tool("delete_namespace", {
-                        "namespace": args.namespace}), pretty)
+                        if confirm != args.namespace:
+                            _err("Aborted: namespace name did not match.")
+                    return client.call_tool("delete_namespace", {"namespace": args.namespace})
         case "list":
             if args.limit is not None:
                 # Paginated path via the list_items tool (server >= 1.2).
-                singular = {"documents": "document", "knowledge": "knowledge", "notes": "note"}
-                _run(lambda: client.call_tool("list_items", {
-                    "item_type": singular[args.list_type],
+                return client.call_tool("list_items", {
+                    "item_type": _SINGULAR[args.item_type],
                     "namespace": args.namespace,
                     "limit": args.limit,
                     "offset": args.offset,
-                }), pretty)
-            else:
-                _run(lambda: client.read_resource(
-                    f"mnemomatic://{args.list_type}/{args.namespace}"), pretty)
+                })
+            return client.read_resource(f"mnemomatic://{args.item_type}/{args.namespace}")

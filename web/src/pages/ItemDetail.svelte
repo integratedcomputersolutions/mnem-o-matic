@@ -6,7 +6,7 @@
   import StatusBadge from '../components/StatusBadge.svelte';
   import { api } from '../lib/api.js';
   import { remote } from '../lib/load.svelte.js';
-  import { seg } from '../lib/router.svelte.js';
+  import { seg, itemHref } from '../lib/router.svelte.js';
   import { fmtDate, fmtNumber, itemTitle, typeLabel } from '../lib/format.js';
 
   let { ns, type, id } = $props();
@@ -35,7 +35,7 @@
     <div class="stack">
       <Card title={type === 'knowledge' ? 'Fact' : 'Content'}>
         {#if type === 'knowledge' && it.valid_until}
-          <div class="alert warn mb">This fact was superseded on {fmtDate(it.valid_until)}{#if it.superseded_by} by <a href={`/browse/${seg(ns)}/knowledge/${seg(it.superseded_by)}`}>a newer entry</a>{/if}.</div>
+          <div class="alert warn mb">This fact was superseded on {fmtDate(it.valid_until)}{#if it.superseded_by} by <a href={itemHref(ns, 'knowledge', it.superseded_by)}>a newer entry</a>{/if}.</div>
         {/if}
         <pre class="content">{body}</pre>
       </Card>
@@ -88,7 +88,7 @@
           <ul class="rel">
             {#each related.data.related as r (r.id)}
               <li>
-                <a href={`/browse/${seg(r.namespace)}/${r.type}/${seg(r.id)}`}>{r.title}</a>
+                <a href={itemHref(r.namespace, r.type, r.id)}>{r.title}</a>
                 <span class="muted small"> · {r.namespace} · {Math.round(r.score * 100) / 100}</span>
               </li>
             {/each}

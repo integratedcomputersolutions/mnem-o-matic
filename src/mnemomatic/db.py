@@ -4,6 +4,7 @@ import os
 import sqlite3
 import struct
 import threading
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -139,6 +140,14 @@ _SPEC_BY_ITEM_TYPE: dict[str, _TableSpec] = {s.item_type: s for s in _SPECS.valu
 # server-state subjects the API writes events about.
 AUDIT_IDENTITY_TYPES = frozenset({"user", "token", "https"})
 _AUDIT_ITEM_TYPES = frozenset(_SPEC_BY_ITEM_TYPE) | AUDIT_IDENTITY_TYPES | {"schema"}
+
+
+def _spec(item_type: str) -> _TableSpec:
+    """The spec for a tool-facing item type, or ValueError naming the valid ones."""
+    spec = _SPEC_BY_ITEM_TYPE.get(item_type)
+    if spec is None:
+        raise ValueError(f"Invalid type {item_type!r}: must be 'document', 'knowledge', or 'note'")
+    return spec
 
 
 def _current_filter(table: str, alias: str = "") -> str:
@@ -286,6 +295,51 @@ def _item_column_values(item, columns) -> list:
             v = v.isoformat()
         values.append(v)
     return values
+
+
+def _eq_clauses(pairs) -> tuple[list[str], list]:
+    """`column = ?` clauses (and params) for each (column, value) pair whose value is set."""
+    clauses, params = [], []
+    for column, value in pairs:
+        if value is not None:
+            clauses.append(f"{column} = ?")
+            params.append(value)
+    return clauses, params
+
+
+def _insert_row(conn: sqlite3.Connection, table: str, item) -> int:
+    """Insert a model as a new row of its content table; returns the rowid. Does not commit."""
+    columns = _SPECS[table].columns
+    return conn.execute(
+        f"INSERT INTO {table} ({', '.join(columns)}) "
+        f"VALUES ({', '.join('?' * len(columns))}) RETURNING rowid",
+        _item_column_values(item, columns),
+    ).fetchone()["rowid"]
+
+
+def _insert_vec(conn: sqlite3.Connection, vec_table: str, rowid: int, namespace: str,
+                embedding: list[float]) -> None:
+    conn.execute(
+        f"INSERT INTO {vec_table} (rowid, namespace, embedding) VALUES (?, ?, ?)",
+        (rowid, namespace, _serialize_embedding(embedding)),
+    )
+
+
+def _knn(conn: sqlite3.Connection, vec_table: str, embedding: list[float], k: int,
+         namespace: str | None) -> list[dict]:
+    """The k nearest (rowid, distance) rows of a vec0 table, inside one namespace if given.
+
+    sqlite-vec requires LIMIT/k directly on a simple vec0 query, so this stays
+    a bare KNN; callers join the detail rows in a second query. The namespace
+    partition key filters inside the index, so a small namespace still yields
+    its own k nearest neighbors.
+    """
+    sql = f"SELECT rowid, distance FROM {vec_table} WHERE embedding MATCH ? AND k = ?"
+    params: list = [_serialize_embedding(embedding), k]
+    if namespace:
+        sql += " AND namespace = ?"
+        params.append(namespace)
+    return conn.execute(sql, params).fetchall()
 
 
 class Database:
@@ -890,10 +944,7 @@ class Database:
 
         Used by the reindex flow. Returns False when the item doesn't exist.
         """
-        spec = _SPEC_BY_ITEM_TYPE.get(item_type)
-        if spec is None:
-            raise ValueError(f"Invalid type {item_type!r}: must be 'document', 'knowledge', or 'note'")
-        table = spec.table
+        table = _spec(item_type).table
         conn = self._get_conn()
         row = conn.execute(
             f"SELECT rowid, namespace FROM {table} WHERE id = ?", (item_id,)
@@ -957,14 +1008,10 @@ class Database:
     def list_revisions(self, item_type: str | None = None, item_id: str | None = None,
                        namespace: str | None = None, limit: int = 20) -> list[dict]:
         """Revision summaries, newest first — no payloads, so listings stay small."""
-        if item_type is not None and item_type not in _SPEC_BY_ITEM_TYPE:
-            raise ValueError(f"Invalid type {item_type!r}: must be 'document', 'knowledge', or 'note'")
+        if item_type is not None:
+            _spec(item_type)
         sql = "SELECT id, item_type, item_id, namespace, title, op, revised_at FROM revisions"
-        clauses, params = [], []
-        for column, value in (("item_type", item_type), ("item_id", item_id), ("namespace", namespace)):
-            if value is not None:
-                clauses.append(f"{column} = ?")
-                params.append(value)
+        clauses, params = _eq_clauses((("item_type", item_type), ("item_id", item_id), ("namespace", namespace)))
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
         sql += " ORDER BY id DESC LIMIT ?"
@@ -1062,12 +1109,8 @@ class Database:
             raise ValueError(
                 f"Invalid type {item_type!r}: must be one of {', '.join(sorted(_AUDIT_ITEM_TYPES))}"
             )
-        clauses, params = [], []
-        for column, value in (("item_type", item_type), ("item_id", item_id),
-                              ("namespace", namespace), ("op", op), ("actor", actor)):
-            if value is not None:
-                clauses.append(f"{column} = ?")
-                params.append(value)
+        clauses, params = _eq_clauses((("item_type", item_type), ("item_id", item_id),
+                                       ("namespace", namespace), ("op", op), ("actor", actor)))
         if content_only:
             marks = ", ".join("?" * len(AUDIT_IDENTITY_TYPES))
             clauses.append(f"(item_type IS NULL OR item_type NOT IN ({marks}))")
@@ -1109,10 +1152,7 @@ class Database:
         mean of their chunk vectors stands in as a centroid — good enough
         for "more like this" neighbor queries.
         """
-        spec = _SPEC_BY_ITEM_TYPE.get(item_type)
-        if spec is None:
-            raise ValueError(f"Invalid type {item_type!r}: must be 'document', 'knowledge', or 'note'")
-        table = spec.table
+        table = _spec(item_type).table
         conn = self._get_conn()
         row = conn.execute(f"SELECT rowid FROM {table} WHERE id = ?", (item_id,)).fetchone()
         if row is None:
@@ -1143,10 +1183,7 @@ class Database:
     def find_by_key(self, item_type: str, namespace: str, key_value: str) -> str | None:
         """The id currently occupying (namespace, title/subject), or None. Used by
         restore to refuse recreating an item under a key another item now owns."""
-        spec = _SPEC_BY_ITEM_TYPE.get(item_type)
-        if spec is None:
-            raise ValueError(f"Invalid type {item_type!r}: must be 'document', 'knowledge', or 'note'")
-        table = spec.table
+        table = _spec(item_type).table
         row = self._get_conn().execute(
             f"SELECT id FROM {table} WHERE namespace = ? AND {_SPECS[table].title_field} = ?"
             f"{_current_filter(table)}",
@@ -1191,28 +1228,23 @@ class Database:
             conn.commit()
             return stored, False
 
-        rowid = conn.execute(
-            f"INSERT INTO {table} ({', '.join(columns)}) "
-            f"VALUES ({', '.join('?' * len(columns))}) RETURNING rowid",
-            _item_column_values(item, columns),
-        ).fetchone()["rowid"]
+        rowid = _insert_row(conn, table, item)
         if embedding is not None:
-            conn.execute(
-                f"INSERT INTO vec_{table} (rowid, namespace, embedding) VALUES (?, ?, ?)",
-                (rowid, item.namespace, _serialize_embedding(embedding)),
-            )
+            _insert_vec(conn, f"vec_{table}", rowid, item.namespace, embedding)
         if table == "documents":
             self._replace_document_chunks(conn, item.id, chunks, namespace=item.namespace)
         conn.commit()
         return item, True
 
-    def _get_item(self, table: str, item_id: str):
+    def get_item(self, item_type: str, item_id: str):
+        spec = _spec(item_type)
         row = self._get_conn().execute(
-            f"SELECT * FROM {table} WHERE id = ?", (item_id,)
+            f"SELECT * FROM {spec.table} WHERE id = ?", (item_id,)
         ).fetchone()
-        return _row_to_model(_SPECS[table].model, row) if row else None
+        return _row_to_model(spec.model, row) if row else None
 
-    def _delete_item(self, table: str, item_id: str) -> bool:
+    def delete_item(self, item_type: str, item_id: str) -> bool:
+        table = _spec(item_type).table
         conn = self._get_conn()
         row = conn.execute(
             f"DELETE FROM {table} WHERE id = ? RETURNING rowid, *", (item_id,)
@@ -1237,19 +1269,19 @@ class Database:
             (_serialize_embedding(embedding), rowid),
         ).rowcount
         if updated == 0:
-            conn.execute(
-                f"INSERT INTO {vec_table} (rowid, namespace, embedding) VALUES (?, ?, ?)",
-                (rowid, namespace, _serialize_embedding(embedding)),
-            )
+            _insert_vec(conn, vec_table, rowid, namespace, embedding)
 
-    def _list_items(self, table: str, namespace: str) -> list:
+    def list_items(self, item_type: str, namespace: str) -> list:
+        """Every current item of a type in a namespace, newest first."""
+        spec = _spec(item_type)
         rows = self._get_conn().execute(
-            f"SELECT * FROM {table} WHERE namespace = ?{_current_filter(table)} "
+            f"SELECT * FROM {spec.table} WHERE namespace = ?{_current_filter(spec.table)} "
             f"ORDER BY updated_at DESC", (namespace,)
         ).fetchall()
-        return [_row_to_model(_SPECS[table].model, r) for r in rows]
+        return [_row_to_model(spec.model, r) for r in rows]
 
-    def _update_item(self, table: str, item_id: str, embedding: list[float] | None, **fields):
+    def update_item(self, item_type: str, item_id: str, embedding: list[float] | None = None, **fields):
+        table = _spec(item_type).table
         invalid = set(fields) - _SPECS[table].update_fields
         if invalid:
             raise ValueError(f"Invalid {table} fields: {invalid}")
@@ -1283,16 +1315,16 @@ class Database:
         return self._store_item("documents", doc, embedding, chunks)
 
     def get_document(self, doc_id: str) -> Document | None:
-        return self._get_item("documents", doc_id)
+        return self.get_item("document", doc_id)
 
     def update_document(self, doc_id: str, embedding: list[float] | None = None, **fields) -> Document | None:
-        return self._update_item("documents", doc_id, embedding, **fields)
+        return self.update_item("document", doc_id, embedding, **fields)
 
     def delete_document(self, doc_id: str) -> bool:
-        return self._delete_item("documents", doc_id)
+        return self.delete_item("document", doc_id)
 
     def list_documents(self, namespace: str) -> list[Document]:
-        return self._list_items("documents", namespace)
+        return self.list_items("document", namespace)
 
     def replace_document_chunks(self, doc_id: str, chunks: list[tuple[str, list[float]]] | None) -> None:
         """Replace all chunks for a document. Deletes existing chunks, then inserts new ones if provided."""
@@ -1360,17 +1392,9 @@ class Database:
                 (now.isoformat(), stored.id, old_row["id"]),
             )
             conn.execute("DELETE FROM vec_knowledge WHERE rowid = ?", (old_row["rowid"],))
-            columns = _SPECS["knowledge"].columns
-            rowid = conn.execute(
-                f"INSERT INTO knowledge ({', '.join(columns)}) "
-                f"VALUES ({', '.join('?' * len(columns))}) RETURNING rowid",
-                _item_column_values(stored, columns),
-            ).fetchone()["rowid"]
+            rowid = _insert_row(conn, "knowledge", stored)
             if embedding is not None:
-                conn.execute(
-                    "INSERT INTO vec_knowledge (rowid, namespace, embedding) VALUES (?, ?, ?)",
-                    (rowid, stored.namespace, _serialize_embedding(embedding)),
-                )
+                _insert_vec(conn, "vec_knowledge", rowid, stored.namespace, embedding)
             conn.commit()
         except Exception:
             # A subject conflict on the successor insert must not leave the
@@ -1390,16 +1414,16 @@ class Database:
         return [_row_to_model(Knowledge, r) for r in rows]
 
     def get_knowledge(self, k_id: str) -> Knowledge | None:
-        return self._get_item("knowledge", k_id)
+        return self.get_item("knowledge", k_id)
 
     def update_knowledge(self, k_id: str, embedding: list[float] | None = None, **fields) -> Knowledge | None:
-        return self._update_item("knowledge", k_id, embedding, **fields)
+        return self.update_item("knowledge", k_id, embedding, **fields)
 
     def delete_knowledge(self, k_id: str) -> bool:
-        return self._delete_item("knowledge", k_id)
+        return self.delete_item("knowledge", k_id)
 
     def list_knowledge(self, namespace: str) -> list[Knowledge]:
-        return self._list_items("knowledge", namespace)
+        return self.list_items("knowledge", namespace)
 
     # ── Notes CRUD ──
 
@@ -1407,25 +1431,22 @@ class Database:
         return self._store_item("notes", note, embedding)
 
     def get_note(self, note_id: str) -> Note | None:
-        return self._get_item("notes", note_id)
+        return self.get_item("note", note_id)
 
     def update_note(self, note_id: str, embedding: list[float] | None = None, **fields) -> Note | None:
-        return self._update_item("notes", note_id, embedding, **fields)
+        return self.update_item("note", note_id, embedding, **fields)
 
     def delete_note(self, note_id: str) -> bool:
-        return self._delete_item("notes", note_id)
+        return self.delete_item("note", note_id)
 
     def list_notes(self, namespace: str) -> list[Note]:
-        return self._list_items("notes", namespace)
+        return self.list_items("note", namespace)
 
     # ── Tags ──
 
     def update_tags(self, item_id: str, item_type: str, add_tags: list[str] | None = None, remove_tags: list[str] | None = None) -> list[str]:
         conn = self._get_conn()
-        spec = _SPEC_BY_ITEM_TYPE.get(item_type)
-        if spec is None:
-            raise ValueError(f"Invalid type {item_type!r}: must be 'document', 'knowledge', or 'note'")
-        table = spec.table
+        table = _spec(item_type).table
         row = conn.execute(f"SELECT * FROM {table} WHERE id = ?", (item_id,)).fetchone()
         if not row:
             raise ValueError(f"{item_type} {item_id} not found")
@@ -1461,17 +1482,17 @@ class Database:
     def search_vec(self, embedding: list[float], table: str = "all", namespace: str | None = None, limit: int = 20,
                    tags: list[str] | None = None, updated_after: str | None = None) -> list[SearchResult]:
         results = []
-        if table in ("all", "documents"):
-            chunk_results = self._vec_search_document_chunks(embedding, namespace, limit, tags, updated_after)
-            chunked_ids = {r.id for r in chunk_results}
-            results.extend(chunk_results)
-            # Also search whole-doc vectors (small docs and pre-chunk legacy data)
-            for r in self._vec_search_table("documents", embedding, namespace, limit, tags, updated_after):
-                if r.id not in chunked_ids:
-                    results.append(r)
-        for t in ("knowledge", "notes"):
-            if table in ("all", t):
-                results.extend(self._vec_search_table(t, embedding, namespace, limit, tags, updated_after))
+        for t in _TABLES:
+            if table not in ("all", t):
+                continue
+            hits = self._vec_search_table(t, embedding, namespace, limit, tags, updated_after)
+            if t == "documents":
+                # Chunk hits first; whole-doc vectors cover small docs and
+                # pre-chunk legacy data.
+                chunk_hits = self._vec_search_document_chunks(embedding, namespace, limit, tags, updated_after)
+                chunked_ids = {r.id for r in chunk_hits}
+                hits = chunk_hits + [r for r in hits if r.id not in chunked_ids]
+            results.extend(hits)
         results.sort(key=lambda r: r.score, reverse=True)
         return results[:limit]
 
@@ -1482,22 +1503,18 @@ class Database:
 
         # Reciprocal Rank Fusion — rank-based merging that's immune to score scale differences
         k = 60  # standard RRF constant
-        rrf_scores: dict[str, dict] = {}
-
-        for rank, r in enumerate(fts_results):
-            rrf_scores[r.id] = {"result": r, "score": 1.0 / (k + rank + 1)}
-        for rank, r in enumerate(vec_results):
-            if r.id in rrf_scores:
-                rrf_scores[r.id]["score"] += 1.0 / (k + rank + 1)
-                # Prefer the semantic result: it may carry a precise chunk snippet
-                rrf_scores[r.id]["result"] = r
-            else:
-                rrf_scores[r.id] = {"result": r, "score": 1.0 / (k + rank + 1)}
+        scores: dict[str, float] = defaultdict(float)
+        best: dict[str, SearchResult] = {}
+        for ranked in (fts_results, vec_results):
+            for rank, r in enumerate(ranked):
+                scores[r.id] += 1.0 / (k + rank + 1)
+                # vec runs last, so the semantic result wins: it may carry a precise chunk snippet
+                best[r.id] = r
 
         merged = []
-        for entry in rrf_scores.values():
-            entry["result"].score = round(entry["score"], 6)
-            merged.append(entry["result"])
+        for item_id, r in best.items():
+            r.score = round(scores[item_id], 6)
+            merged.append(r)
 
         merged.sort(key=lambda r: r.score, reverse=True)
         return merged[:limit]
@@ -1577,14 +1594,11 @@ class Database:
         return counts
 
     def list_namespaces(self) -> list[str]:
-        rows = self._get_conn().execute("""
-            SELECT DISTINCT namespace FROM documents
-            UNION
-            SELECT DISTINCT namespace FROM knowledge WHERE valid_until IS NULL
-            UNION
-            SELECT DISTINCT namespace FROM notes
-            ORDER BY namespace
-        """).fetchall()
+        # Superseded-only namespaces don't count: _current_filter hides history.
+        union = " UNION ".join(
+            f"SELECT DISTINCT namespace FROM {t} WHERE 1=1{_current_filter(t)}" for t in _TABLES
+        )
+        rows = self._get_conn().execute(f"{union} ORDER BY namespace").fetchall()
         return [r["namespace"] for r in rows]
 
     def list_page(self, item_type: str, namespace: str, limit: int, offset: int) -> tuple[list[dict], int]:
@@ -1594,10 +1608,7 @@ class Database:
         resources — no document/note content, so a page stays small no matter
         how large the underlying items are.
         """
-        spec = _SPEC_BY_ITEM_TYPE.get(item_type)
-        if spec is None:
-            raise ValueError(f"Invalid type {item_type!r}: must be 'document', 'knowledge', or 'note'")
-        table = spec.table
+        table = _spec(item_type).table
         conn = self._get_conn()
         total = conn.execute(
             f"SELECT COUNT(*) AS n FROM {table} WHERE namespace = ?{_current_filter(table)}",
@@ -1660,24 +1671,16 @@ class Database:
     def _vec_search_table(self, table: str, embedding: list[float], namespace: str | None, limit: int,
                           tags: list[str] | None = None, updated_after: str | None = None) -> list[SearchResult]:
         conn = self._get_conn()
-        vec_table = f"vec_{table}"
 
         # sqlite-vec requires LIMIT to be directly on a simple vec0 query — JOINs and
         # CTEs hide the LIMIT from its query planner. So we do two queries:
         # 1. KNN scan on vec0 (satisfies LIMIT requirement) → rowids + distances.
-        #    The namespace partition key filters inside the index, so a small
-        #    namespace still yields its own `limit` nearest neighbors.
         # 2. Single IN lookup on the main table → all detail rows at once (not N+1)
         # Tag/recency filters can only apply at step 2, so the KNN over-fetches
         # to compensate for neighbors the filters will drop.
         filter_sql, filter_params = _item_filters(tags, updated_after)
         knn_limit = limit * 3 if filter_sql else limit
-        knn_sql = f"SELECT rowid, distance FROM {vec_table} WHERE embedding MATCH ? AND k = ?"
-        knn_params: list = [_serialize_embedding(embedding), knn_limit]
-        if namespace:
-            knn_sql += " AND namespace = ?"
-            knn_params.append(namespace)
-        vec_rows = conn.execute(knn_sql, knn_params).fetchall()
+        vec_rows = _knn(conn, f"vec_{table}", embedding, knn_limit, namespace)
 
         if not vec_rows:
             return []
@@ -1717,10 +1720,7 @@ class Database:
                 "INSERT INTO document_chunks (document_id, chunk_index, content) VALUES (?, ?, ?)",
                 (doc_id, i, content),
             )
-            conn.execute(
-                "INSERT INTO vec_document_chunks (rowid, namespace, embedding) VALUES (?, ?, ?)",
-                (cursor.lastrowid, namespace, _serialize_embedding(chunk_embedding)),
-            )
+            _insert_vec(conn, "vec_document_chunks", cursor.lastrowid, namespace, chunk_embedding)
 
     def _vec_search_document_chunks(self, embedding: list[float], namespace: str | None, limit: int,
                                     tags: list[str] | None = None, updated_after: str | None = None) -> list[SearchResult]:
@@ -1730,12 +1730,7 @@ class Database:
 
         # Namespace filtering happens inside the KNN via the partition key, so
         # the over-fetch only compensates for multiple chunks per document.
-        knn_sql = "SELECT rowid, distance FROM vec_document_chunks WHERE embedding MATCH ? AND k = ?"
-        knn_params: list = [_serialize_embedding(embedding), fetch_limit]
-        if namespace:
-            knn_sql += " AND namespace = ?"
-            knn_params.append(namespace)
-        vec_rows = conn.execute(knn_sql, knn_params).fetchall()
+        vec_rows = _knn(conn, "vec_document_chunks", embedding, fetch_limit, namespace)
         if not vec_rows:
             return []
 

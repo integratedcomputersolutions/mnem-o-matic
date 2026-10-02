@@ -4,12 +4,13 @@
   import StatTile from '../components/StatTile.svelte';
   import StatusBadge from '../components/StatusBadge.svelte';
   import Card from '../components/Card.svelte';
+  import TableCard from '../components/TableCard.svelte';
   import ErrorBox from '../components/ErrorBox.svelte';
   import Empty from '../components/Empty.svelte';
   import { api } from '../lib/api.js';
   import { remote } from '../lib/load.svelte.js';
   import { session, isAdmin } from '../lib/session.svelte.js';
-  import { seg } from '../lib/router.svelte.js';
+  import { seg, itemHref } from '../lib/router.svelte.js';
   import { fmtNumber, fmtRelative } from '../lib/format.js';
 
   const overview = remote({ namespaces: [], settings: null, events: [] });
@@ -83,7 +84,7 @@
               <td><code>{e.op}</code></td>
               <td class="truncate" style="max-width:260px">
                 {#if e.namespace && e.item_type && e.item_id && ['document','knowledge','note'].includes(e.item_type)}
-                  <a href={`/browse/${seg(e.namespace)}/${e.item_type}/${seg(e.item_id)}`}>{e.title || e.item_id}</a>
+                  <a href={itemHref(e.namespace, e.item_type, e.item_id)}>{e.title || e.item_id}</a>
                 {:else}{e.title || e.item_id || e.namespace || ''}{/if}
               </td>
             </tr>
@@ -96,19 +97,17 @@
 </div>
 
 {#if namespaces.length}
-  <Card title="Namespaces" flush>
-    <div class="table-wrap"><table class="table">
-      <thead><tr><th>Namespace</th><th class="num">Documents</th><th class="num">Knowledge</th><th class="num">Notes</th></tr></thead>
-      <tbody>
-        {#each namespaces as n (n.name)}
-          <tr>
-            <td><a href={`/browse/${seg(n.name)}`}>{n.name}</a></td>
-            <td class="num">{fmtNumber(n.documents)}</td><td class="num">{fmtNumber(n.knowledge)}</td><td class="num">{fmtNumber(n.notes)}</td>
-          </tr>
-        {/each}
-      </tbody>
-    </table></div>
-  </Card>
+  <TableCard title="Namespaces">
+    <thead><tr><th>Namespace</th><th class="num">Documents</th><th class="num">Knowledge</th><th class="num">Notes</th></tr></thead>
+    <tbody>
+      {#each namespaces as n (n.name)}
+        <tr>
+          <td><a href={`/browse/${seg(n.name)}`}>{n.name}</a></td>
+          <td class="num">{fmtNumber(n.documents)}</td><td class="num">{fmtNumber(n.knowledge)}</td><td class="num">{fmtNumber(n.notes)}</td>
+        </tr>
+      {/each}
+    </tbody>
+  </TableCard>
 {/if}
 
 <style>

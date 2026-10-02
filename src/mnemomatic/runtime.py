@@ -29,6 +29,7 @@ from mnemomatic.db import (
     Database,
     _chunk_text,
 )
+from mnemomatic.embeddings import MODEL_PATH
 from mnemomatic.identity import FirstRun, Identity
 
 logger = logging.getLogger("mnemomatic")
@@ -86,12 +87,11 @@ def _resolve_embedder():
             logger.error("Failed to initialize HTTP embedder: %s: %s", type(e).__name__, e)
         return None
 
-    model_path = os.environ.get("MNEMOMATIC_MODEL_PATH", "/app/model/model.onnx")
-    if os.path.exists(model_path):
+    if os.path.exists(MODEL_PATH):
         try:
             from mnemomatic.embeddings import OnnxEmbedder
             embedder = OnnxEmbedder()
-            logger.info("Embedder: %s (%s)", embedder.mode, model_path)
+            logger.info("Embedder: %s (%s)", embedder.mode, MODEL_PATH)
             _validate_embedding_dimension(embedder)
             return embedder
         except ImportError:
@@ -101,7 +101,7 @@ def _resolve_embedder():
         except Exception as e:
             logger.error("Unexpected error initializing embedder: %s: %s", type(e).__name__, e)
     else:
-        logger.warning("No embedding model found at %s — starting in FTS-only mode", model_path)
+        logger.warning("No embedding model found at %s — starting in FTS-only mode", MODEL_PATH)
     return None
 
 
@@ -274,6 +274,18 @@ def _embed_document_body(title: str, content: str) -> tuple[list[float] | None, 
         chunks = [(c, e) for c, e in zip(texts, embeddings) if e is not None]
         return None, (chunks or None)
     return _embed_content(f"{title}\n{content}"), None
+
+
+def _embed_item(item_type: str, item) -> tuple[list[float] | None, list[tuple[str, list[float]]] | None]:
+    """The search representation of a whole item, as (embedding, chunks).
+
+    Only documents ever chunk; knowledge and notes always return chunks=None.
+    """
+    if item_type == "document":
+        return _embed_document_body(item.title, item.content)
+    if item_type == "knowledge":
+        return _embed_content(_knowledge_embed_text(item.subject, item.fact)), None
+    return _embed_content(_note_embed_text(item.title, item.content)), None
 
 
 def _record_access(refs: list[tuple[str, str]]) -> None:

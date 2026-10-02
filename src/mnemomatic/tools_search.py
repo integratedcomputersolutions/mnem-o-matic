@@ -12,9 +12,111 @@ from mnemomatic.runtime import (
     _record_access,
     mcp,
 )
-from mnemomatic.tools_content import _OPS
 
 logger = logging.getLogger("mnemomatic")
+
+_ITEM_TYPES_HINT = f"Must be one of: {', '.join(sorted(_SPEC_BY_ITEM_TYPE))}"
+
+
+class SearchError(Exception):
+    """Why a search or related lookup has no results to give.
+
+    `body` is the error dict the MCP tools return as-is; `code` is the
+    machine-readable reason the web API reports.
+    """
+
+    def __init__(self, code: str, error: str, **body):
+        super().__init__(error)
+        self.code = code
+        self.body = {"error": error, **body}
+
+
+def _search(query: str, content_type: str = "all", namespace: str | None = None,
+            limit: int = 10, mode: str = "hybrid", tags: list[str] | None = None,
+            updated_after: str | None = None) -> tuple[list, bool]:
+    """The search itself, shared by the MCP tool and the web API.
+
+    Returns (results, degraded): degraded means hybrid fell back to fulltext.
+    Raises SearchError for anything the caller should report instead. Records
+    no usage — that is the MCP tool's business, not the web viewer's.
+    """
+    valid_types = {"documents", "knowledge", "notes", "all"}
+    if content_type not in valid_types:
+        raise SearchError("invalid_type", "Invalid content_type",
+                          details=f"Must be one of: {', '.join(sorted(valid_types))}")
+
+    valid_modes = {"hybrid", "fulltext", "semantic"}
+    if mode not in valid_modes:
+        raise SearchError("invalid_mode", "Invalid search mode",
+                          details=f"Must be one of: {', '.join(sorted(valid_modes))}")
+
+    if not query or not query.strip():
+        raise SearchError("missing_parameter", "Query cannot be empty",
+                          details="Provide a non-empty search query")
+
+    limit = max(1, min(int(limit), config.MAX_SEARCH_LIMIT))
+
+    if updated_after is not None:
+        try:
+            datetime.fromisoformat(updated_after)
+        except ValueError:
+            raise SearchError("invalid_parameter", "Invalid updated_after",
+                              details="Must be an ISO date or datetime, e.g. 2026-08-01 or 2026-08-01T12:00:00")
+
+    emb = runtime._embedder()
+    if mode == "semantic" and emb is None:
+        raise SearchError("search_failed", "Semantic search not available",
+                          details="No embedder configured. Set MNEMOMATIC_EMBED_URL or use the full image with the built-in model.")
+
+    # Semantic embedding uses the original query; FTS5 needs it escaped.
+    embedding = _embed_query(query) if mode != "fulltext" and emb is not None else None
+    if mode == "semantic" and embedding is None:
+        raise SearchError("search_failed", "Semantic search failed",
+                          details="Embedding service is unavailable. Try fulltext mode.")
+    # hybrid degrades to fulltext without an embedding; only a failed one is news
+    degraded = mode == "hybrid" and embedding is None
+    if degraded and emb is not None:
+        logger.info("Hybrid search degrading to fulltext due to embedding failure")
+
+    fts_query = _escape_fts_query(query)
+    scope = {"table": content_type, "namespace": namespace, "limit": limit,
+             "tags": tags or None, "updated_after": updated_after}
+    try:
+        if mode == "semantic":
+            results = runtime._db().search_vec(embedding, **scope)
+        elif embedding is not None:
+            results = runtime._db().search_hybrid(fts_query, embedding, **scope)
+        else:
+            results = runtime._db().search_fts(fts_query, **scope)
+    except sqlite3.Error as e:
+        # Escaping should keep FTS5 syntax errors out, but any residual DB
+        # error must come back as a tool-level error, not a protocol failure.
+        logger.warning("Search failed for query %r: %s", query, e)
+        raise SearchError("search_failed", "Search failed", details=str(e))
+    return results, degraded
+
+
+def _related(item_type: str, id: str, namespace: str | None = None, limit: int = 5) -> list:
+    """Nearest neighbours of an item, never the item itself. Shared by the
+    MCP tool and the web API; raises SearchError, records no usage."""
+    if item_type not in _SPEC_BY_ITEM_TYPE:
+        raise SearchError("invalid_type", "Invalid item_type", details=_ITEM_TYPES_HINT)
+    limit = max(1, min(int(limit), config.MAX_SEARCH_LIMIT))
+
+    if runtime._db().get_item(item_type, id) is None:
+        raise SearchError("not_found", f"{item_type} not found", id=id)
+    embedding = runtime._db().item_embedding(item_type, id)
+    if embedding is None:
+        raise SearchError("no_embedding", "No embedding for this item",
+                          details="The item has no stored vector (FTS-only mode, or stored before "
+                                  "an embedder was configured — a MNEMOMATIC_REINDEX=1 restart embeds it).")
+
+    try:
+        results = runtime._db().search_vec(embedding, table="all", namespace=namespace, limit=limit + 1)
+    except sqlite3.Error as e:
+        logger.warning("Related-items search failed for %s %s: %s", item_type, id, e)
+        raise SearchError("search_failed", "Related search failed", details=str(e))
+    return [r for r in results if r.id != id][:limit]
 
 
 @mcp.tool(annotations=config.ANN_READ_ONLY)
@@ -54,65 +156,10 @@ def search(
                        datetime, e.g. "2026-08-01" (optional). Useful for
                        "recent" queries; ordering is still by relevance.
     """
-    valid_types = {"documents", "knowledge", "notes", "all"}
-    if content_type not in valid_types:
-        return [{"error": "Invalid content_type", "details": f"Must be one of: {', '.join(sorted(valid_types))}"}]
-
-    valid_modes = {"hybrid", "fulltext", "semantic"}
-    if mode not in valid_modes:
-        return [{"error": "Invalid search mode", "details": f"Must be one of: {', '.join(sorted(valid_modes))}"}]
-
-    # Validate query is not empty
-    if not query or not query.strip():
-        return [{"error": "Query cannot be empty", "details": "Provide a non-empty search query"}]
-
-    limit = max(1, min(int(limit), config.MAX_SEARCH_LIMIT))
-
-    if updated_after is not None:
-        try:
-            datetime.fromisoformat(updated_after)
-        except ValueError:
-            return [{"error": "Invalid updated_after",
-                     "details": "Must be an ISO date or datetime, e.g. 2026-08-01 or 2026-08-01T12:00:00"}]
-    filters = {"tags": tags or None, "updated_after": updated_after}
-
-    # FTS5 needs special characters escaped; semantic embedding uses the original query
-    fts_query = _escape_fts_query(query)
-
-    table = content_type
-    emb = runtime._embedder()
-    degraded = False
-
-    if mode == "semantic" and emb is None:
-        return [{"error": "Semantic search not available",
-                 "details": "No embedder configured. Set MNEMOMATIC_EMBED_URL or use the full image with the built-in model."}]
-
     try:
-        # hybrid silently degrades to fulltext when no embedder is available
-        if mode == "fulltext" or (mode == "hybrid" and emb is None):
-            results = runtime._db().search_fts(fts_query, table=table, namespace=namespace, limit=limit, **filters)
-            if mode == "hybrid" and emb is None:
-                degraded = True
-        elif mode == "semantic":
-            embedding = _embed_query(query)
-            if embedding is None:
-                return [{"error": "Semantic search failed", "details": "Embedding service is unavailable. Try fulltext mode."}]
-            results = runtime._db().search_vec(embedding, table=table, namespace=namespace, limit=limit, **filters)
-        else:  # hybrid with embedder
-            embedding = _embed_query(query)
-            # If embedding fails, degrade to fulltext search
-            if embedding is None:
-                logger.info("Hybrid search degrading to fulltext due to embedding failure")
-                results = runtime._db().search_fts(fts_query, table=table, namespace=namespace, limit=limit, **filters)
-                degraded = True
-            else:
-                results = runtime._db().search_hybrid(fts_query, embedding, table=table, namespace=namespace, limit=limit, **filters)
-    except sqlite3.Error as e:
-        # Escaping should keep FTS5 syntax errors out, but any residual DB
-        # error must come back as a tool-level error, not a protocol failure.
-        logger.warning("Search failed for query %r: %s", query, e)
-        return [{"error": "Search failed", "details": str(e)}]
-
+        results, degraded = _search(query, content_type, namespace, limit, mode, tags, updated_after)
+    except SearchError as e:
+        return [e.body]
     _record_access([(r.type, r.id) for r in results])
 
     # Convert results to dicts and add degradation metadata if applicable
@@ -131,7 +178,7 @@ def search(
 
 def _get_resource(item_type: str, id: str) -> str:
     """Shared body for the get_* MCP resources: fetch by id, return JSON or a not-found error."""
-    obj = _OPS[item_type].get(runtime._db(), id)
+    obj = runtime._db().get_item(item_type, id)
     if obj is None:
         return json.dumps({"error": f"{item_type.capitalize()} {id} not found"})
     _record_access([(item_type, id)])
@@ -185,10 +232,9 @@ def read(item_type: str, id: str) -> dict:
         item_type: The item type — "document", "knowledge", or "note".
         id: The unique item ID (UUID returned by store/search).
     """
-    ops = _OPS.get(item_type)
-    if ops is None:
-        return {"error": "Invalid item_type", "details": f"Must be one of: {', '.join(sorted(_OPS))}"}
-    item = ops.get(runtime._db(), id)
+    if item_type not in _SPEC_BY_ITEM_TYPE:
+        return {"error": "Invalid item_type", "details": _ITEM_TYPES_HINT}
+    item = runtime._db().get_item(item_type, id)
     if item is None:
         return {"error": f"{item_type} not found", "id": id}
     _record_access([(item_type, id)])
@@ -214,24 +260,10 @@ def related(item_type: str, id: str, namespace: str | None = None, limit: int = 
                    search across all namespaces.
         limit: Maximum related items to return (default 5, max 100).
     """
-    if item_type not in _OPS:
-        return {"error": "Invalid item_type", "details": f"Must be one of: {', '.join(sorted(_OPS))}"}
-    limit = max(1, min(int(limit), config.MAX_SEARCH_LIMIT))
-
-    if _OPS[item_type].get(runtime._db(), id) is None:
-        return {"error": f"{item_type} not found", "id": id}
-    embedding = runtime._db().item_embedding(item_type, id)
-    if embedding is None:
-        return {"error": "No embedding for this item",
-                "details": "The item has no stored vector (FTS-only mode, or stored before "
-                           "an embedder was configured — a MNEMOMATIC_REINDEX=1 restart embeds it)."}
-
     try:
-        results = runtime._db().search_vec(embedding, table="all", namespace=namespace, limit=limit + 1)
-    except sqlite3.Error as e:
-        logger.warning("Related-items search failed for %s %s: %s", item_type, id, e)
-        return {"error": "Related search failed", "details": str(e)}
-    neighbors = [r for r in results if r.id != id][:limit]
+        neighbors = _related(item_type, id, namespace, limit)
+    except SearchError as e:
+        return e.body
     _record_access([(r.type, r.id) for r in neighbors])
     return {"item_type": item_type, "item_id": id,
             "related": [r.model_dump() for r in neighbors]}
@@ -253,7 +285,7 @@ def _list_resource(item_type: str, namespace: str) -> str:
     """Shared body for the per-namespace list resources: summaries only, with
     the projection taken from the table spec so it tracks the schema."""
     fields = _SPEC_BY_ITEM_TYPE[item_type].resource_fields
-    items = _OPS[item_type].list(runtime._db(), namespace)
+    items = runtime._db().list_items(item_type, namespace)
     return json.dumps([
         {f: _json_scalar(getattr(item, f)) for f in fields} for item in items
     ])

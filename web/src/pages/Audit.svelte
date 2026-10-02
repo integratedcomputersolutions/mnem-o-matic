@@ -2,12 +2,13 @@
   let { params = {} } = $props();
   import PageHeader from '../components/PageHeader.svelte';
   import Card from '../components/Card.svelte';
+  import TableCard from '../components/TableCard.svelte';
   import Empty from '../components/Empty.svelte';
   import ErrorBox from '../components/ErrorBox.svelte';
   import Pager from '../components/Pager.svelte';
   import { api, qs } from '../lib/api.js';
   import { remote } from '../lib/load.svelte.js';
-  import { seg } from '../lib/router.svelte.js';
+  import { itemHref } from '../lib/router.svelte.js';
   import { fmtDate } from '../lib/format.js';
 
   const LIMIT = 50;
@@ -50,31 +51,29 @@
   {#if page.data.events.length === 0}
     <div class="mt"><Empty text="No matching events." /></div>
   {:else}
-    <div class="mt"><Card flush>
-      <div class="table-wrap"><table class="table">
-        <thead><tr><th>When</th><th>Actor</th><th>Operation</th><th>Item</th><th>Via</th><th>Detail</th></tr></thead>
-        <tbody>
-          {#each page.data.events as e (e.id)}
-            <tr>
-              <td class="nowrap muted small">{fmtDate(e.ts)}</td>
-              <td>{e.actor || '—'}</td>
-              <td><code>{e.op}</code></td>
-              <td style="max-width:260px" class="truncate">
-                {#if e.namespace && ['document','knowledge','note'].includes(e.item_type) && e.item_id}
-                  <a href={`/browse/${seg(e.namespace)}/${e.item_type}/${seg(e.item_id)}`}>{e.title || e.item_id}</a>
-                  <span class="muted small"> · {e.namespace}</span>
-                {:else}
-                  {e.title || e.item_id || e.namespace || ''}{#if e.item_type}<span class="muted small"> ({e.item_type})</span>{/if}
-                {/if}
-              </td>
-              <td class="muted small nowrap">{e.detail?.token ? `token ${e.detail.token.name || e.detail.token.hint}` : (e.client ? e.client.split(' ')[0] : '—')}{#if e.ip}&nbsp;· {e.ip}{/if}</td>
-              <td class="muted small mono">{detailText(e.detail)}</td>
-            </tr>
-          {/each}
-        </tbody>
-      </table></div>
-      <div style="padding:0 16px 12px"><Pager total={page.data.total} limit={LIMIT} bind:offset /></div>
-    </Card></div>
+    <div class="mt"><TableCard>
+      <thead><tr><th>When</th><th>Actor</th><th>Operation</th><th>Item</th><th>Via</th><th>Detail</th></tr></thead>
+      <tbody>
+        {#each page.data.events as e (e.id)}
+          <tr>
+            <td class="nowrap muted small">{fmtDate(e.ts)}</td>
+            <td>{e.actor || '—'}</td>
+            <td><code>{e.op}</code></td>
+            <td style="max-width:260px" class="truncate">
+              {#if e.namespace && ['document','knowledge','note'].includes(e.item_type) && e.item_id}
+                <a href={itemHref(e.namespace, e.item_type, e.item_id)}>{e.title || e.item_id}</a>
+                <span class="muted small"> · {e.namespace}</span>
+              {:else}
+                {e.title || e.item_id || e.namespace || ''}{#if e.item_type}<span class="muted small"> ({e.item_type})</span>{/if}
+              {/if}
+            </td>
+            <td class="muted small nowrap">{e.detail?.token ? `token ${e.detail.token.name || e.detail.token.hint}` : (e.client ? e.client.split(' ')[0] : '—')}{#if e.ip}&nbsp;· {e.ip}{/if}</td>
+            <td class="muted small mono">{detailText(e.detail)}</td>
+          </tr>
+        {/each}
+      </tbody>
+      {#snippet footer()}<Pager total={page.data.total} limit={LIMIT} bind:offset />{/snippet}
+    </TableCard></div>
   {/if}
 {/if}
 

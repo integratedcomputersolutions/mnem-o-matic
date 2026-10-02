@@ -417,14 +417,13 @@ class TestSafeEmbedBatch(unittest.TestCase):
     def test_document_body_chunks_embed_as_one_batch(self):
         # A chunked document must produce exactly one embed_batch call, with
         # failed chunks dropped from the result.
-        from mnemomatic import server
         embedder = MagicMock()
         embedder.embed_batch.side_effect = lambda texts: [
             [0.1] if i % 2 == 0 else None for i in range(len(texts))
         ]
         content = ("paragraph text. " * 40 + "\n\n") * 5  # well over CHUNK_THRESHOLD
         with self._with_embedder(embedder):
-            embedding, chunks = server._embed_document_body("T", content)
+            embedding, chunks = runtime._embed_document_body("T", content)
         self.assertIsNone(embedding)
         embedder.embed_batch.assert_called_once()
         texts = embedder.embed_batch.call_args[0][0]
