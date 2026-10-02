@@ -5,12 +5,12 @@ from importlib.metadata import PackageNotFoundError, version
 
 from mnemomatic import config, runtime
 from mnemomatic.db import CHUNK_OVERLAP, CHUNK_SIZE, CHUNK_THRESHOLD
-from mnemomatic.runtime import _audit, mcp
+from mnemomatic.runtime import _audit, resource, tool
 
 logger = logging.getLogger("mnemomatic")
 
 
-@mcp.resource("mnemomatic://health")
+@resource("mnemomatic://health")
 def health() -> str:
     """Health check endpoint. Returns server status and configuration."""
     embedder = runtime._embedder()
@@ -61,15 +61,18 @@ async def _export_route(request):
     """GET /export[?namespace=...] — zip download. AuthMiddleware admits either
     a session cookie or a bearer token here; every download is audited under
     that identity, since the archive is the whole store."""
+    from starlette.concurrency import run_in_threadpool
     from starlette.responses import JSONResponse, Response
 
     namespace = request.query_params.get("namespace") or None
-    if namespace and namespace not in runtime._db().list_namespaces():
+    if namespace and namespace not in await run_in_threadpool(runtime._db().list_namespaces):
         return JSONResponse(
             {"error": "Namespace not found", "details": f"No items in namespace {namespace!r}"},
             status_code=404,
         )
-    data, filename = _make_export(namespace)
+    # Reading the whole store and zipping it takes a while on a big one; on a
+    # worker thread, other requests keep being served meanwhile.
+    data, filename = await run_in_threadpool(_make_export, namespace)
     _audit("export", namespace=namespace, filename=filename)
     return Response(
         data,
@@ -125,7 +128,7 @@ def _settings_info() -> dict:
     return info
 
 
-@mcp.tool(annotations=config.ANN_READ_ONLY)
+@tool(annotations=config.ANN_READ_ONLY)
 def embedding_info() -> dict:
     """Report which embedding model is in use, and whether it matches the index.
 
@@ -173,7 +176,7 @@ def embedding_info() -> dict:
     return result
 
 
-@mcp.tool(annotations=config.ANN_DELETE)
+@tool(annotations=config.ANN_DELETE)
 def delete_namespace(namespace: str) -> dict:
     """Delete all items in a namespace.
 
@@ -195,7 +198,7 @@ def delete_namespace(namespace: str) -> dict:
     }
 
 
-@mcp.tool(annotations=config.ANN_UPDATE)
+@tool(annotations=config.ANN_UPDATE)
 def rename_namespace(old_namespace: str, new_namespace: str) -> dict:
     """Rename a namespace across all documents, knowledge entries, and notes.
 

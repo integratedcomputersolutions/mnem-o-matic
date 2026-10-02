@@ -6,7 +6,6 @@ clusters from stored vectors + stale never-retrieved items), the clustering
 helper, and the consolidate/briefing prompts.
 """
 
-import asyncio
 import struct
 import unittest
 from unittest.mock import patch
@@ -35,7 +34,7 @@ def _clusters(vectors, threshold):
 
 
 def _report(**kwargs):
-    return asyncio.run(tools_history.consolidation_report(**kwargs))
+    return tools_history.consolidation_report(**kwargs)
 
 
 class ToolTestCase(unittest.TestCase):

@@ -601,13 +601,16 @@ def build_api_routes(*, identity, db_getter, settings_info, first_run: FirstRun,
 
     # Search and related go through the same core as the MCP tools, minus
     # their usage bookkeeping: browsing the viewer must not bump
-    # retrieval_count (see Database.record_access).
+    # retrieval_count (see Database.record_access). Both embed the query or
+    # scan vectors, which can take seconds (a remote embedder), so they run
+    # on a worker thread rather than holding up every other request.
 
     async def item_related(request: Request):
         from mnemomatic import tools_search
         item_type, obj = fetch_item(request)
         try:
-            neighbors = tools_search._related(item_type, obj.id, limit=_int_param(request, "limit", 5, 1, 20))
+            neighbors = await run_in_threadpool(
+                tools_search._related, item_type, obj.id, limit=_int_param(request, "limit", 5, 1, 20))
         except tools_search.SearchError as e:
             return _json({"related": [], "unavailable": e.body["error"]})
         return _json({"related": [r.model_dump() for r in neighbors]})
@@ -619,8 +622,9 @@ def build_api_routes(*, identity, db_getter, settings_info, first_run: FirstRun,
         if not query:
             raise ApiError("missing_parameter", 400, "'q' is required.")
         try:
-            results, degraded = tools_search._search(
-                query, content_type=q.get("type") or "all", namespace=q.get("namespace") or None,
+            results, degraded = await run_in_threadpool(
+                tools_search._search, query, content_type=q.get("type") or "all",
+                namespace=q.get("namespace") or None,
                 limit=_int_param(request, "limit", 20, 1, config.MAX_SEARCH_LIMIT),
                 mode=q.get("mode") or "hybrid")
         except tools_search.SearchError as e:

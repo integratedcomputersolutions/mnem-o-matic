@@ -10,7 +10,8 @@ from mnemomatic.runtime import (
     _embed_query,
     _escape_fts_query,
     _record_access,
-    mcp,
+    resource,
+    tool,
 )
 
 logger = logging.getLogger("mnemomatic")
@@ -119,7 +120,7 @@ def _related(item_type: str, id: str, namespace: str | None = None, limit: int =
     return [r for r in results if r.id != id][:limit]
 
 
-@mcp.tool(annotations=config.ANN_READ_ONLY)
+@tool(annotations=config.ANN_READ_ONLY)
 def search(
     query: str,
     content_type: str = "all",
@@ -185,7 +186,7 @@ def _get_resource(item_type: str, id: str) -> str:
     return obj.model_dump_json()
 
 
-@mcp.tool(annotations=config.ANN_READ_ONLY)
+@tool(annotations=config.ANN_READ_ONLY)
 def list_items(item_type: str, namespace: str, limit: int = 50, offset: int = 0) -> dict:
     """List items of one type in a namespace, newest first, with pagination.
 
@@ -221,7 +222,7 @@ def list_items(item_type: str, namespace: str, limit: int = 50, offset: int = 0)
     }
 
 
-@mcp.tool(annotations=config.ANN_READ_ONLY)
+@tool(annotations=config.ANN_READ_ONLY)
 def read(item_type: str, id: str) -> dict:
     """Read the full content of a document, knowledge entry, or note by ID.
 
@@ -241,7 +242,7 @@ def read(item_type: str, id: str) -> dict:
     return json.loads(item.model_dump_json())
 
 
-@mcp.tool(annotations=config.ANN_READ_ONLY)
+@tool(annotations=config.ANN_READ_ONLY)
 def related(item_type: str, id: str, namespace: str | None = None, limit: int = 5) -> dict:
     """Find items most similar to an existing item — "more like this".
 
@@ -269,7 +270,7 @@ def related(item_type: str, id: str, namespace: str | None = None, limit: int = 
             "related": [r.model_dump() for r in neighbors]}
 
 
-@mcp.resource("mnemomatic://namespaces")
+@resource("mnemomatic://namespaces")
 def list_namespaces() -> str:
     """List all namespaces in Mnem-O-matic."""
     namespaces = runtime._db().list_namespaces()
@@ -291,37 +292,37 @@ def _list_resource(item_type: str, namespace: str) -> str:
     ])
 
 
-@mcp.resource("mnemomatic://documents/{namespace}")
+@resource("mnemomatic://documents/{namespace}")
 def list_documents(namespace: str) -> str:
     """List all documents in a namespace."""
     return _list_resource("document", namespace)
 
 
-@mcp.resource("mnemomatic://knowledge/{namespace}")
+@resource("mnemomatic://knowledge/{namespace}")
 def list_knowledge(namespace: str) -> str:
     """List all knowledge entries in a namespace."""
     return _list_resource("knowledge", namespace)
 
 
-@mcp.resource("mnemomatic://notes/{namespace}")
+@resource("mnemomatic://notes/{namespace}")
 def list_notes(namespace: str) -> str:
     """List all notes in a namespace."""
     return _list_resource("note", namespace)
 
 
-@mcp.resource("mnemomatic://note/{id}")
+@resource("mnemomatic://note/{id}")
 def get_note(id: str) -> str:
     """Get a specific note by ID."""
     return _get_resource("note", id)
 
 
-@mcp.resource("mnemomatic://document/{id}")
+@resource("mnemomatic://document/{id}")
 def get_document(id: str) -> str:
     """Get a specific document by ID."""
     return _get_resource("document", id)
 
 
-@mcp.resource("mnemomatic://knowledge-entry/{id}")
+@resource("mnemomatic://knowledge-entry/{id}")
 def get_knowledge_entry(id: str) -> str:
     """Get a specific knowledge entry by ID."""
     return _get_resource("knowledge", id)

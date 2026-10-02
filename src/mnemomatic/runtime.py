@@ -12,11 +12,13 @@ real database. Everything else here is a pure helper and is safe to import
 directly.
 """
 
+import functools
 import logging
 import os
 import re
 import threading
 
+import anyio
 from mcp.server.fastmcp import FastMCP
 from pydantic import ValidationError
 
@@ -40,6 +42,37 @@ mcp = FastMCP(
     host=config.HOST,
     port=config.PORT,
 )
+
+
+# FastMCP calls a synchronous tool or resource function inline, on the event
+# loop. Ours do SQLite queries, ONNX inference, or a remote embedding call
+# that may take MNEMOMATIC_EMBED_TIMEOUT seconds, so a few concurrent calls
+# would stall every other request (sign-ins, the UI, other agents). These
+# register a wrapper that runs the function on a worker thread instead, and
+# hand back the plain function so modules and tests keep calling it directly.
+# Contextvars (the audit log's request meta) follow the call to the thread.
+
+def _offloaded(fn):
+    @functools.wraps(fn)
+    async def run(*args, **kwargs):
+        return await anyio.to_thread.run_sync(functools.partial(fn, *args, **kwargs))
+    return run
+
+
+def tool(**kwargs):
+    """`mcp.tool`, with the function run off the event loop."""
+    def register(fn):
+        mcp.tool(**kwargs)(_offloaded(fn))
+        return fn
+    return register
+
+
+def resource(uri: str, **kwargs):
+    """`mcp.resource`, with the function run off the event loop."""
+    def register(fn):
+        mcp.resource(uri, **kwargs)(_offloaded(fn))
+        return fn
+    return register
 
 db: Database | None = None
 _db_lock = threading.Lock()

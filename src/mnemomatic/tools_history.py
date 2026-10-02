@@ -3,7 +3,6 @@ the consolidation report, and the maintenance prompts."""
 import json
 from datetime import datetime, timedelta, timezone
 
-import anyio
 from pydantic import ValidationError
 
 try:
@@ -20,6 +19,7 @@ from mnemomatic.runtime import (
     _format_validation_error,
     _record_access,
     mcp,
+    tool,
 )
 from mnemomatic.tools_content import _handle_update
 
@@ -31,7 +31,7 @@ MAX_CLUSTER_PAIRS = 100_000
 _MAX_STALE_DAYS = 36_500
 
 
-@mcp.tool(annotations=config.ANN_READ_ONLY)
+@tool(annotations=config.ANN_READ_ONLY)
 def fact_history(namespace: str, subject: str) -> dict:
     """The full timeline of a fact: the current entry first, then every
     superseded version, newest first.
@@ -59,7 +59,7 @@ def fact_history(namespace: str, subject: str) -> dict:
     }
 
 
-@mcp.tool(annotations=config.ANN_READ_ONLY)
+@tool(annotations=config.ANN_READ_ONLY)
 def list_revisions(
     item_type: str | None = None,
     item_id: str | None = None,
@@ -92,7 +92,7 @@ def list_revisions(
     return {"revisions": revisions, "limit": limit}
 
 
-@mcp.tool(annotations=config.ANN_READ_ONLY)
+@tool(annotations=config.ANN_READ_ONLY)
 def list_audit(
     item_type: str | None = None,
     item_id: str | None = None,
@@ -131,7 +131,7 @@ def list_audit(
     return {"events": events, "limit": limit}
 
 
-@mcp.tool(annotations=config.ANN_UPDATE)
+@tool(annotations=config.ANN_UPDATE)
 def restore(revision_id: int) -> dict:
     """Restore an item to a saved revision — undo an update or recover a deleted item.
 
@@ -260,9 +260,9 @@ def _cluster_namespace(vectors_by_type: dict[str, list], threshold: float) -> tu
     return clusters, truncated
 
 
-@mcp.tool(annotations=config.ANN_READ_ONLY)
-async def consolidation_report(namespace: str, similarity_threshold: float | None = None,
-                               stale_days: int = 90) -> dict:
+@tool(annotations=config.ANN_READ_ONLY)
+def consolidation_report(namespace: str, similarity_threshold: float | None = None,
+                         stale_days: int = 90) -> dict:
     """Mechanical consolidation candidates for a namespace: near-duplicate
     clusters and stale items. The report only flags — reviewing each candidate
     and deciding to merge, supersede, tag, delete, or keep is your job (the
@@ -300,10 +300,8 @@ async def consolidation_report(namespace: str, similarity_threshold: float | Non
             "use the full image to cluster near-duplicates."
         )
     else:
-        # Reads stay on this thread (one SQLite connection per thread); the
-        # number crunching moves off the event loop so other requests keep flowing.
         vectors = {spec.item_type: db.item_vectors(table, namespace) for table, spec in _SPECS.items()}
-        clusters, truncated = await anyio.to_thread.run_sync(_cluster_namespace, vectors, threshold)
+        clusters, truncated = _cluster_namespace(vectors, threshold)
     report["duplicate_clusters"] = clusters
     if truncated:
         report["duplicate_clusters_truncated"] = True

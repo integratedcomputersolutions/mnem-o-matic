@@ -23,11 +23,11 @@ from mnemomatic.runtime import (
     _knowledge_embed_text,
     _note_embed_text,
     _similar_items,
-    mcp,
+    tool,
 )
 
 
-@mcp.tool(annotations=config.ANN_STORE)
+@tool(annotations=config.ANN_STORE)
 def store_document(
     namespace: str,
     title: str,
@@ -81,7 +81,7 @@ def store_document(
     return _finish_store("document", stored, created, embedding)
 
 
-@mcp.tool(annotations=config.ANN_STORE)
+@tool(annotations=config.ANN_STORE)
 def store_knowledge(
     namespace: str,
     subject: str,
@@ -278,7 +278,7 @@ def _supersede_update(existing: Knowledge, fields: dict) -> dict:
     return {"id": stored.id, "subject": stored.subject, "updated": True, "superseded": existing.id}
 
 
-@mcp.tool(annotations=config.ANN_UPDATE)
+@tool(annotations=config.ANN_UPDATE)
 def update_document(
     id: str,
     title: str | None = None,
@@ -308,7 +308,7 @@ def update_document(
     return _handle_update("document", id, fields)
 
 
-@mcp.tool(annotations=config.ANN_UPDATE)
+@tool(annotations=config.ANN_UPDATE)
 def update_knowledge(
     id: str,
     subject: str | None = None,
@@ -339,7 +339,7 @@ def update_knowledge(
     return _handle_update("knowledge", id, fields)
 
 
-@mcp.tool(annotations=config.ANN_DELETE)
+@tool(annotations=config.ANN_DELETE)
 def delete_document(id: str) -> dict:
     """Delete a document from Mnem-O-matic.
 
@@ -355,7 +355,7 @@ def delete_document(id: str) -> dict:
     return _handle_delete("document", id)
 
 
-@mcp.tool(annotations=config.ANN_DELETE)
+@tool(annotations=config.ANN_DELETE)
 def delete_knowledge(id: str) -> dict:
     """Delete a knowledge entry from Mnem-O-matic.
 
@@ -370,7 +370,7 @@ def delete_knowledge(id: str) -> dict:
     return _handle_delete("knowledge", id)
 
 
-@mcp.tool(annotations=config.ANN_STORE)
+@tool(annotations=config.ANN_STORE)
 def store_note(
     namespace: str,
     title: str,
@@ -422,7 +422,7 @@ def store_note(
     return _finish_store("note", stored, created, embedding)
 
 
-@mcp.tool(annotations=config.ANN_UPDATE)
+@tool(annotations=config.ANN_UPDATE)
 def update_note(
     id: str,
     title: str | None = None,
@@ -450,7 +450,7 @@ def update_note(
     return _handle_update("note", id, fields)
 
 
-@mcp.tool(annotations=config.ANN_DELETE)
+@tool(annotations=config.ANN_DELETE)
 def delete_note(id: str) -> dict:
     """Delete a note from Mnem-O-matic.
 
@@ -466,7 +466,7 @@ def delete_note(id: str) -> dict:
     return _handle_delete("note", id)
 
 
-@mcp.tool(annotations=config.ANN_TAG)
+@tool(annotations=config.ANN_TAG)
 def tag(
     item_id: str,
     item_type: str,
