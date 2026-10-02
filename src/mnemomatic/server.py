@@ -275,8 +275,14 @@ def main():
 
     app = CompactToolsMiddleware(app)
 
-    # CSP, nosniff, referrer policy (and HSTS over TLS) on everything but /mcp.
-    app = SecurityHeadersMiddleware(app, pending_origin=tls.pending_origin if tls else None)
+    # CSP, nosniff, referrer policy on everything but /mcp. HSTS only once
+    # HTTPS is confirmed and only on 443: it binds to the hostname, not the
+    # port, and would otherwise send browsers to https://host:<plain port>.
+    app = SecurityHeadersMiddleware(
+        app,
+        pending_origin=tls.pending_origin if tls else None,
+        hsts=(lambda: tls.active() and config.HTTPS_PORT == 443) if tls else None,
+    )
 
     # Capture the principal, client and ip per request for the audit log.
     # Inside AuthMiddleware, which is what puts the principal in the scope.

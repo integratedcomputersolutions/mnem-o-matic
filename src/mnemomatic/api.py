@@ -172,13 +172,20 @@ class SecurityHeadersMiddleware:
     scoped styles are extracted; `style=` attributes remain), and network
     calls to this origin plus — only while an HTTPS name is pending
     confirmation — the new HTTPS origin, so the browser can fetch the
-    instance id from it. HSTS is sent only on connections that are already
-    HTTPS; sending it over plain HTTP would be ignored anyway.
+    instance id from it.
+
+    HSTS is a hostname-wide instruction — browsers ignore the port — so it
+    is sent only when `hsts()` says so: once HTTPS is confirmed, and only on
+    port 443, where the upgrade a browser performs lands on the TLS listener.
+    Sent any earlier, or on another port, it would make the browser upgrade
+    http://host:8000 to https://host:8000 — the plain listener — and lock
+    the person out of the very page they were confirming from.
     """
 
-    def __init__(self, app: ASGIApp, pending_origin=None):
+    def __init__(self, app: ASGIApp, pending_origin=None, hsts=None):
         self.app = app
         self._pending_origin = pending_origin or (lambda: None)
+        self._hsts = hsts or (lambda: False)
 
     def _csp(self) -> str:
         connect = "'self'"
@@ -194,7 +201,7 @@ class SecurityHeadersMiddleware:
         if scope["type"] != "http" or scope["path"] == "/mcp" or scope["path"].startswith("/mcp/"):
             await self.app(scope, receive, send)
             return
-        https = scope.get("scheme") == "https"
+        https = scope.get("scheme") == "https" and self._hsts()
 
         async def guarded_send(message):
             if message["type"] == "http.response.start":

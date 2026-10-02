@@ -24,14 +24,15 @@ class ApiCase(unittest.TestCase):
         self.fx = IdentityFixture()
         self.addCleanup(self.fx.close)
         self.first_run = FirstRun()
-        self.pending = {"origin": None}
+        self.pending = {"origin": None, "hsts": False}
         mount = build_api_routes(identity=lambda: self.fx.identity, db_getter=lambda: self.fx.db,
                                  settings_info=lambda: dict(SETTINGS), first_run=self.first_run,
                                  https=None)
         app = Starlette(routes=[mount])
         app = RequestMetaMiddleware(app)
         app = AuthMiddleware(app, identity=lambda: self.fx.identity)
-        app = SecurityHeadersMiddleware(app, pending_origin=lambda: self.pending["origin"])
+        app = SecurityHeadersMiddleware(app, pending_origin=lambda: self.pending["origin"],
+                                        hsts=lambda: self.pending["hsts"])
         self.client = TestClient(app, base_url="http://testserver")
         # The tool modules reach the database through runtime._db.
         self._patches = [patch.object(runtime, "_db", return_value=self.fx.db),
@@ -79,10 +80,14 @@ class TestConventions(ApiCase):
         csp = self.client.get("/api/session").headers["content-security-policy"]
         self.assertIn("connect-src 'self' https://memory.example:8443;", csp)
 
-    def test_hsts_over_https(self):
+    def test_hsts_only_when_enabled_and_only_over_https(self):
         https = TestClient(self.client.app, base_url="https://testserver")
-        resp = https.get("/api/session")
-        self.assertEqual(resp.headers["strict-transport-security"], "max-age=31536000")
+        # Pending or non-443: never, even over HTTPS — HSTS binds to the host,
+        # not the port, and would redirect browsers at the plain listener.
+        self.assertNotIn("strict-transport-security", https.get("/api/session").headers)
+        self.pending["hsts"] = True
+        self.assertEqual(https.get("/api/session").headers["strict-transport-security"], "max-age=31536000")
+        self.assertNotIn("strict-transport-security", self.client.get("/api/session").headers)
 
     def test_origin_guard(self):
         body = {"username": "admin", "password": IdentityFixture.ADMIN_PASSWORD}
