@@ -37,7 +37,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from mnemomatic import config
 from mnemomatic import db as db_module
-from mnemomatic.audit import request_meta
+from mnemomatic.audit import request_meta, write_event
 from mnemomatic.auth import COOKIE_NAME
 from mnemomatic.db import _SPEC_BY_ITEM_TYPE
 from mnemomatic.tlsca import TlsError
@@ -238,15 +238,8 @@ def build_api_routes(*, identity, db_getter, settings_info, first_run: FirstRun,
 
     def record(op: str, *, actor: str | None = None, item_type: str | None = None,
                item_id: str | None = None, title: str | None = None, **detail) -> None:
-        """An audit row for an identity operation. Actor defaults to the
-        authenticated user; login-time events name the user explicitly."""
-        meta = request_meta()
-        try:
-            db_getter().append_audit(op, item_type=item_type, item_id=item_id, title=title,
-                                     actor=actor or meta.get("user"), client=meta.get("client"),
-                                     ip=meta.get("ip"), detail=detail or None)
-        except Exception as e:  # never let bookkeeping break the request
-            logger.warning("Audit write failed: %s: %s", type(e).__name__, e)
+        """An audit row for an identity operation (see audit.write_event)."""
+        write_event(db_getter(), op, actor=actor, item_type=item_type, item_id=item_id, title=title, **detail)
 
     def https_status() -> dict:
         if https is None or config.TLS_MODE == "off":

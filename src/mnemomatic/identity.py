@@ -31,6 +31,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
+from mnemomatic.audit import write_event
 from mnemomatic.throttle import FailureThrottle
 
 logger = logging.getLogger("mnemomatic")
@@ -402,12 +403,21 @@ class Identity:
             raise IdentityError("last_admin", 409,
                                 "This is the only active administrator; add another first.")
 
-    def set_active(self, user_id: int, active: bool, *, acting_user_id: int) -> User:
+    def _target(self, user_id: int, acting_user_id: int, *, self_message: str,
+                may_remove_admin: bool) -> User:
+        """The user an admin operation acts on, once the two rules every such
+        operation shares have been checked: never on yourself, and never in a
+        way that leaves no active administrator."""
         target = self._require_user(user_id)
         if target.id == acting_user_id:
-            raise IdentityError("self_action", 403, "You cannot change your own account's status.")
-        if not active:
+            raise IdentityError("self_action", 403, self_message)
+        if not may_remove_admin:
             self._guard_last_admin(target)
+        return target
+
+    def set_active(self, user_id: int, active: bool, *, acting_user_id: int) -> User:
+        self._target(user_id, acting_user_id, self_message="You cannot change your own account's status.",
+                     may_remove_admin=active)
         conn = self._conn()
         conn.execute("UPDATE users SET active = ? WHERE id = ?", (1 if active else 0, user_id))
         if not active:
@@ -420,21 +430,16 @@ class Identity:
     def set_role(self, user_id: int, role: str, *, acting_user_id: int) -> User:
         if role not in ROLES:
             raise IdentityError("invalid_role", 400, f"Role must be one of: {', '.join(ROLES)}.")
-        target = self._require_user(user_id)
-        if target.id == acting_user_id:
-            raise IdentityError("self_action", 403, "You cannot change your own role.")
-        if role != "admin":
-            self._guard_last_admin(target)
+        self._target(user_id, acting_user_id, self_message="You cannot change your own role.",
+                     may_remove_admin=(role == "admin"))
         conn = self._conn()
         conn.execute("UPDATE users SET role = ? WHERE id = ?", (role, user_id))
         conn.commit()
         return self.get_user(user_id)
 
     def delete_user(self, user_id: int, *, acting_user_id: int) -> User:
-        target = self._require_user(user_id)
-        if target.id == acting_user_id:
-            raise IdentityError("self_action", 403, "You cannot delete your own account.")
-        self._guard_last_admin(target)
+        target = self._target(user_id, acting_user_id, self_message="You cannot delete your own account.",
+                              may_remove_admin=False)
         conn = self._conn()
         conn.execute("DELETE FROM users WHERE id = ?", (user_id,))   # cascades to sessions/tokens
         conn.commit()
@@ -444,10 +449,9 @@ class Identity:
         """Issue a temporary password for `user_id` and end their sessions.
         Returns (temporary_password, expires_at). Tokens keep working: resetting
         a forgotten password should not silently break the person's agents."""
-        target = self._require_user(user_id)
-        if target.id == acting_user_id:
-            raise IdentityError("self_action", 403,
-                                "Change your own password from the account page instead.")
+        self._target(user_id, acting_user_id,
+                     self_message="Change your own password from the account page instead.",
+                     may_remove_admin=True)       # a reset leaves the account in place
         temp = generate_temp_password()
         expires = _iso(_now() + TEMP_PASSWORD_TTL)
         conn = self._conn()
@@ -676,8 +680,7 @@ def ensure_bootstrap(identity: Identity, first_run: FirstRun, admin_password: st
     if admin_password:
         identity.create_user("admin", role="admin", display_name="Administrator",
                              password=admin_password)
-        identity._db.append_audit("admin.created", item_type="user", item_id="admin",
-                                  actor="system", detail={"source": "env"})
+        write_event(identity._db, "admin.created", actor="system", item_type="user", item_id="admin", source="env")
         logger.info("Created the initial 'admin' user from MNEMOMATIC_ADMIN_PASSWORD")
         return
     code = first_run.issue()

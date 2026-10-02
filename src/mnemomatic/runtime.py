@@ -21,7 +21,7 @@ from mcp.server.fastmcp import FastMCP
 from pydantic import ValidationError
 
 from mnemomatic import config
-from mnemomatic.audit import request_meta
+from mnemomatic.audit import write_event
 from mnemomatic.db import (
     CHUNK_OVERLAP,
     CHUNK_SIZE,
@@ -286,25 +286,10 @@ def _record_access(refs: list[tuple[str, str]]) -> None:
 
 def _audit(op: str, *, item_type: str | None = None, item_id: str | None = None,
            namespace: str | None = None, title: str | None = None, **detail) -> None:
-    """Append an audit event, enriched with the request's identity fields.
-
-    The actor is the authenticated username. A token's id, hint and name go
-    in the detail so the event stays readable after the token is revoked, and the
-    optional X-Mnemomatic-Actor header is kept as a `label` — a sub-identity
-    the person chose for one of their clients, not an identity in itself.
-
-    Called from the write tools' success paths only; a failing audit write is
-    logged and never breaks the operation it describes.
-    """
+    """Append an audit event for a write tool's success path (see audit.write_event)."""
     try:
-        meta = request_meta()
-        if meta.get("token_id") is not None:
-            detail["token"] = {"id": meta["token_id"], "hint": meta["token_hint"], "name": meta.get("token_name")}
-        if meta.get("actor"):
-            detail["label"] = meta["actor"]
-        _db().append_audit(op, item_type=item_type, item_id=item_id,
-                           namespace=namespace, title=title,
-                           actor=meta.get("user"), client=meta["client"], ip=meta["ip"],
-                           detail=detail or None)
+        db = _db()
     except Exception as e:
         logger.warning("Audit write failed: %s: %s", type(e).__name__, e)
+        return
+    write_event(db, op, item_type=item_type, item_id=item_id, namespace=namespace, title=title, **detail)

@@ -15,6 +15,7 @@ import sys
 
 from mnemomatic import config
 from mnemomatic.db import Database
+from mnemomatic.audit import write_event
 from mnemomatic.identity import Identity, IdentityError
 
 
@@ -30,8 +31,7 @@ def cmd_create_admin(args) -> int:
     except IdentityError as e:
         print(f"error: {e.details}", file=sys.stderr)
         return 1
-    db.append_audit("admin.created", item_type="user", item_id=user.username, actor="cli",
-                    detail={"source": "cli"})
+    write_event(db, "admin.created", actor="cli", item_type="user", item_id=user.username, source="cli")
     print(f"Created admin {user.username!r}.")
     print(f"Temporary password (valid 7 days, must be changed at first login): {temp}")
     return 0
@@ -51,8 +51,8 @@ def cmd_reset_password(args) -> int:
         conn.execute("UPDATE users SET active = 1 WHERE id = ?", (user.id,))
         conn.commit()
         print(f"Reactivated {user.username!r}.")
-    db.append_audit("password.reset", item_type="user", item_id=user.username, actor="cli",
-                    detail={"source": "cli", "expires_at": expires})
+    write_event(db, "password.reset", actor="cli", item_type="user", item_id=user.username,
+                source="cli", expires_at=expires)
     print(f"Temporary password for {user.username!r} (valid until {expires}): {temp}")
     return 0
 

@@ -21,9 +21,12 @@ responses pass through untouched. It sits *inside* AuthMiddleware, which is
 where the principal in ``scope["state"]`` comes from.
 """
 
+import logging
 from contextvars import ContextVar
 
 from starlette.types import ASGIApp, Receive, Scope, Send
+
+logger = logging.getLogger("mnemomatic")
 
 _EMPTY = {
     "actor": None, "client": None, "ip": None,
@@ -37,6 +40,36 @@ def request_meta() -> dict:
     (user-agent), ip, and — when authenticated — user, user_id, via
     ("session" or "token"), token_id, token_hint, token_name."""
     return _request_meta.get()
+
+
+def write_event(db, op: str, *, actor: str | None = None, item_type: str | None = None,
+                item_id: str | None = None, namespace: str | None = None,
+                title: str | None = None, **detail) -> None:
+    """Append one audit event, enriched with the current request's identity.
+
+    The one place every audit row is built: MCP tool writes, identity events
+    from the API, bootstrap and the recovery CLI all come through here, so
+    they agree on what an event carries. The actor defaults to the
+    authenticated user; callers name it explicitly when there is no request
+    (bootstrap, the CLI) or when the user is not signed in yet (a login). A
+    token's id, hint and name go in the detail so the event stays readable
+    after the token is revoked, and the optional X-Mnemomatic-Actor header
+    is kept as `label` — a sub-identity someone chose for one client.
+
+    A failing audit write is logged and never breaks the operation it
+    describes.
+    """
+    meta = request_meta()
+    if meta.get("token_id") is not None:
+        detail["token"] = {"id": meta["token_id"], "hint": meta["token_hint"], "name": meta.get("token_name")}
+    if meta.get("actor"):
+        detail["label"] = meta["actor"]
+    try:
+        db.append_audit(op, item_type=item_type, item_id=item_id, namespace=namespace, title=title,
+                        actor=actor or meta.get("user"), client=meta.get("client"), ip=meta.get("ip"),
+                        detail=detail or None)
+    except Exception as e:
+        logger.warning("Audit write failed: %s: %s", type(e).__name__, e)
 
 
 class RequestMetaMiddleware:
