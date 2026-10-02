@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from mnemomatic.audit import RequestMetaMiddleware, request_meta
-from mnemomatic.db import Database
+from mnemomatic.db import SCHEMA_VERSION, Database
 from mnemomatic import runtime
 from mnemomatic import tools_admin
 from mnemomatic import tools_content
@@ -35,7 +35,7 @@ class TestMigrationV4(unittest.TestCase):
 
             migrated = Database(tmp.name)
             conn = migrated._get_conn()
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()["user_version"], 4)
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()["user_version"], SCHEMA_VERSION)
             conn.execute("SELECT * FROM audit_log")  # table exists
             migrated.close()
         finally:
