@@ -253,6 +253,7 @@ class Principal:
     via: str                     # "session" or "token"
     token_id: int | None = None
     token_hint: str | None = None
+    token_name: str | None = None
 
 
 # ── Login throttle ──────────────────────────────────────────────────────────
@@ -639,7 +640,7 @@ class Identity:
             return None
         conn = self._conn()
         row = conn.execute(
-            "SELECT t.id AS tid, t.hint, t.expires_at, t.last_used_at, u.* FROM api_tokens t "
+            "SELECT t.id AS tid, t.hint, t.name AS tname, t.expires_at, t.last_used_at, u.* FROM api_tokens t "
             "JOIN users u ON u.id = t.user_id "
             "WHERE t.token_hash = ? AND t.revoked_at IS NULL AND u.active = 1",
             (_sha256(raw),),
@@ -653,7 +654,8 @@ class Identity:
         if last is None or now - last > TOUCH_INTERVAL:
             conn.execute("UPDATE api_tokens SET last_used_at = ? WHERE id = ?", (_iso(now), row["tid"]))
             conn.commit()
-        return Principal(user=_row_to_user(row), via="token", token_id=row["tid"], token_hint=row["hint"])
+        return Principal(user=_row_to_user(row), via="token", token_id=row["tid"], token_hint=row["hint"],
+                         token_name=row["tname"])
 
 
 # ── Bootstrap ───────────────────────────────────────────────────────────────

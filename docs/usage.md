@@ -204,7 +204,7 @@ Each event carries the timestamp, operation (`store`, `update`, `supersede`, `de
 | Field | Source | Trust |
 |-------|--------|-------|
 | `actor` | The authenticated username — the owner of the token or session that made the request | Authenticated |
-| `detail.token` | The token's id and hint (`mnm_` + 6 characters), when the request came through a token | Authenticated; stays meaningful after the token is revoked |
+| `detail.token` | The token's name, id and hint (`mnm_` + 6 characters), when the request came through a token — the Activity page shows the name | Authenticated; stays meaningful after the token is revoked |
 | `detail.label` | The client's `X-Mnemomatic-Actor` header, if it sends one — a sub-identity within one person's tokens ("laptop", "ci") | Self-declared |
 | `client` | The `User-Agent` header | What the connecting software reports |
 | `ip` | The connection's peer address, or the forwarded client address when the peer is a trusted proxy | Behind a reverse proxy this is the proxy's own address unless `MNEMOMATIC_TRUSTED_PROXIES` names it |

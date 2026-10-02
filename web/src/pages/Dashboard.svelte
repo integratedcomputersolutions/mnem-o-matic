@@ -78,7 +78,7 @@
           {#each events as e (e.id)}
             <tr>
               <td class="nowrap muted">{fmtRelative(e.ts)}</td>
-              <td>{e.actor || '—'}</td>
+              <td>{e.actor || '—'}{#if e.detail?.token?.name}<span class="muted small"> · {e.detail.token.name}</span>{/if}</td>
               <td><code>{e.op}</code></td>
               <td class="truncate" style="max-width:260px">
                 {#if e.namespace && e.item_type && e.item_id && ['document','knowledge','note'].includes(e.item_type)}

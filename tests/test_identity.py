@@ -342,6 +342,7 @@ class TestTokens(IdentityCase):
         self.assertEqual(principal.via, "token")
         self.assertEqual(principal.token_id, rec["id"])
         self.assertEqual(principal.token_hint, rec["hint"])
+        self.assertEqual(principal.token_name, "laptop")
         revoked = self.ident.revoke_token(user.id, rec["id"])
         self.assertIsNotNone(revoked["revoked_at"])
         self.assertIsNone(self.ident.resolve_token(raw))

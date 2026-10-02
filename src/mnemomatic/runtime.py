@@ -288,8 +288,8 @@ def _audit(op: str, *, item_type: str | None = None, item_id: str | None = None,
            namespace: str | None = None, title: str | None = None, **detail) -> None:
     """Append an audit event, enriched with the request's identity fields.
 
-    The actor is the authenticated username. A token's id and hint go in the
-    detail so the event stays traceable after the token is revoked, and the
+    The actor is the authenticated username. A token's id, hint and name go
+    in the detail so the event stays readable after the token is revoked, and the
     optional X-Mnemomatic-Actor header is kept as a `label` — a sub-identity
     the person chose for one of their clients, not an identity in itself.
 
@@ -299,7 +299,7 @@ def _audit(op: str, *, item_type: str | None = None, item_id: str | None = None,
     try:
         meta = request_meta()
         if meta.get("token_id") is not None:
-            detail["token"] = {"id": meta["token_id"], "hint": meta["token_hint"]}
+            detail["token"] = {"id": meta["token_id"], "hint": meta["token_hint"], "name": meta.get("token_name")}
         if meta.get("actor"):
             detail["label"] = meta["actor"]
         _db().append_audit(op, item_type=item_type, item_id=item_id,

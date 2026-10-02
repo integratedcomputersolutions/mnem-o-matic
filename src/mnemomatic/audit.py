@@ -27,7 +27,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 _EMPTY = {
     "actor": None, "client": None, "ip": None,
-    "user": None, "user_id": None, "via": None, "token_id": None, "token_hint": None,
+    "user": None, "user_id": None, "via": None, "token_id": None, "token_hint": None, "token_name": None,
 }
 _request_meta: ContextVar[dict] = ContextVar("mnemomatic_request_meta", default=_EMPTY)
 
@@ -35,7 +35,7 @@ _request_meta: ContextVar[dict] = ContextVar("mnemomatic_request_meta", default=
 def request_meta() -> dict:
     """The current request's identity fields: actor (header label), client
     (user-agent), ip, and — when authenticated — user, user_id, via
-    ("session" or "token"), token_id, token_hint."""
+    ("session" or "token"), token_id, token_hint, token_name."""
     return _request_meta.get()
 
 
@@ -60,7 +60,8 @@ class RequestMetaMiddleware:
         principal = scope.get("state", {}).get("principal")
         if principal is not None:
             meta.update(user=principal.user.username, user_id=principal.user.id, via=principal.via,
-                        token_id=principal.token_id, token_hint=principal.token_hint)
+                        token_id=principal.token_id, token_hint=principal.token_hint,
+                        token_name=principal.token_name)
         token = _request_meta.set(meta)
         try:
             await self.app(scope, receive, send)

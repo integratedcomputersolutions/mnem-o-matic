@@ -200,7 +200,7 @@ class TestRequestMeta(unittest.TestCase):
     def test_defaults_outside_a_request(self):
         self.assertEqual(request_meta(), {
             "actor": None, "client": None, "ip": None,
-            "user": None, "user_id": None, "via": None, "token_id": None, "token_hint": None,
+            "user": None, "user_id": None, "via": None, "token_id": None, "token_hint": None, "token_name": None,
         })
 
     def test_principal_in_scope_is_copied(self):
@@ -219,7 +219,8 @@ class TestRequestMeta(unittest.TestCase):
 
         async def inject(scope, receive, send):
             scope.setdefault("state", {})["principal"] = Principal(user=user, via="token",
-                                                                   token_id=3, token_hint="mnm_abcdef")
+                                                                   token_id=3, token_hint="mnm_abcdef",
+                                                                   token_name="laptop")
             await app(scope, receive, send)
 
         app = RequestMetaMiddleware(Starlette(routes=[Route("/", echo)]))
@@ -229,6 +230,7 @@ class TestRequestMeta(unittest.TestCase):
         self.assertEqual(meta["via"], "token")
         self.assertEqual(meta["token_id"], 3)
         self.assertEqual(meta["token_hint"], "mnm_abcdef")
+        self.assertEqual(meta["token_name"], "laptop")
         self.assertEqual(meta["actor"], "laptop")
 
 
@@ -242,7 +244,7 @@ class TestAuditEnrichment(ToolTestCase):
     def test_token_principal(self):
         from mnemomatic.audit import _request_meta
         tok = self._with_meta(user="matt", user_id=1, via="token", token_id=9, token_hint="mnm_xyz123",
-                              client="ua/1", ip="10.1.1.1")
+                              token_name="laptop", client="ua/1", ip="10.1.1.1")
         try:
             tools_content.store_note(namespace="proj", title="n", content="c")
         finally:
@@ -250,7 +252,7 @@ class TestAuditEnrichment(ToolTestCase):
         event = self.db.list_audit(op="store")[0]
         self.assertEqual(event["actor"], "matt")
         self.assertEqual(event["client"], "ua/1")
-        self.assertEqual(event["detail"]["token"], {"id": 9, "hint": "mnm_xyz123"})
+        self.assertEqual(event["detail"]["token"], {"id": 9, "hint": "mnm_xyz123", "name": "laptop"})
         self.assertNotIn("label", event["detail"])
 
     def test_header_label_rides_in_detail(self):
