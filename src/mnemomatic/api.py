@@ -326,7 +326,9 @@ def build_api_routes(*, identity, db_getter, settings_info, first_run: FirstRun,
         password = _str(data, "password")
         ip = _client_ip(request)
         known = ident().is_known_device(username, request.cookies.get(DEVICE_COOKIE))
-        wait = throttle.retry_after(username, ip, known_device=known)
+        # Reserve before hashing: a check-then-record would admit a whole
+        # concurrent burst before its first failure is counted.
+        wait = throttle.reserve(username, ip, known_device=known)
         if wait:
             # Not audited: the attempts that tripped the throttle already
             # were, and a row per refused retry would let anyone grow the log.
@@ -341,6 +343,8 @@ def build_api_routes(*, identity, db_getter, settings_info, first_run: FirstRun,
                 throttle.record_failure(username, ip)
             record("auth.login_failed", item_type="user", item_id=_audit_username(username), reason=e.code)
             raise
+        finally:
+            throttle.release(username, ip, known_device=known)
         throttle.record_success(username, ip)
         raw = ident().create_session(user.id)
         record("auth.login", actor=user.username, item_type="user", item_id=user.username)
@@ -363,7 +367,7 @@ def build_api_routes(*, identity, db_getter, settings_info, first_run: FirstRun,
         # A stolen session cookie must not become a way to brute-force the
         # account's password through this endpoint.
         key = str(principal.user.id)
-        wait = password_throttle.retry_after(key)
+        wait = password_throttle.reserve(key)
         if wait:
             return _error("throttled", 429, f"Too many attempts; retry after {wait} seconds.",
                           {"Retry-After": str(wait)})
@@ -375,6 +379,8 @@ def build_api_routes(*, identity, db_getter, settings_info, first_run: FirstRun,
             if e.code == "wrong_password":
                 password_throttle.record_failure(key)
             raise
+        finally:
+            password_throttle.release(key)
         password_throttle.record_success(key)
         record("password.changed", item_type="user", item_id=principal.user.username)
         return _no_content()

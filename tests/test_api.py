@@ -1,9 +1,11 @@
 """Tests for the browser JSON API (mnemomatic.api), driven through the same
 middleware stack the server uses: SecurityHeaders → RequestMeta → Auth → routes."""
 
+import asyncio
 import unittest
 from unittest.mock import patch
 
+import httpx
 from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
@@ -191,6 +193,24 @@ class TestSessionAndLogin(ApiCase):
         resp = self.post("/api/login", {"username": "alice", "password": IdentityFixture.USER_PASSWORD})
         self.assertEqual(resp.status_code, 200)
 
+    def burst(self, path, body, n, cookies=None):
+        """Send `n` identical POSTs concurrently; returns the status codes."""
+        async def go():
+            transport = httpx.ASGITransport(app=self.client.app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://testserver",
+                                         headers=self.ORIGIN, cookies=cookies) as c:
+                resps = await asyncio.gather(*(c.post(path, json=body) for _ in range(n)))
+            return [r.status_code for r in resps]
+        return asyncio.run(go())
+
+    def test_login_throttle_holds_under_concurrency(self):
+        codes = self.burst("/api/login", {"username": "admin", "password": "nope"}, 60)
+        self.assertEqual(codes.count(401), 5)
+        self.assertEqual(codes.count(429), 55)
+        # The burst's failures locked the address out, right password or not.
+        codes = self.burst("/api/login", {"username": "admin", "password": IdentityFixture.ADMIN_PASSWORD}, 1)
+        self.assertEqual(codes, [429])
+
     def test_login_sets_device_cookie_for_login_only(self):
         resp = self.post("/api/login", {"username": "admin", "password": IdentityFixture.ADMIN_PASSWORD})
         self.assertEqual(resp.status_code, 200)
@@ -218,6 +238,12 @@ class TestSessionAndLogin(ApiCase):
         resp = self.post("/api/password", {"current_password": IdentityFixture.USER_PASSWORD,
                                            "new_password": "a-brand-new-password"}, cookies=cookies)
         self.assertEqual(resp.status_code, 429)
+
+    def test_password_change_throttle_holds_under_concurrency(self):
+        codes = self.burst("/api/password", {"current_password": "wrong-password",
+                                             "new_password": "a-brand-new-password"}, 30, cookies=self.user())
+        self.assertEqual(codes.count(401), 5)
+        self.assertEqual(codes.count(429), 25)
 
     def test_disabled_account(self):
         self.fx.identity.set_active(self.fx.user.id, False, acting_user_id=self.fx.admin.id)

@@ -286,12 +286,35 @@ class LoginThrottle:
     def _account(username: str) -> str:
         return username if USERNAME_RE.match(username) else "\0invalid"
 
-    def retry_after(self, username: str, ip: str, *, known_device: bool = False) -> int:
+    def _buckets(self, username: str, ip: str, known_device: bool):
         account = self._account(username)
-        waits = [self._by_account_ip.retry_after(f"{account}\0{ip}"), self._by_ip.retry_after(ip)]
+        buckets = [(self._by_account_ip, f"{account}\0{ip}"), (self._by_ip, ip)]
         if not known_device:
-            waits.append(self._by_account.retry_after(account))
-        return max(waits)
+            buckets.append((self._by_account, account))
+        return buckets
+
+    def retry_after(self, username: str, ip: str, *, known_device: bool = False) -> int:
+        return max(t.retry_after(key) for t, key in self._buckets(username, ip, known_device))
+
+    def reserve(self, username: str, ip: str, *, known_device: bool = False) -> int:
+        """Claim a sign-in attempt in every window; see FailureThrottle.reserve.
+
+        Returns 0 when admitted, and the caller must `release()` with the same
+        arguments afterwards. Otherwise returns the seconds to wait.
+        """
+        taken = []
+        for t, key in self._buckets(username, ip, known_device):
+            wait = t.reserve(key)
+            if wait:
+                for held, held_key in taken:
+                    held.release(held_key)
+                return max(wait, self.retry_after(username, ip, known_device=known_device))
+            taken.append((t, key))
+        return 0
+
+    def release(self, username: str, ip: str, *, known_device: bool = False) -> None:
+        for t, key in self._buckets(username, ip, known_device):
+            t.release(key)
 
     def record_failure(self, username: str, ip: str) -> None:
         account = self._account(username)

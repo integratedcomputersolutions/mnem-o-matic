@@ -26,6 +26,7 @@ from mnemomatic.identity import (
     needs_rehash,
     verify_password,
 )
+from mnemomatic.throttle import FailureThrottle
 
 
 def _fast_scrypt():
@@ -452,6 +453,45 @@ class TestLoginThrottle(unittest.TestCase):
         for _ in range(4):
             t.record_failure("alice", "ip")
         self.assertEqual(t.retry_after("alice", "ip"), 0)
+
+
+class TestThrottleReservation(unittest.TestCase):
+    def test_in_flight_attempts_count_against_the_limit(self):
+        t = FailureThrottle(max_failures=5, window=900.0, lockout=900.0)
+        for _ in range(5):
+            self.assertEqual(t.reserve("k"), 0)
+        self.assertEqual(t.reserve("k"), 1)            # allowance is all in flight
+        t.release("k")
+        self.assertEqual(t.reserve("k"), 0)            # a finished attempt frees its slot
+
+    def test_failures_and_in_flight_share_the_allowance(self):
+        t = FailureThrottle(max_failures=5, window=900.0, lockout=900.0)
+        for _ in range(4):
+            t.record_failure("k")
+        self.assertEqual(t.reserve("k"), 0)
+        self.assertEqual(t.reserve("k"), 1)
+        t.record_failure("k")
+        t.release("k")
+        self.assertGreater(t.reserve("k"), 1)          # now a real lockout
+
+    def test_login_reserve_is_all_or_nothing(self):
+        t = LoginThrottle()
+        for i in range(19):
+            t.record_failure(f"user{i}", "10.0.0.9")
+        self.assertEqual(t.reserve("alice", "10.0.0.9"), 0)
+        self.assertGreater(t.reserve("bob", "10.0.0.9"), 0)   # per-ip window full
+        t.release("alice", "10.0.0.9")
+        # bob's refused reservation left nothing behind in his other windows.
+        for _ in range(5):
+            self.assertEqual(t._by_account_ip.reserve("bob\x0010.0.0.9"), 0)
+
+    def test_known_device_skips_the_account_window(self):
+        t = LoginThrottle()
+        for i in range(100):
+            t.record_failure("alice", f"10.1.{i // 4}.1")
+        self.assertGreater(t.reserve("alice", "10.9.9.9"), 0)
+        self.assertEqual(t.reserve("alice", "10.9.9.9", known_device=True), 0)
+        t.release("alice", "10.9.9.9", known_device=True)
 
 
 class TestKnownDevice(IdentityCase):

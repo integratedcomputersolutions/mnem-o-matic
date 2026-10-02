@@ -10,6 +10,11 @@ Note: the client key is the connection's peer address, so behind a reverse
 proxy every request shares the proxy's IP and one attacker's lockout blocks
 everyone behind it. Set MNEMOMATIC_TRUSTED_PROXIES so uvicorn resolves the
 real client from X-Forwarded-For and each client gets its own bucket.
+
+A check that awaits slow work (a password hash) before it can record the
+outcome must `reserve()` the attempt first and `release()` it afterwards:
+otherwise every request in a concurrent burst passes the check before the
+first failure is counted.
 """
 
 import threading
@@ -34,6 +39,7 @@ class FailureThrottle:
         self._lock = threading.Lock()
         self._failures: dict[str, list[float]] = {}
         self._locked_until: dict[str, float] = {}
+        self._in_flight: dict[str, int] = {}
 
     def retry_after(self, client: str) -> int:
         """Seconds until `client` may try again; 0 when not locked out."""
@@ -44,6 +50,35 @@ class FailureThrottle:
                 return 0
             # Round up so a client that waits exactly this long is admitted.
             return int(until - now) + 1
+
+    def reserve(self, client: str) -> int:
+        """Claim an attempt for `client` before checking its credential.
+
+        Returns 0 when admitted; the caller must then `release()` once the
+        attempt is over, after recording its outcome. Otherwise returns the
+        seconds to wait: the lockout, or 1 when attempts already in flight
+        would use up what is left of the allowance.
+        """
+        now = time.monotonic()
+        with self._lock:
+            until = self._locked_until.get(client, 0.0)
+            if until > now:
+                return int(until - now) + 1
+            recent = sum(1 for t in self._failures.get(client, []) if now - t < self.window)
+            pending = self._in_flight.get(client, 0)
+            if recent + pending >= self.max_failures:
+                return 1
+            self._in_flight[client] = pending + 1
+            return 0
+
+    def release(self, client: str) -> None:
+        """End an attempt admitted by `reserve()`."""
+        with self._lock:
+            pending = self._in_flight.get(client, 0) - 1
+            if pending > 0:
+                self._in_flight[client] = pending
+            else:
+                self._in_flight.pop(client, None)
 
     def record_failure(self, client: str) -> None:
         now = time.monotonic()
