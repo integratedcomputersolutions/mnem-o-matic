@@ -12,7 +12,7 @@ from starlette.testclient import TestClient
 from mnemomatic import config, runtime
 from mnemomatic.api import INSTANCE_ID, SecurityHeadersMiddleware, build_api_routes
 from mnemomatic.audit import RequestMetaMiddleware
-from mnemomatic.auth import COOKIE_NAME, AuthMiddleware
+from mnemomatic.auth import COOKIE_NAME, SECURE_COOKIE_NAME, AuthMiddleware
 from mnemomatic.identity import FirstRun
 from mnemomatic.models import Document, Note
 from tests._support import IdentityFixture
@@ -164,7 +164,14 @@ class TestSessionAndLogin(ApiCase):
         https = TestClient(self.client.app, base_url="https://testserver")
         resp = https.post("/api/login", json={"username": "admin", "password": IdentityFixture.ADMIN_PASSWORD},
                           headers={"Origin": "https://testserver"})
-        self.assertIn("Secure", resp.headers["set-cookie"])
+        session = next(c for c in resp.headers.get_list("set-cookie") if c.startswith(f"{SECURE_COOKIE_NAME}="))
+        self.assertIn("Secure", session)
+        self.assertIn("Path=/", session)
+        self.assertNotIn("Domain", session)
+        self.assertTrue(https.get("/api/session").json()["authenticated"])
+        resp = https.post("/api/logout", headers={"Origin": "https://testserver"})
+        self.assertIn(f'{SECURE_COOKIE_NAME}=""', resp.headers["set-cookie"])
+        self.assertFalse(https.get("/api/session").json()["authenticated"])
 
     def test_bad_credentials(self):
         resp = self.post("/api/login", {"username": "admin", "password": "nope"})
@@ -520,6 +527,45 @@ class TestConnectSettingsHttps(ApiCase):
         self.assertEqual(resp.status_code, 409)
         self.assertEqual(resp.json()["error"], "tls_disabled")
         self.assertEqual(self.client.get("/api/admin/https", cookies=self.user()).status_code, 403)
+
+
+class _PendingTls:
+    """Just enough of tlsca.TlsState for the HTTPS confirm route."""
+
+    def __init__(self):
+        self.confirmed = False
+
+    def status(self):
+        return {"state": "active" if self.confirmed else "pending", "name": "memory.example",
+                "https_url": "https://memory.example:8443", "ca_fingerprint": "ab:cd"}
+
+    def confirm(self, name, instance_id, expected_id):
+        self.confirmed = True
+        return self.status()
+
+
+class TestHttpsConfirm(ApiCase):
+    def setUp(self):
+        super().setUp()
+        mount = build_api_routes(identity=lambda: self.fx.identity, db_getter=lambda: self.fx.db,
+                                 settings_info=lambda: dict(SETTINGS), first_run=self.first_run,
+                                 https=_PendingTls())
+        app = AuthMiddleware(RequestMetaMiddleware(Starlette(routes=[mount])), identity=lambda: self.fx.identity)
+        self.client = TestClient(app, base_url="http://testserver")
+
+    def test_confirm_signs_everyone_out(self):
+        # The confirming admin's cookie crossed plain HTTP, and so may every
+        # other session; none of them may outlive the switch to HTTPS.
+        admin, user = self.admin(), self.user()
+        resp = self.post("/api/admin/https/confirm", {"name": "memory.example", "instance_id": INSTANCE_ID},
+                         cookies=admin)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["state"], "active")
+        self.assertIn(f'{COOKIE_NAME}=""', resp.headers["set-cookie"])
+        for cookies in (admin, user):
+            self.assertFalse(self.client.get("/api/session", cookies=cookies).json()["authenticated"])
+        event = self.events("https.changed")[0]
+        self.assertEqual(event["detail"]["sessions_ended"], 2)
 
 
 if __name__ == "__main__":

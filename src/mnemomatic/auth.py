@@ -4,8 +4,11 @@ Two credentials, two audiences:
 
 - **Bearer tokens** (``Authorization: Bearer mnm_…``) are what agents hold.
   They are the only thing accepted on ``/mcp``.
-- **Session cookies** (``mnm_session``) are what a browser holds after
-  logging in. They are the only thing accepted under ``/api``.
+- **Session cookies** are what a browser holds after logging in. They are
+  the only thing accepted under ``/api``. Over HTTPS the cookie is
+  ``__Host-mnm_session`` (Secure, host-only); over plain HTTP it is
+  ``mnm_session``. Each scheme reads only its own name, so a cookie set or
+  sniffed over plain HTTP never stands in for an HTTPS session.
 
 ``/export`` takes either, since both the CLI and the web UI download it.
 ``/health``, the login endpoints, the CA download, the setup page, and the
@@ -30,6 +33,12 @@ from mnemomatic.throttle import FailureThrottle
 logger = logging.getLogger("mnemomatic")
 
 COOKIE_NAME = "mnm_session"
+SECURE_COOKIE_NAME = "__Host-mnm_session"
+
+
+def session_cookie_name(scheme: str) -> str:
+    """The session cookie a request on `scheme` sets and reads."""
+    return SECURE_COOKIE_NAME if scheme == "https" else COOKIE_NAME
 
 # Reachable with no credential at all.
 PUBLIC_PATHS = frozenset({
@@ -112,7 +121,7 @@ class AuthMiddleware:
             # A public /api route (the session probe) still likes to know who
             # is asking; a bad or absent cookie simply means "nobody".
             if path.startswith("/api"):
-                principal = self._from_cookie(headers)
+                principal = self._from_cookie(scope, headers)
         elif kind == "bearer":
             principal, refusal = self._from_bearer(headers, ip, method, path)
             if refusal:
@@ -125,7 +134,7 @@ class AuthMiddleware:
                     await _send_json(send, *refusal)
                     return
             else:
-                principal = self._from_cookie(headers)
+                principal = self._from_cookie(scope, headers)
                 if principal is None:
                     await _send_json(send, 401, {
                         "error": "unauthenticated",
@@ -133,7 +142,7 @@ class AuthMiddleware:
                     })
                     return
         else:  # session
-            principal = self._from_cookie(headers)
+            principal = self._from_cookie(scope, headers)
             if principal is None:
                 logger.debug("Unauthenticated %s %s from %s", method, path, ip)
                 await _send_json(send, 401, {"error": "unauthenticated", "details": "Sign in first."})
@@ -150,8 +159,8 @@ class AuthMiddleware:
 
     # ── resolvers ──
 
-    def _from_cookie(self, headers: dict[str, str]) -> Principal | None:
-        raw = _cookie_value(headers, COOKIE_NAME)
+    def _from_cookie(self, scope: Scope, headers: dict[str, str]) -> Principal | None:
+        raw = _cookie_value(headers, session_cookie_name(scope.get("scheme", "http")))
         return self._identity().resolve_session(raw) if raw else None
 
     def _from_bearer(self, headers: dict[str, str], ip: str, method: str, path: str):

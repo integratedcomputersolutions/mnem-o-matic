@@ -39,7 +39,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from mnemomatic import config
 from mnemomatic import db as db_module
 from mnemomatic.audit import write_event
-from mnemomatic.auth import COOKIE_NAME
+from mnemomatic.auth import session_cookie_name
 from mnemomatic.db import _SPEC_BY_ITEM_TYPE
 from mnemomatic.tlsca import TlsError
 from mnemomatic.throttle import FailureThrottle
@@ -155,13 +155,19 @@ def _is_https(request: Request) -> bool:
     return request.url.scheme == "https"
 
 
+def _session_cookie(request: Request) -> str:
+    return request.cookies.get(session_cookie_name(request.url.scheme), "")
+
+
 def _set_session_cookie(resp: Response, raw: str, request: Request) -> None:
-    resp.set_cookie(COOKIE_NAME, raw, max_age=int(SESSION_TTL.total_seconds()), path="/",
-                    httponly=True, samesite="strict", secure=_is_https(request))
+    # Over HTTPS the __Host- name makes the browser insist on Secure, Path=/
+    # and no Domain, so nothing served over plain HTTP can plant or shadow it.
+    resp.set_cookie(session_cookie_name(request.url.scheme), raw, max_age=int(SESSION_TTL.total_seconds()),
+                    path="/", httponly=True, samesite="strict", secure=_is_https(request))
 
 
-def _clear_session_cookie(resp: Response) -> None:
-    resp.delete_cookie(COOKIE_NAME, path="/")
+def _clear_session_cookie(resp: Response, request: Request) -> None:
+    resp.delete_cookie(session_cookie_name(request.url.scheme), path="/", secure=_is_https(request))
 
 
 # Proof that this browser has signed in to an account before (see
@@ -355,10 +361,10 @@ def build_api_routes(*, identity, db_getter, settings_info, first_run: FirstRun,
 
     async def logout(request: Request):
         principal = _principal(request)
-        ident().delete_session(request.cookies.get(COOKIE_NAME, ""))
+        ident().delete_session(_session_cookie(request))
         record("auth.logout", item_type="user", item_id=principal.user.username)
         resp = _no_content()
-        _clear_session_cookie(resp)
+        _clear_session_cookie(resp, request)
         return resp
 
     async def password(request: Request):
@@ -374,7 +380,7 @@ def build_api_routes(*, identity, db_getter, settings_info, first_run: FirstRun,
         try:
             await run_in_threadpool(ident().change_password, principal.user.id,
                                     _str(data, "current_password"), _str(data, "new_password"),
-                                    keep_session=request.cookies.get(COOKIE_NAME))
+                                    keep_session=_session_cookie(request) or None)
         except IdentityError as e:
             if e.code == "wrong_password":
                 password_throttle.record_failure(key)
@@ -504,9 +510,16 @@ def build_api_routes(*, identity, db_getter, settings_info, first_run: FirstRun,
     async def https_confirm(request: Request):
         data = await _body(request)
         status = require_https().confirm(_str(data, "name"), _str(data, "instance_id"), INSTANCE_ID)
+        # Every session so far may have travelled over plain HTTP — this very
+        # request usually did — and the browser keeps sending a non-Secure
+        # cookie to the plain port, where anyone on the network can read it.
+        # Start over: everyone signs in again, over HTTPS.
+        ended = ident().end_all_sessions()
         record("https.changed", item_type="https", item_id=status.get("name"), state=status.get("state"),
-               fingerprint=status.get("ca_fingerprint"))
-        return _json(status)
+               fingerprint=status.get("ca_fingerprint"), sessions_ended=ended)
+        resp = _json(status)
+        _clear_session_cookie(resp, request)
+        return resp
 
     async def https_disable(request: Request):
         status = require_https().disable()

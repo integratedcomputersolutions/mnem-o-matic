@@ -659,6 +659,13 @@ class Identity:
         conn.execute("DELETE FROM sessions WHERE token_hash = ?", (_sha256(raw),))
         conn.commit()
 
+    def end_all_sessions(self) -> int:
+        """Sign every browser out. Returns how many sessions there were."""
+        conn = self._conn()
+        cur = conn.execute("DELETE FROM sessions")
+        conn.commit()
+        return cur.rowcount
+
     def prune_sessions(self) -> int:
         """Drop sessions past their lifetime or idle limit. Returns how many."""
         now = _now()

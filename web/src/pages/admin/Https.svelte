@@ -56,8 +56,11 @@
       return;
     }
     try {
-      show(await api.post('/api/admin/https/confirm', { name: status.name, instance_id: id }));
+      const s = await api.post('/api/admin/https/confirm', { name: status.name, instance_id: id });
+      // Confirming signs everyone out (sessions so far may have crossed plain
+      // HTTP), so carry on at the HTTPS origin's sign-in screen.
       probe = 'ok';
+      window.location.assign(`${s.https_url}/admin/https`);
     } catch (err) {
       probe = err.code === 'instance_mismatch' ? 'mismatch' : null;
       throw err;

@@ -12,7 +12,7 @@ from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from mnemomatic.auth import COOKIE_NAME, AuthMiddleware, classify
+from mnemomatic.auth import COOKIE_NAME, SECURE_COOKIE_NAME, AuthMiddleware, classify, session_cookie_name
 from tests._support import IdentityFixture
 
 
@@ -177,6 +177,17 @@ class TestSession(AuthCase):
         self.assertEqual(self.client.get("/api/things", cookies={COOKIE_NAME: raw}).status_code, 200)
         self.fx.identity.delete_session(raw)
         self.assertEqual(self.client.get("/api/things", cookies={COOKIE_NAME: raw}).status_code, 401)
+
+    def test_each_scheme_reads_only_its_own_cookie(self):
+        # A value sniffed from the plain-HTTP cookie must not work on HTTPS
+        # under either name, and the __Host- cookie means nothing over HTTP.
+        https = TestClient(self.client.app, base_url="https://testserver")
+        raw = self.fx.session_for(self.fx.user)
+        self.assertEqual(https.get("/api/things", cookies={SECURE_COOKIE_NAME: raw}).status_code, 200)
+        self.assertEqual(https.get("/api/things", cookies={COOKIE_NAME: raw}).status_code, 401)
+        self.assertEqual(self.client.get("/api/things", cookies={SECURE_COOKIE_NAME: raw}).status_code, 401)
+        self.assertEqual(session_cookie_name("https"), "__Host-mnm_session")
+        self.assertEqual(session_cookie_name("http"), "mnm_session")
 
     def test_forced_password_change_gate(self):
         user, temp = self.fx.identity.create_user("newbie")

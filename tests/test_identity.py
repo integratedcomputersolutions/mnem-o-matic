@@ -196,6 +196,14 @@ class TestUsers(IdentityCase):
         self.assertIsNotNone(self.ident.resolve_session(keep))
         self.assertIsNone(self.ident.resolve_session(other))
 
+    def test_end_all_sessions(self):
+        user = self.admin()
+        sessions = [self.ident.create_session(user.id) for _ in range(3)]
+        self.assertEqual(self.ident.end_all_sessions(), 3)
+        for raw in sessions:
+            self.assertIsNone(self.ident.resolve_session(raw))
+        self.assertEqual(self.ident.end_all_sessions(), 0)
+
 
 class TestAdminGuards(IdentityCase):
     def test_self_actions_refused(self):
