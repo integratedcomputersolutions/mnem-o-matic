@@ -32,7 +32,7 @@
     <button type="button" class="btn ghost sm" onclick={logout}>Sign out</button>
     <div class="ics">
       <img src="/ics-logo.svg" alt="ICS" height="20" />
-      <span>Integrated Computer Solutions{#if session.version} · v{session.version}{/if}</span>
+      <span>Integrated Computer Solutions{#if session.version}&nbsp;· v{session.version}{/if}</span>
     </div>
   </div>
 </aside>

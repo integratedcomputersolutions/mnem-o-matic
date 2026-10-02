@@ -1,0 +1,32 @@
+# Terminate TLS in Caddy instead of the built-in certificate authority.
+#
+#   docker compose -f docker-compose.yml -f deploy/caddy/docker-compose.caddy.yml up -d
+#
+# Put your certificate at deploy/caddy/certs/cert.pem and key.pem (mkcert, your
+# own CA, or anything else) and edit deploy/caddy/Caddyfile if the paths
+# differ. The server's own ports are no longer published: Caddy on the
+# internal network is the only thing that can reach it, which is what makes
+# MNEMOMATIC_TRUSTED_PROXIES=* safe. Requires Compose 2.24 or newer for the
+# `!override` tag.
+services:
+  mnemomatic:
+    ports: !override []
+    environment:
+      - MNEMOMATIC_TLS=off
+      - MNEMOMATIC_TRUSTED_PROXIES=*
+
+  caddy:
+    container_name: Caddy-MCP
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./deploy/caddy/certs:/etc/caddy/certs:ro
+      - caddy_data:/data
+    depends_on:
+      - mnemomatic
+
+volumes:
+  caddy_data:

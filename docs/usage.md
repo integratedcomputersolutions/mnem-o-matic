@@ -2,18 +2,30 @@
 
 ## Connecting LLM Clients
 
+The quickest path is the **Connect an agent** page in the web UI: it shows this server's URLs and a copy-ready configuration for each client, filled in with a token you just created. What follows is the same information in text form.
+
+Every client needs two things — the MCP endpoint and a personal API token, sent as `Authorization: Bearer mnm_…`. Tokens are created per person under **My tokens**; make one per agent or machine so you can revoke them individually.
+
 ### Claude Code
 
 ```bash
-claude mcp add --transport http mnemomatic https://your-server-hostname/mcp \
-  -H "Authorization: Bearer your-secret-key-here"
+claude mcp add --transport http mnemomatic https://your-server-hostname:8443/mcp \
+  -H "Authorization: Bearer mnm_your_token"
 ```
 
-Replace `your-server-hostname` with the hostname or IP you used when generating the TLS certificate. The client device must have the mkcert CA trusted (see [TLS Setup](installation.md#tls-setup-lan-deployments)).
+Claude Code is a Node application. If the server uses its built-in certificate authority, point Node at the CA file first (`export NODE_EXTRA_CA_CERTS=$HOME/mnemomatic-ca.crt`) — see [HTTPS](installation.md#https). Before HTTPS is set up, use `http://your-server-hostname:8000/mcp`.
 
-### Other MCP Clients
+### Claude Desktop, Cursor, OpenCode, Codex
 
-Point any MCP-compatible client to `https://your-server-hostname/mcp` using the Streamable HTTP transport. Include the `Authorization: Bearer <key>` header with every request.
+Cursor (`.cursor/mcp.json`) and OpenCode (`opencode.json`) take a URL plus a `headers` map with the `Authorization` entry. Codex reads the token from an environment variable (`bearer_token_env_var` in `~/.codex/config.toml`). Claude Desktop launches local commands, so it bridges through `npx mcp-remote <url> --header "Authorization: Bearer …"`. The Connect page has each file ready to paste.
+
+### Browser-based clients
+
+A client that runs *in a browser* (llama.cpp's web UI, for instance) calls the server cross-origin. Allow its origin explicitly — `MNEMOMATIC_CORS_ORIGINS=http://llama-host:8080` — listing every scheme/host/port you use to open it, and make sure that browser trusts the CA.
+
+### Other MCP clients
+
+Point any client that speaks the Streamable HTTP transport at `/mcp` with the `Authorization: Bearer <token>` header on every request.
 
 ### Small-Context Models (SLMs)
 
@@ -21,130 +33,72 @@ Verbose tool descriptions can consume a significant portion of a small model's c
 
 | Client | URL |
 |--------|-----|
-| Full-context (Claude, GPT-4, etc.) | `https://your-server-hostname/mcp` |
-| Small-context (7B–13B local models) | `https://your-server-hostname/mcp?compact=true` |
+| Full-context (Claude, GPT-4, etc.) | `https://your-server-hostname:8443/mcp` |
+| Small-context (7B–13B local models) | `https://your-server-hostname:8443/mcp?compact=true` |
 
 Both endpoints share the same server instance, database, and authentication. The compact descriptions are tuned in `src/mnemomatic/compact.py` (`_COMPACT_DESCRIPTIONS` and `_COMPACT_PARAMS`).
 
-## Authentication
+## Users and Tokens
 
-Authentication is **optional** and uses the Bearer token scheme. Requests that fail authentication are rejected before any MCP processing.
+There is no shared key. People sign in to the web UI with a username and password; agents authenticate with **personal API tokens**. Both end up as the same identity in the audit log.
 
-### Enabling Authentication
+**Roles.** `admin` manages users and HTTPS; `user` manages their own tokens and password. Everyone sees the whole store — there is no per-user data separation; the memory is shared by design.
 
-Set `MNEMOMATIC_API_KEY` to enable token validation:
+**First run.** With no users, the server prints a one-time setup code to its log and the web UI asks for it to create the first administrator. `MNEMOMATIC_ADMIN_PASSWORD` creates `admin` headlessly instead. The code stops working the moment a user exists or the server restarts.
 
-```yaml
-# docker-compose.yml
-services:
-  mnemomatic:
-    environment:
-      - MNEMOMATIC_API_KEY=your-secret-key-here
+**Adding people.** An administrator creates a user and receives a temporary password (valid 7 days) to hand over out of band; the person must choose their own at first sign-in. Administrators can also reset a password the same way, disable an account (sessions end and tokens stop at once; enabling restores the tokens), change a role, or delete a user (sessions and tokens go, audit history keeps the username). An administrator cannot disable, demote or delete themself, and the last active administrator cannot be removed.
+
+**Passwords** are at least 10 characters, hashed with scrypt. Five wrong attempts on one account, or twenty from one address, within fifteen minutes pause sign-in for that account or address.
+
+**Sessions** are an `HttpOnly`, `SameSite=Strict` cookie, `Secure` over HTTPS, lasting 24 hours or 2 idle hours. Changing your password ends your other sessions.
+
+**Tokens** start with `mnm_`, are shown exactly once, and are stored only as a hash. Each can carry a name, an optional expiry, and shows when it was last used. Up to 25 live tokens per person. Revoking one is immediate. Five invalid tokens from one address within a minute lock that address out of `/mcp` for five minutes; missing or malformed headers do not count.
+
+### Error responses on `/mcp`
+
+| Status | `error` | Reason |
+|--------|---------|--------|
+| 401 | `missing_authorization` | No `Authorization` header |
+| 401 | `invalid_authorization` | Header is not `Bearer <token>` |
+| 403 | `invalid_token` | Unknown, revoked or expired token, or its owner is disabled |
+| 429 | `throttled` | Too many invalid tokens from this address; retry after `Retry-After` seconds |
+| 403 | `https_required` | HTTPS is enforced and this was plain HTTP; the body names the HTTPS URL |
+
+Every error carries a `details` field in plain words.
+
+### The CLI
+
+`mnemomatic-cli` takes the token from `--token`, `MNEMOMATIC_TOKEN`, or `[server] token` in `~/.config/mnemomatic/config.toml` (keep that file at mode 600). With the built-in CA, add `--ca-cert`, `MNEMOMATIC_CA_CERT`, or `[server] ca_cert` pointing at the downloaded `mnemomatic-ca.crt`. The 2.x spellings (`--api-key`, `MNEMOMATIC_API_KEY`, `api_key`) still work for one release and print a reminder.
+
+### If nobody can sign in
+
+```bash
+docker exec mnemomatic-MCP /usr/bin/python3 -m mnemomatic.admin_cli reset-password <username>
 ```
 
-When authentication is enabled, all requests must include the `Authorization` header:
+Prints a temporary password and re-enables the account. `create-admin <username>` makes a new administrator.
 
-```
-Authorization: Bearer <your-secret-key-here>
-```
+## Web UI
 
-### Without Authentication
+The web UI is served at the root of the same port as the MCP endpoint. Stored content is **read-only** there — browsing, search and the activity trail — while everything about *access* is managed in it: tokens, users, HTTPS.
 
-If `MNEMOMATIC_API_KEY` is not set or is empty, the server runs without authentication. This is suitable for local development and trusted networks. The server logs a warning at startup:
+| Page | Who | What |
+|------|-----|------|
+| Dashboard | everyone | Counts per type, embedder and index state, HTTPS state, recent activity |
+| Browse | everyone | Namespaces → items per type → one item with its metadata, revisions and related items |
+| Search | everyone | Full-text, semantic or hybrid, the same search the agents run |
+| Activity | everyone | The audit trail with filters by actor, operation, namespace and item type |
+| Connect an agent | everyone | Per-client configuration snippets, the CA download, this server's URLs |
+| My tokens | everyone | Create, see last use, revoke |
+| Account | everyone | Change password |
+| Users | admins | Add, disable, reset password, change role, delete |
+| HTTPS | admins | Name the host, trust the CA, confirm — see [HTTPS](installation.md#https) |
+| Settings | admins | The configuration the server runs with; export download |
 
-```
-WARNING  mnemomatic: Authentication disabled — server is running without API key validation
-```
-
-For LAN deployments with TLS, the API key is **required** — it is the only per-request credential. On TLS alone, any device on your network that trusts the CA could connect without it.
-
-### Best Practices
-
-**For production deployments:**
-
-1. **Use a strong, random key** — At least 32 characters. Example:
-   ```bash
-   openssl rand -base64 32
-   # Zn8p7xQvJ9kL2mN3bC4dE5fG6hI7jK8lMnOpQrStUvW=
-   ```
-
-2. **Never commit keys to version control** — Use environment variables, secrets managers (e.g., Docker Secrets, Kubernetes Secrets), or `.env` files (excluded from git).
-
-3. **Use HTTPS in production** — Deploy behind a reverse proxy (nginx, Caddy, or similar) with TLS encryption. Authentication headers are transmitted in the `Authorization` header, which should be encrypted in transit.
-
-4. **Rotate keys periodically** — If a key is compromised or exposed:
-   - Update `MNEMOMATIC_API_KEY`
-   - Restart the server: `docker compose down && docker compose up -d`
-   - Update all clients with the new key
-
-5. **Log authentication events** — Mnem-O-matic logs all authentication attempts (both successful and failed) at WARNING and DEBUG levels. Monitor these logs for suspicious activity.
-
-### Error Responses
-
-| Status | Error | Reason |
-|--------|-------|--------|
-| 401 | Missing Authorization header | No `Authorization` header sent with request |
-| 401 | Invalid Authorization header format | Header format is not `Bearer <token>` |
-| 401 | Malformed Authorization header | Token is missing or header is incomplete |
-| 401 | Invalid Authorization header (empty token) | Token is present but empty |
-| 403 | Invalid API key | Token was sent but does not match `MNEMOMATIC_API_KEY` |
-| 429 | Too many failed authentication attempts | Repeated invalid keys from the same client triggered a temporary lockout; retry after the `Retry-After` header. Missing/malformed headers don't count toward the lockout. |
-
-All error responses include a `details` field explaining the exact issue.
-
-### Troubleshooting
-
-**"Missing Authorization header"**
-- Ensure you're sending the `Authorization` header with every request
-- Verify the format: `Bearer <key>` (note the space after `Bearer`)
-
-**"Invalid API key"**
-- Check that the key in your request matches `MNEMOMATIC_API_KEY` exactly
-- Keys are case-sensitive
-- Verify there's no leading/trailing whitespace
-
-**"Invalid Authorization header format"**
-- Ensure the header starts with `Bearer ` (case-insensitive)
-- The format must be: `Authorization: Bearer <token>`
-- Common mistake: using `Token` or `Basic` instead of `Bearer`
-
-**"Too many failed authentication attempts" (HTTP 429)**
-- Five wrong keys within a minute lock that client out for five minutes; the response carries `Retry-After`
-- The lockout is keyed on the client's address. Behind a reverse proxy, that address is the *proxy's* unless `MNEMOMATIC_TRUSTED_PROXIES` names it — so without that setting one client's failed attempts lock out everyone sharing the proxy. See [Configuration](installation.md#configuration)
-- Restarting the server clears all lockouts
-
-**Server starts with "Authentication disabled"**
-- `MNEMOMATIC_API_KEY` is not set or is empty
-- Set it in `docker-compose.yml` or pass it via `-e` flag:
-  ```bash
-  docker compose up -e MNEMOMATIC_API_KEY=your-key
-  ```
-
-## Web Viewer
-
-A minimal, **read-only** web viewer is available at `/ui` for browsing stored documents, knowledge, and notes. It has no create, edit, or delete functionality.
-
-The viewer is **disabled by default**. Enable it by setting a shared secret:
-
-```yaml
-services:
-  mnemomatic:
-    environment:
-      - MNEMOMATIC_UI_TOKEN=your-viewer-secret
-```
-
-Then open `https://your-host/ui` (or `http://your-host:8000/ui` for direct access), enter the token once, and browse by namespace.
-
-A **Settings** page (`/ui/settings`, linked from the navbar) shows the configuration the server is running with — first section covers the embedding model: mode (built-in / external endpoint / FTS-only), model name (linked to its Hugging Face card for the built-in models), embedding dimension, and the model and dimension the vector index was actually built with — with a warning when either disagrees with the running server, and an explicit "not recorded" where the index predates identity tracking — plus token truncation limit or endpoint URL, task prefixes, and the document chunking settings. The `embedding_info` tool reports the same state to an agent.
-
-Notes:
-- There are **no user accounts** — access is a single shared secret, separate from `MNEMOMATIC_API_KEY` (the viewer is exempt from MCP Bearer auth and uses its own gate; the exemption only exists while the viewer is enabled).
-- The session cookie is HttpOnly and carries a **random session id issued at login** — never the token, and never anything derived from it. Logging out revokes that id server-side, so a captured cookie stops working immediately rather than at its expiry; restarting the server ends every session at once, which is also how a rotated `MNEMOMATIC_UI_TOKEN` takes effect. Sessions last 30 days, are held in memory only, and are capped at 256 (the oldest is evicted past that). The cookie is marked `Secure` when the connection is HTTPS — directly, or via a proxy listed in `MNEMOMATIC_TRUSTED_PROXIES` (the header alone is not believed from an arbitrary client).
-- Every page is served with `Content-Security-Policy: default-src 'none'` (relaxed only for the vendored stylesheet and inline `style=` attributes), `X-Content-Type-Options: nosniff`, and `Referrer-Policy: no-referrer`. The viewer ships no JavaScript at all, so scripts are blocked outright — a second line behind the HTML escaping that is what actually prevents injection. Behind the bundled Caddy, HTTPS responses also carry `Strict-Transport-Security`.
-- The login form accepts only `application/x-www-form-urlencoded` and is parsed with the standard library; anything else gets `415`. That route is the one place reachable without credentials, so it runs as little parsing code as possible.
-- Repeated wrong tokens from the same client trigger a temporary lockout (HTTP 429). The same applies to repeated invalid MCP API keys.
-- The viewer is served on the same host/port as the MCP endpoint. Because that port is typically bound to `0.0.0.0`, the shared secret is what keeps it private — choose a strong token, or additionally restrict the port at the network level (VPN, reverse proxy, firewall).
-- When `MNEMOMATIC_UI_TOKEN` is unset, `/ui` is not registered at all.
+Security notes:
+- Every page carries `Content-Security-Policy` (scripts and connections from this origin only, no inline scripts), `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`; HTTPS responses add `Strict-Transport-Security`.
+- State-changing requests must come from the site itself: the API checks that the request's `Origin` matches its `Host`, and the session cookie is `SameSite=Strict`. That is the cross-site request forgery defence.
+- The UI is a Svelte application built into the image; the server serves it with hashed, immutable assets and never caches `index.html`. Clients that do not ask for HTML — an MCP client probing `/.well-known/…` after a 401 — get a JSON 404, not a page.
 
 ## Export
 
@@ -199,7 +153,7 @@ The CLI + cron path above remains the right choice when the backup needs to leav
 
 Two always-on recording mechanisms make the store safer to mutate and lay the groundwork for memory-review workflows:
 
-**Usage tracking** — every item carries a `retrieval_count` and `last_accessed`, bumped when the item is fetched with the `read` tool (or an MCP resource) and when a search surfaces it in results. Browsing does **not** count: `list_items`, the web viewer, exports, and backups never touch the counters, so they measure genuine retrieval, not housekeeping. The counters appear in `read` output and `list_items` summaries; `updated_at` is never affected. There is no ranking impact yet — the data accumulates first, so any future ranking blend can be tuned against real numbers.
+**Usage tracking** — every item carries a `retrieval_count` and `last_accessed`, bumped when the item is fetched with the `read` tool (or an MCP resource) and when a search surfaces it in results. Browsing does **not** count: `list_items`, the web UI, exports, and backups never touch the counters, so they measure genuine retrieval, not housekeeping. The counters appear in `read` output and `list_items` summaries; `updated_at` is never affected. There is no ranking impact yet — the data accumulates first, so any future ranking blend can be tuned against real numbers.
 
 **Revisions** — every update and delete first saves the item's prior state, including upsert overwrites (`store_*` on an existing title/subject), tag edits, `delete_namespace`, and items replaced by a `rename_namespace` merge. The server keeps the newest `MNEMOMATIC_REVISIONS_KEEP` revisions per item (default 10; `0` disables capture). Two tools work with them:
 
@@ -219,20 +173,24 @@ Revisions store content and metadata, not embeddings — like the export archive
 
 Every successful write operation is recorded in an **append-only audit log** — the event trail that complements revisions: revisions hold what an item *was* (for restore, pruned per item), the audit log holds what *happened* (for accountability, never pruned).
 
-Each event carries the timestamp, operation (`store`, `update`, `supersede`, `delete`, `tag`, `restore`, `rename_namespace`, `delete_namespace`), the item's type/id/namespace/title, op-specific detail (e.g. which fields an update touched, which entry a supersession closed), and three request-identity fields:
+Each event carries the timestamp, operation (`store`, `update`, `supersede`, `delete`, `tag`, `restore`, `rename_namespace`, `delete_namespace`, plus the identity events below), the item's type/id/namespace/title, op-specific detail (e.g. which fields an update touched, which entry a supersession closed), and the request's identity:
 
 | Field | Source | Trust |
 |-------|--------|-------|
-| `actor` | The client's `X-Mnemomatic-Actor` request header, if it sends one | Self-declared — fine among cooperating clients, not authenticated |
+| `actor` | The authenticated username — the owner of the token or session that made the request | Authenticated |
+| `detail.token` | The token's id and hint (`mnm_` + 6 characters), when the request came through a token | Authenticated; stays meaningful after the token is revoked |
+| `detail.label` | The client's `X-Mnemomatic-Actor` header, if it sends one — a sub-identity within one person's tokens ("laptop", "ci") | Self-declared |
 | `client` | The `User-Agent` header | What the connecting software reports |
 | `ip` | The connection's peer address, or the forwarded client address when the peer is a trusted proxy | Behind a reverse proxy this is the proxy's own address unless `MNEMOMATIC_TRUSTED_PROXIES` names it |
 
-To label a client, add the header to its MCP configuration:
+Identity operations are audited too, with the acting user as `actor` and the affected user or token as the item: `auth.login`, `auth.login_failed` (with the reason), `auth.logout`, `password.changed`, `password.reset`, `user.created`, `user.deactivated`, `user.reactivated`, `user.role_changed`, `user.deleted`, `token.created`, `token.revoked`, `https.changed`, `admin.created`, `export`, and `schema.migrated` when the database moved to a new schema version. Events written before 3.0 keep whatever self-declared actor they had.
+
+To label a client within your own tokens, add the header to its MCP configuration:
 
 ```bash
-claude mcp add --transport http mnemomatic https://your-host/mcp \
-  -H "Authorization: Bearer your-key" \
-  -H "X-Mnemomatic-Actor: matt-laptop"
+claude mcp add --transport http mnemomatic https://your-host:8443/mcp \
+  -H "Authorization: Bearer mnm_your_token" \
+  -H "X-Mnemomatic-Actor: laptop"
 ```
 
 Query the trail with the `list_audit` tool — filter by item, namespace, or operation:
@@ -243,7 +201,7 @@ list_audit(item_id="abc-123")                      # everything that happened to
 list_audit(op="delete")                            # all deletions, store-wide
 ```
 
-Reads are deliberately not audited (usage tracking covers retrieval); failed operations are not recorded; and a failing audit write never breaks the operation it describes. With a single shared API key the `actor` is self-reported — per-key authenticated attribution would come with scoped API keys, which the schema already accommodates.
+Reads are deliberately not audited (usage tracking covers retrieval); failed content operations are not recorded; and a failing audit write never breaks the operation it describes. The trail is also browsable in the web UI under **Activity**.
 
 Retention is time-based: events older than `MNEMOMATIC_AUDIT_KEEP_DAYS` (default 730 — two years) are pruned as new ones are appended; set `0` to keep the trail forever. Events are a couple of hundred bytes each (titles and ids, never content), so even the default retention stays in the low tens of MB on a busy store.
 
@@ -320,7 +278,8 @@ Settings resolve with this priority: **CLI flags > environment variables > confi
 | Setting | CLI flag | Environment variable | Config key | Default |
 |---------|----------|---------------------|------------|---------|
 | Server URL | `--server-url` | `MNEMOMATIC_SERVER_URL` | `server.url` | `http://localhost:8000` |
-| API key | `--api-key` | `MNEMOMATIC_API_KEY` | `server.api_key` | *(none)* |
+| Token | `--token` | `MNEMOMATIC_TOKEN` | `server.token` | *(none)* |
+| CA certificate | `--ca-cert` | `MNEMOMATIC_CA_CERT` | `server.ca_cert` | *(system trust store)* |
 | Search mode | `-m` / `--mode` | `MNEMOMATIC_SEARCH_MODE` | `search.mode` | `hybrid` |
 
 The config file lives at `~/.config/mnemomatic/config.toml`:
@@ -574,16 +533,20 @@ After connecting Claude Code, you can interact naturally:
 
 ## HTTP Endpoints
 
-Alongside the MCP transport, the server exposes two plain HTTP routes:
+Alongside the MCP transport, the server exposes these plain HTTP routes:
 
 | Route | Auth | Purpose |
 | ----- | ---- | ------- |
 | `GET /health` | **none** | Liveness — `{"status": "ok"}`. Used by the images' `HEALTHCHECK`; see [Health Endpoint](installation.md#health-endpoint) |
+| `GET /export` | token or session | The full store as a zip; optional `?namespace=` filter (see [Export](#export)). Audited |
+| `GET /ca.crt` | **none** | The built-in certificate authority, when one is configured |
+| `GET /setup` | **none** | How to trust the CA and move to HTTPS |
+| `/api/…` | session | The web UI's JSON API — sign-in, tokens, users, HTTPS, read-only views of the store |
+| `/` and anything else | **none** | The web UI |
 
-Every request to either route — and to the MCP endpoint — is capped at a 4 MB body; anything larger gets `413 Request body too large` without being read (see [Input Validation & Limits](#input-validation--limits)).
+Every request is capped at a 4 MB body (1 MiB under `/api`); anything larger gets `413` without being read (see [Input Validation & Limits](#input-validation--limits)).
 
-Both routes are served on the server's own port (8000 inside the container). With the bundled Caddy setup that port is not published — reach them through the proxy: `https://your-server-hostname/export`, and `/health` on either `https://your-server-hostname/health` or plain `http://your-server-hostname/health`, which Caddy serves without the HTTPS redirect so probes work without TLS.
-| `GET /export` | Bearer | The full store as a zip; optional `?namespace=` filter (see [Export](#export)) |
+All of them are served on both the plain port (8000) and, once set up, the HTTPS port (8443). After HTTPS is confirmed the plain port keeps only `/health`, `/setup`, `/ca.crt` and the instance id; `/mcp`, `/api` and `/export` answer `403 https_required` there, and the rest redirects to `/setup`.
 
 ## Available Resources
 

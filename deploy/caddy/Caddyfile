@@ -1,5 +1,11 @@
+# Caddy in front of Mnem-O-matic, for deployments that already terminate TLS
+# in a reverse proxy. Pair it with MNEMOMATIC_TLS=off and
+# MNEMOMATIC_TRUSTED_PROXIES=* on the server — docker-compose.caddy.yml beside
+# this file does both. Out of the box the server needs none of this: it runs
+# its own certificate authority (see docs/installation.md, "HTTPS").
 {
-    # Disable Caddy's automatic HTTPS — certificate is provided via mkcert
+    # Certificates are provided by you (mkcert, an internal CA, ...), not by
+    # Caddy's ACME client.
     auto_https off
 }
 

@@ -13,31 +13,42 @@ services:
       #   EMBED_MODEL: embeddinggemma         # 768 dims, best retrieval quality, ~200 ms/embed, ~1.2 GB RAM
       #   EMBED_MODEL: amaretto-embed-148m    # 768 dims, 8 Latin-script languages + code, near-Gemma quality, ~130 ms/embed, ~470 MB RAM
       #                                       # switching models on an existing database needs a reindex — see MNEMOMATIC_REINDEX below
-    # No ports exposed directly — all traffic goes through Caddy
-    # (or uncomment below for direct access: ports: ["${PORT:-8686}:8000"])
+    ports:
+      # Plain HTTP: the first-run screen, the setup page, and everything else
+      # until an administrator confirms HTTPS from the web UI — after that it
+      # only hands clients over to the HTTPS port.
+      - "8000:8000"
+      # HTTPS from the built-in certificate authority, once a hostname is set.
+      - "8443:8443"
     volumes:
-      # The container runs as uid 65532, so this directory must be writable by
-      # it: `sudo chown -R 65532:65532 ./data`, or add `user: "${UID}:${GID}"`
+      # Holds the database and, under tls/, the CA and server certificate. The
+      # container runs as uid 65532, so this directory must be writable by it:
+      # `sudo chown -R 65532:65532 ./data`, or add `user: "${UID}:${GID}"`
       # below to run as yourself. On SELinux hosts append `:z`. See
       # docs/installation.md, "Running as a Non-Root User".
       - ./data:/data
     environment:
       - MNEMOMATIC_DB_PATH=/data/mnemomatic.db
-      # Caddy is the only thing that can reach this port, so its X-Forwarded-For
-      # and X-Forwarded-Proto are believed: clients get their own brute-force
-      # lockout bucket, the audit log records the real address, and the viewer's
-      # cookie is marked Secure. If you publish the port directly (ports: above),
-      # replace * with the proxy's IP or the Docker network CIDR.
-      - MNEMOMATIC_TRUSTED_PROXIES=*
-      # - MNEMOMATIC_API_KEY=  # set a strong key: openssl rand -base64 32
-      # - MNEMOMATIC_UI_TOKEN=  # enable the read-only web viewer at /ui; shared secret, not a user account
+      # First start: with no users the server prints a one-time setup code to
+      # the log; open http://<host>:8000 and enter it to create the first
+      # administrator. Set this instead to create `admin` headlessly (10+ chars).
+      # - MNEMOMATIC_ADMIN_PASSWORD=
+      # The DNS name clients will use for HTTPS. Pre-fills the HTTPS page and
+      # issues certificates at start; an administrator still confirms from a
+      # browser before plain HTTP closes. A name, never an IP address.
+      # - MNEMOMATIC_PUBLIC_HOST=memory.example
+      # Terminating TLS in your own reverse proxy instead? Turn the built-in
+      # CA off and name the proxy so client addresses survive — see
+      # deploy/caddy/ for a ready-made Caddy overlay.
+      # - MNEMOMATIC_TLS=off
+      # - MNEMOMATIC_TRUSTED_PROXIES=*
       # - MNEMOMATIC_BACKUP_DIR=/data/backups                       # enable scheduled export-zip backups; keep it inside the mounted volume
       # - MNEMOMATIC_BACKUP_INTERVAL=24                             # hours between backups (default: 24)
       # - MNEMOMATIC_BACKUP_KEEP=7                                  # backup archives to retain; older ones are pruned (default: 7)
       # - MNEMOMATIC_REVISIONS_KEEP=10                              # prior versions kept per item for the restore tool (default: 10; 0 disables)
       # - MNEMOMATIC_SIMILAR_THRESHOLD=0.8                          # cosine similarity for near-duplicate flagging on store + consolidation_report (0 disables)
       # - MNEMOMATIC_AUDIT_KEEP_DAYS=730                            # audit-log retention in days (default: 730; 0 keeps forever)
-      # - MNEMOMATIC_CORS_ORIGINS=*  # allow browser clients; use comma-separated origins to restrict
+      # - MNEMOMATIC_CORS_ORIGINS=http://llama-host:8080            # browser-based MCP clients only; comma-separated origins
       # - MNEMOMATIC_EMBED_URL=http://ollama:11434/v1/embeddings    # required for lite image (OpenAI-compatible: Ollama, llama.cpp, vLLM)
       # - MNEMOMATIC_EMBED_API=openai                               # or 'ollama' for the native /api/embeddings endpoint
       # - MNEMOMATIC_EMBED_MODEL=nomic-embed-text                   # model name for external embedder
@@ -46,19 +57,3 @@ services:
       # - MNEMOMATIC_CHUNK_THRESHOLD=2000                           # chars; docs longer than this are chunked (default: 2000)
       # - MNEMOMATIC_CHUNK_SIZE=1000                                # chars per chunk (default: 1000)
       # - MNEMOMATIC_CHUNK_OVERLAP=200                              # overlap between chunks in chars (default: 200)
-
-  caddy:
-    container_name: Caddy-MCP
-    image: caddy:2-alpine
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - ./certs:/etc/caddy/certs:ro
-      - caddy_data:/data
-    depends_on:
-      - mnemomatic
-
-volumes:
-  caddy_data:

@@ -71,7 +71,7 @@
                   {e.title || e.item_id || e.namespace || ''}{#if e.item_type}<span class="muted small"> ({e.item_type})</span>{/if}
                 {/if}
               </td>
-              <td class="muted small nowrap">{e.detail?.token ? `token ${e.detail.token.hint}` : (e.client ? e.client.split(' ')[0] : '—')}{#if e.ip} · {e.ip}{/if}</td>
+              <td class="muted small nowrap">{e.detail?.token ? `token ${e.detail.token.hint}` : (e.client ? e.client.split(' ')[0] : '—')}{#if e.ip}&nbsp;· {e.ip}{/if}</td>
               <td class="muted small mono">{detailText(e.detail)}</td>
             </tr>
           {/each}

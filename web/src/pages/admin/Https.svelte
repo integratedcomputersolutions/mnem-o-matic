@@ -19,7 +19,9 @@
   async function load() {
     try {
       status = await api.get('/api/admin/https');
-      if (!name) name = status.name || window.location.hostname;
+      // Pre-fill with the hostname the browser used, unless it is an IP literal (the CA refuses those).
+      const h = window.location.hostname;
+      if (!name) name = status.name || (/^[\d.]+$|:/.test(h) ? '' : h);
       session.https = status;
     } catch (e) {
       error = e;
