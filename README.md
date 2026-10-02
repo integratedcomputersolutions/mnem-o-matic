@@ -101,7 +101,7 @@ docker run -d --name mnemomatic -p 8000:8000 -p 8443:8443 -v "$(pwd)/data:/data"
 docker logs mnemomatic          # prints a one-time setup code
 ```
 
-Open `http://your-host:8000`, enter the code, and you have an administrator account. From there: create a token under **My tokens**, paste it into your client with the snippets on **Connect an agent**, and enable HTTPS under **Admin → HTTPS**.
+Open `http://your-host:8000`, enter the code, and you have an administrator account. (Ports taken on your host? See [If 8000 or 8443 is already taken](docs/installation.md#if-8000-or-8443-is-already-taken) — the HTTPS port must move together with `MNEMOMATIC_HTTPS_PORT`.) From there: create a token under **My tokens**, paste it into your client with the snippets on **Connect an agent**, and enable HTTPS under **Admin → HTTPS**.
 
 Both Docker images run as an unprivileged user (uid 65532) — nothing in the server needs root. `GET /health` reports liveness without credentials, and the images ship a `HEALTHCHECK` that polls it, so `docker compose up --wait` and orchestrator readiness gates work with no configuration. Everything else requires a signed-in user or a token.
 

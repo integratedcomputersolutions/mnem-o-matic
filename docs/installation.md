@@ -182,6 +182,22 @@ The server carries its own certificate authority, so a LAN deployment gets HTTPS
 
 Everything lives under `data/tls/` next to the database: `ca.crt`, `ca.key` (0600), `leaf.crt`, `leaf.key`. The directory is created `0700` by the container's user (uid 65532), so a host backup needs matching privileges. Back it up with the database.
 
+### If 8000 or 8443 is already taken
+
+Docker refuses to start the container with `Bind for 0.0.0.0:8443 failed: port is already allocated`. Move the port — but for HTTPS move **two things together**, because the HTTPS port is both where the server listens and the port written into every URL it hands out (the HTTPS page, the Connect page, the setup page, the plain-port 403s):
+
+```yaml
+services:
+  mnemomatic:
+    ports:
+      - "18000:8000"        # plain: only the host side changes, the UI derives its own URL from the browser
+      - "18443:18443"       # HTTPS: same number on both sides …
+    environment:
+      - MNEMOMATIC_HTTPS_PORT=18443   # … and the server told about it
+```
+
+Or with `docker run`: `-p 18000:8000 -p 18443:18443 -e MNEMOMATIC_HTTPS_PORT=18443`. Publishing `18443:8443` without the variable looks like it works until a client follows the advertised `https://host:8443`, which is not where the server is.
+
 ### Your own certificate
 
 Drop `custom.crt` and `custom.key` (PEM) into `data/tls/`. They take precedence over the built-in pair, no CA is offered, HTTPS counts as active at once, and renewal is yours. The name comes from the certificate's first DNS SAN.
