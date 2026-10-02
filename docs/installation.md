@@ -180,7 +180,7 @@ The server carries its own certificate authority, so a LAN deployment gets HTTPS
 
 `MNEMOMATIC_PUBLIC_HOST` pre-fills step 2 at start-up; step 4 is still a browser action. **Turn HTTPS enforcement off** from the same page to reopen plain HTTP without discarding the certificates. Changing the name issues a new CA (the old constraints would not cover it) and goes back to step 3.
 
-Everything lives under `data/tls/` next to the database: `ca.crt`, `ca.key` (0600), `leaf.crt`, `leaf.key`. Back the directory up with the database.
+Everything lives under `data/tls/` next to the database: `ca.crt`, `ca.key` (0600), `leaf.crt`, `leaf.key`. The directory is created `0700` by the container's user (uid 65532), so a host backup needs matching privileges. Back it up with the database.
 
 ### Your own certificate
 
@@ -426,7 +426,7 @@ Environment variables (set in `docker-compose.yml` or passed to Docker):
 | `MNEMOMATIC_DB_PATH`        | `/data/mnemomatic.db`       | Path to the SQLite database file                         |
 | `MNEMOMATIC_HOST`           | `0.0.0.0`                   | Server bind address                                      |
 | `MNEMOMATIC_PORT`           | `8000`                      | Plain-HTTP port (inside container)                       |
-| `MNEMOMATIC_HTTPS_PORT`     | `8443`                      | HTTPS port, served once a hostname is set (inside container) |
+| `MNEMOMATIC_HTTPS_PORT`     | `8443`                      | HTTPS port, served once a hostname is set. It is also the port named in the HTTPS URL the UI and setup page show, so publish it under the same number (`8443:8443`) or set this to the published one. |
 | `MNEMOMATIC_TLS`            | `auto`                      | `auto` runs the built-in certificate authority; `off` for deployments that terminate TLS in their own proxy (the HTTPS page then reports it as off). See [HTTPS](#https). |
 | `MNEMOMATIC_PUBLIC_HOST`    | *(unset)*                   | DNS name to issue certificates for at start-up (pre-fills the HTTPS page). An administrator still confirms from a browser. A name, never an IP. |
 | `MNEMOMATIC_TLS_DIR`        | `<database directory>/tls`  | Where the CA and server certificate live (`ca.crt`, `ca.key`, `leaf.crt`, `leaf.key`, optional `custom.crt`/`custom.key`) |
