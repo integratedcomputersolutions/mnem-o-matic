@@ -31,11 +31,12 @@
     </div>
     <button type="button" class="btn ghost sm" onclick={logout}>Sign out</button>
     <div class="brands">
-      <img class="bai" src="/bostonai-logo.png" alt="Boston AI" height="22" />
-      <div class="ics">
-        <img src="/ics-logo.svg" alt="ICS" height="18" />
-        <span>A Division of ICS{#if session.version}&nbsp;· v{session.version}{/if}</span>
+      <div class="logos">
+        <img class="bai" src="/bostonai-logo.png" alt="Boston AI" />
+        <span class="sep" aria-hidden="true"></span>
+        <img class="ics" src="/ics-logo.svg" alt="ICS" />
       </div>
+      {#if session.version}<span class="ver">v{session.version}</span>{/if}
     </div>
   </div>
 </aside>
@@ -54,8 +55,12 @@
   .item.on { background: var(--brand); color: #fff; }
   .bottom { padding: 12px 16px 16px; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 8px; }
   .brands { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--line); }
-  .ics { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 11.5px; }
-  .ics img { border-radius: 3px; }
+  .logos { display: flex; align-items: center; gap: 10px; }
+  .logos img { flex: 0 0 auto; width: auto; object-fit: contain; }
+  .logos .bai { height: 18px; }
+  .logos .ics { height: 20px; border-radius: 3px; }
+  .sep { width: 1px; height: 18px; background: var(--line-strong); }
+  .ver { color: var(--muted); font-size: 11.5px; }
   @media (max-width: 860px) {
     .sidebar { position: static; height: auto; }
     .menu { display: inline-flex; }
