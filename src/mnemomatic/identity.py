@@ -476,6 +476,8 @@ class Identity:
         conn.execute("UPDATE users SET active = ? WHERE id = ?", (1 if active else 0, user_id))
         revoked = 0
         if not active:
+            conn.execute("UPDATE users SET credential_version = credential_version + 1 WHERE id = ?",
+                         (user_id,))
             conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
             revoked = conn.execute(
                 "UPDATE api_tokens SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL",
@@ -514,7 +516,7 @@ class Identity:
         conn = self._conn()
         conn.execute(
             "UPDATE users SET password_hash = ?, must_change_password = 1, "
-            "temp_password_expires_at = ? WHERE id = ?",
+            "temp_password_expires_at = ?, credential_version = credential_version + 1 WHERE id = ?",
             (hash_password(temp), expires, user_id),
         )
         conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
@@ -536,7 +538,7 @@ class Identity:
         conn = self._conn()
         conn.execute(
             "UPDATE users SET password_hash = ?, must_change_password = 0, "
-            "temp_password_expires_at = NULL WHERE id = ?",
+            "temp_password_expires_at = NULL, credential_version = credential_version + 1 WHERE id = ?",
             (hash_password(new), user_id),
         )
         if keep_session:
@@ -577,8 +579,11 @@ class Identity:
     # ── known devices ──
     # A browser that signed in to an account gets a cookie proving it, which
     # exempts it from the account-wide login throttle (see LoginThrottle). It
-    # is an HMAC over (username, issue time) under a key kept in the settings
-    # table, so it survives restarts, cannot be forged, and needs no table.
+    # is an HMAC over (user id, username, credential version, issue time)
+    # under a key kept in the settings table, so it survives restarts, cannot
+    # be forged, and needs no table. The credential version moves on every
+    # password change, reset and deactivation, so a browser that once held
+    # the old password loses the exemption with it.
 
     def _device_key(self) -> bytes:
         stored = self._db.get_setting(DEVICE_KEY_SETTING)
@@ -592,12 +597,24 @@ class Identity:
             stored = self._db.get_setting(DEVICE_KEY_SETTING)
         return bytes.fromhex(stored)
 
-    def _device_mac(self, username: str, issued: int) -> str:
-        return hmac.new(self._device_key(), f"{username}|{issued}".encode(), hashlib.sha256).hexdigest()
+    def _device_binding(self, username: str) -> str | None:
+        """What a proof for `username` is bound to, or None when no active
+        account has that name."""
+        row = self._conn().execute(
+            "SELECT id, username, credential_version FROM users WHERE username = ? AND active = 1",
+            (username,),
+        ).fetchone()
+        return f"{row['id']}|{row['username']}|{row['credential_version']}" if row else None
+
+    def _device_mac(self, binding: str, issued: int) -> str:
+        return hmac.new(self._device_key(), f"{binding}|{issued}".encode(), hashlib.sha256).hexdigest()
 
     def issue_device_proof(self, username: str) -> str:
+        binding = self._device_binding(username)
+        if binding is None:
+            raise IdentityError("not_found", 404, "No such active user.")
         issued = int(_now().timestamp())
-        return f"{issued}.{self._device_mac(username, issued)}"
+        return f"{issued}.{self._device_mac(binding, issued)}"
 
     def is_known_device(self, username: str, proof: str | None) -> bool:
         if not proof or not USERNAME_RE.match(username):
@@ -609,7 +626,10 @@ class Identity:
             return False
         if _now().timestamp() - issued > DEVICE_COOKIE_TTL.total_seconds():
             return False
-        return hmac.compare_digest(mac.encode(), self._device_mac(username, issued).encode())
+        binding = self._device_binding(username)
+        if binding is None:
+            return False
+        return hmac.compare_digest(mac.encode(), self._device_mac(binding, issued).encode())
 
     # ── sessions ──
 

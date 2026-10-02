@@ -81,6 +81,28 @@ class TestMigrationV5(unittest.TestCase):
         self.assertEqual(conn.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"], 0)
         db.close()
 
+    def test_upgrade_adds_credential_version(self):
+        db = Database(str(self.path))
+        cols = {r["name"] for r in db.connection().execute("PRAGMA table_info(users)")}
+        self.assertIn("credential_version", cols)
+        db.close()
+
+    def test_v5_database_gains_credential_version(self):
+        # A 3.0 database: users exist, the column does not.
+        db = Database(str(self.path))
+        conn = db.connection()
+        conn.execute("ALTER TABLE users DROP COLUMN credential_version")
+        conn.execute("INSERT INTO users (username, role, password_hash, created_at) "
+                     "VALUES ('alice', 'user', 'x', '2026-10-01T00:00:00+00:00')")
+        conn.execute("PRAGMA user_version = 5")
+        conn.commit()
+        db.close()
+        db = Database(str(self.path))
+        row = db.connection().execute("SELECT credential_version FROM users WHERE username = 'alice'").fetchone()
+        self.assertEqual(row["credential_version"], 0)
+        self.assertEqual(db.list_audit(op="schema.migrated")[0]["detail"], {"from": 5, "to": SCHEMA_VERSION})
+        db.close()
+
     def test_reopen_is_a_no_op(self):
         Database(str(self.path)).close()
         db = Database(str(self.path))

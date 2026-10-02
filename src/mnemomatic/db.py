@@ -42,7 +42,10 @@ BUSY_TIMEOUT_MS = 5000
 # Version 5: identity — users, sessions, api_tokens, and a settings table.
 # Per-user credentials replace the single shared API key; the audit log's
 # actor becomes an authenticated username from here on.
-SCHEMA_VERSION = 5
+# Version 6: users.credential_version, bumped whenever a user's credentials
+# are invalidated (password change or reset, deactivation); known-device
+# proofs are bound to it.
+SCHEMA_VERSION = 6
 CHUNK_THRESHOLD = int(os.environ.get("MNEMOMATIC_CHUNK_THRESHOLD", "2000"))
 CHUNK_SIZE = int(os.environ.get("MNEMOMATIC_CHUNK_SIZE", "1000"))
 CHUNK_OVERLAP = int(os.environ.get("MNEMOMATIC_CHUNK_OVERLAP", "200"))
@@ -739,7 +742,7 @@ class Database:
 
     @classmethod
     def _migrate_content_schema(cls, conn: sqlite3.Connection) -> None:
-        """Apply the content-table migrations (v2 through v5) in order.
+        """Apply the content-table migrations (v2 through v6) in order.
 
         Every step is idempotent (column-existence checks, IF NOT EXISTS) so
         this is safe to run on any database regardless of which path reached it.
@@ -748,6 +751,7 @@ class Database:
         cls._migrate_to_v3(conn)
         cls._migrate_to_v4(conn)
         cls._migrate_to_v5(conn)
+        cls._migrate_to_v6(conn)
 
     @staticmethod
     def _record_migration(conn: sqlite3.Connection, from_version: int) -> None:
@@ -874,6 +878,14 @@ class Database:
                 value TEXT NOT NULL
             );
         """)
+
+    @staticmethod
+    def _migrate_to_v6(conn: sqlite3.Connection) -> None:
+        """Version 6: users.credential_version. Starts at 0 for everyone, so
+        known-device cookies issued before the upgrade stop counting once."""
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(users)")}
+        if "credential_version" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN credential_version INTEGER NOT NULL DEFAULT 0")
 
     def connection(self) -> sqlite3.Connection:
         """This thread's connection, for modules that own their own tables

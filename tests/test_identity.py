@@ -503,22 +503,54 @@ class TestThrottleReservation(unittest.TestCase):
 
 
 class TestKnownDevice(IdentityCase):
+    def setUp(self):
+        super().setUp()
+        self.root = self.admin()
+        self.alice = self.ident.create_user("alice", password="alicepassword1")[0]
+        self.ident.create_user("bob", password="bobpassword123")
+
     def test_proof_round_trip(self):
         proof = self.ident.issue_device_proof("alice")
         self.assertTrue(self.ident.is_known_device("alice", proof))
         self.assertFalse(self.ident.is_known_device("bob", proof))           # bound to the account
-        self.assertFalse(self.ident.is_known_device("alice", proof[:-1] + "0"))
+        flipped = proof[:-1] + ("1" if proof[-1] == "0" else "0")
+        self.assertFalse(self.ident.is_known_device("alice", flipped))
         self.assertFalse(self.ident.is_known_device("alice", None))
         self.assertFalse(self.ident.is_known_device("alice", "garbage"))
+        self.assertFalse(self.ident.is_known_device("nobody", proof))
 
     def test_proof_expires(self):
         issued = int(time.time()) - int(DEVICE_COOKIE_TTL.total_seconds()) - 60
-        stale = f"{issued}.{self.ident._device_mac('alice', issued)}"
+        stale = f"{issued}.{self.ident._device_mac(self.ident._device_binding('alice'), issued)}"
         self.assertFalse(self.ident.is_known_device("alice", stale))
 
     def test_key_survives_a_new_identity_object(self):
         proof = self.ident.issue_device_proof("alice")
         self.assertTrue(Identity(self.db).is_known_device("alice", proof))
+
+    def test_password_change_voids_proof(self):
+        proof = self.ident.issue_device_proof("alice")
+        self.ident.change_password(self.alice.id, "alicepassword1", "a brand new password")
+        self.assertFalse(self.ident.is_known_device("alice", proof))
+        self.assertTrue(self.ident.is_known_device("alice", self.ident.issue_device_proof("alice")))
+
+    def test_reset_voids_proof(self):
+        proof = self.ident.issue_device_proof("alice")
+        self.ident.reset_password(self.alice.id, acting_user_id=self.root.id)
+        self.assertFalse(self.ident.is_known_device("alice", proof))
+
+    def test_deactivation_voids_proof_for_good(self):
+        proof = self.ident.issue_device_proof("alice")
+        self.ident.set_active(self.alice.id, False, acting_user_id=self.root.id)
+        self.assertFalse(self.ident.is_known_device("alice", proof))
+        self.ident.set_active(self.alice.id, True, acting_user_id=self.root.id)
+        self.assertFalse(self.ident.is_known_device("alice", proof))
+
+    def test_recreated_account_does_not_inherit_proof(self):
+        proof = self.ident.issue_device_proof("alice")
+        self.ident.delete_user(self.alice.id, acting_user_id=self.root.id)
+        self.ident.create_user("alice", password="alicepassword1")
+        self.assertFalse(self.ident.is_known_device("alice", proof))
 
 
 class TestFirstRun(unittest.TestCase):
