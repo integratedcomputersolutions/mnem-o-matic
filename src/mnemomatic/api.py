@@ -38,7 +38,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from mnemomatic import config
 from mnemomatic import db as db_module
-from mnemomatic.audit import request_meta, write_event
+from mnemomatic.audit import write_event
 from mnemomatic.auth import COOKIE_NAME
 from mnemomatic.db import _SPEC_BY_ITEM_TYPE
 from mnemomatic.tlsca import TlsError
@@ -63,8 +63,6 @@ logger = logging.getLogger("mnemomatic")
 INSTANCE_ID = secrets.token_hex(16)
 
 _ITEM_TYPES = tuple(_SPEC_BY_ITEM_TYPE)
-_SEARCH_TYPES = ("all", "documents", "knowledge", "notes")
-_SEARCH_MODES = ("hybrid", "fulltext", "semantic")
 
 
 class ApiError(Exception):
@@ -567,9 +565,8 @@ def build_api_routes(*, identity, db_getter, settings_info, first_run: FirstRun,
                       "total": total, "limit": limit, "offset": offset})
 
     def fetch_item(request: Request):
-        from mnemomatic.tools_content import _OPS
         item_type = item_type_param(request.path_params["item_type"])
-        obj = _OPS[item_type].get(db_getter(), request.path_params["item_id"])
+        obj = db_getter().get_item(item_type, request.path_params["item_id"])
         if obj is None:
             raise ApiError("not_found", 404, f"No {item_type} with that id.")
         return item_type, obj
@@ -583,13 +580,18 @@ def build_api_routes(*, identity, db_getter, settings_info, first_run: FirstRun,
         rows = db_getter().list_revisions(item_type=item_type, item_id=obj.id, limit=50)
         return _json({"revisions": rows})
 
+    # Search and related go through the same core as the MCP tools, minus
+    # their usage bookkeeping: browsing the viewer must not bump
+    # retrieval_count (see Database.record_access).
+
     async def item_related(request: Request):
         from mnemomatic import tools_search
         item_type, obj = fetch_item(request)
-        result = tools_search.related(item_type, obj.id, limit=_int_param(request, "limit", 5, 1, 20))
-        if "error" in result:
-            return _json({"related": [], "unavailable": result["error"]})
-        return _json({"related": result["related"]})
+        try:
+            neighbors = tools_search._related(item_type, obj.id, limit=_int_param(request, "limit", 5, 1, 20))
+        except tools_search.SearchError as e:
+            return _json({"related": [], "unavailable": e.body["error"]})
+        return _json({"related": [r.model_dump() for r in neighbors]})
 
     async def search(request: Request):
         from mnemomatic import tools_search
@@ -597,20 +599,14 @@ def build_api_routes(*, identity, db_getter, settings_info, first_run: FirstRun,
         query = q.get("q", "").strip()
         if not query:
             raise ApiError("missing_parameter", 400, "'q' is required.")
-        content_type = q.get("type") or "all"
-        if content_type not in _SEARCH_TYPES:
-            raise ApiError("invalid_type", 400, f"'type' must be one of: {', '.join(_SEARCH_TYPES)}.")
-        mode = q.get("mode") or "hybrid"
-        if mode not in _SEARCH_MODES:
-            raise ApiError("invalid_mode", 400, f"'mode' must be one of: {', '.join(_SEARCH_MODES)}.")
-        results = tools_search.search(query=query, content_type=content_type,
-                                      namespace=q.get("namespace") or None,
-                                      limit=_int_param(request, "limit", 20, 1, config.MAX_SEARCH_LIMIT),
-                                      mode=mode)
-        if results and "error" in results[0]:
-            raise ApiError("search_failed", 400, f"{results[0]['error']}: {results[0].get('details', '')}")
-        degraded = any("_metadata" in r for r in results)
-        return _json({"results": [r for r in results if "_metadata" not in r], "degraded": degraded})
+        try:
+            results, degraded = tools_search._search(
+                query, content_type=q.get("type") or "all", namespace=q.get("namespace") or None,
+                limit=_int_param(request, "limit", 20, 1, config.MAX_SEARCH_LIMIT),
+                mode=q.get("mode") or "hybrid")
+        except tools_search.SearchError as e:
+            raise ApiError(e.code, 400, f"{e.body['error']}: {e.body.get('details', '')}")
+        return _json({"results": [r.model_dump() for r in results], "degraded": degraded})
 
     return Mount("/api", routes=[
         route("/session", session, ["GET"]),

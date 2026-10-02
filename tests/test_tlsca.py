@@ -1,6 +1,5 @@
 """Tests for the built-in CA (mnemomatic.tlsca) and the plain-port gate."""
 
-import ipaddress
 import json
 import ssl
 import stat

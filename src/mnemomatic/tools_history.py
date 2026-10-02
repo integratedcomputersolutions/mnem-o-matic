@@ -16,15 +16,12 @@ from mnemomatic.audit import request_meta
 from mnemomatic.db import _SPEC_BY_ITEM_TYPE, _SPECS
 from mnemomatic.runtime import (
     _audit,
-    _embed_content,
-    _embed_document_body,
+    _embed_item,
     _format_validation_error,
-    _knowledge_embed_text,
-    _note_embed_text,
     _record_access,
     mcp,
 )
-from mnemomatic.tools_content import _OPS, _handle_update
+from mnemomatic.tools_content import _handle_update
 
 # Duplicate clustering: rows of the similarity matrix computed per step
 # (512 x n float32, ~20 MB at 10,000 items) and the most qualifying pairs
@@ -87,8 +84,8 @@ def list_revisions(
         namespace: Filter by namespace (optional).
         limit: Maximum revisions to return, newest first (default 20, max 200).
     """
-    if item_type is not None and item_type not in _OPS:
-        return {"error": "Invalid item_type", "details": f"Must be one of: {', '.join(sorted(_OPS))}"}
+    if item_type is not None and item_type not in _SPEC_BY_ITEM_TYPE:
+        return {"error": "Invalid item_type", "details": f"Must be one of: {', '.join(sorted(_SPEC_BY_ITEM_TYPE))}"}
     limit = max(1, min(int(limit), config.MAX_LIST_LIMIT))
     revisions = runtime._db().list_revisions(item_type=item_type, item_id=item_id,
                                      namespace=namespace, limit=limit)
@@ -125,8 +122,8 @@ def list_audit(
         op: Filter by operation name (optional).
         limit: Maximum events to return, newest first (default 50, max 200).
     """
-    if item_type is not None and item_type not in _OPS:
-        return {"error": "Invalid item_type", "details": f"Must be one of: {', '.join(sorted(_OPS))}"}
+    if item_type is not None and item_type not in _SPEC_BY_ITEM_TYPE:
+        return {"error": "Invalid item_type", "details": f"Must be one of: {', '.join(sorted(_SPEC_BY_ITEM_TYPE))}"}
     limit = max(1, min(int(limit), config.MAX_LIST_LIMIT))
     events = runtime._db().list_audit(item_type=item_type, item_id=item_id,
                                       namespace=namespace, op=op, limit=limit,
@@ -159,7 +156,7 @@ def restore(revision_id: int) -> dict:
     item_type, item = rev["item_type"], rev["item"]
     key = _SPEC_BY_ITEM_TYPE[item_type].title_field
 
-    if _OPS[item_type].get(runtime._db(), rev["item_id"]) is not None:
+    if runtime._db().get_item(item_type, rev["item_id"]) is not None:
         # Roll the live item back through the normal update path — it captures
         # the current state as a revision and re-embeds what changed.
         fields = {f: getattr(item, f) for f in _SPEC_BY_ITEM_TYPE[item_type].update_fields}
@@ -183,13 +180,13 @@ def restore(revision_id: int) -> dict:
                            f"{item.namespace!r}/{getattr(item, key)!r} — delete or rename it first"}
 
     item = item.model_copy(update={"updated_at": datetime.now(timezone.utc)})
+    embedding, chunks = _embed_item(item_type, item)
     if item_type == "document":
-        embedding, chunks = _embed_document_body(item.title, item.content)
         stored, _ = runtime._db().store_document(item, embedding, chunks)
     elif item_type == "knowledge":
-        stored, _, _ = runtime._db().store_knowledge(item, _embed_content(_knowledge_embed_text(item.subject, item.fact)))
+        stored, _, _ = runtime._db().store_knowledge(item, embedding)
     else:
-        stored, _ = runtime._db().store_note(item, _embed_content(_note_embed_text(item.title, item.content)))
+        stored, _ = runtime._db().store_note(item, embedding)
     _audit("restore", item_type=item_type, item_id=stored.id, namespace=stored.namespace,
            title=getattr(stored, key), revision_id=revision_id, recreated=True)
     return {"id": stored.id, key: getattr(stored, key), "namespace": stored.namespace,

@@ -7,7 +7,6 @@ from unittest.mock import patch
 from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
-from mnemomatic import api as api_module
 from mnemomatic import config, runtime
 from mnemomatic.api import INSTANCE_ID, SecurityHeadersMiddleware, build_api_routes
 from mnemomatic.audit import RequestMetaMiddleware
@@ -426,6 +425,13 @@ class TestStoreViews(ApiCase):
         resp = self.client.get("/api/search?q=x&mode=semantic", cookies=self.user())
         self.assertEqual(resp.status_code, 400)
         self.assertEqual(resp.json()["error"], "search_failed")
+
+    def test_search_does_not_record_access(self):
+        # The viewer browsing is not an agent retrieving: retrieval_count is
+        # bumped by the MCP surfaces only (Database.record_access).
+        body = self.client.get("/api/search?q=cache&mode=fulltext", cookies=self.user()).json()
+        self.assertEqual([r["id"] for r in body["results"]], [self.doc.id])
+        self.assertEqual(self.fx.db.get_document(self.doc.id).retrieval_count, 0)
 
     def test_audit_listing(self):
         self.post("/api/login", {"username": "admin", "password": IdentityFixture.ADMIN_PASSWORD})
