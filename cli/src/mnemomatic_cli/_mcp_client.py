@@ -19,6 +19,24 @@ _HEADERS = {
 }
 
 
+def _describe_http_error(exc: urllib.error.HTTPError) -> str:
+    """One line a person can act on. The server's JSON error carries a code
+    and a sentence of details (and, when plain HTTP is closed, the HTTPS URL
+    to use instead); fall back to the status line when it does not."""
+    body = {}
+    try:
+        body = json.loads(exc.read().decode() or "{}")
+    except Exception:
+        pass
+    code, details = body.get("error"), body.get("details")
+    if code == "https_required":
+        return f"Plain HTTP is closed on this server — use {body.get('https_url') or 'the HTTPS URL'} instead"
+    if exc.code in (401, 403):
+        hint = f": {details}" if details else ""
+        return f"Authentication failed — check --token (or MNEMOMATIC_TOKEN){hint}"
+    return f"HTTP {exc.code} from server: {details or exc.reason}"
+
+
 class MCPClient:
     """Minimal MCP client over Streamable HTTP."""
 
@@ -48,9 +66,7 @@ class MCPClient:
         try:
             resp = urllib.request.urlopen(req, timeout=30, context=self._ssl_context)
         except urllib.error.HTTPError as exc:
-            if exc.code in (401, 403):
-                raise RuntimeError("Authentication failed — check --token (or MNEMOMATIC_TOKEN)") from exc
-            raise RuntimeError(f"HTTP {exc.code} from server: {exc.reason}") from exc
+            raise RuntimeError(_describe_http_error(exc)) from exc
         except OSError as exc:
             raise RuntimeError(f"Cannot connect to server at {self.base_url}") from exc
         if not self.session_id:
