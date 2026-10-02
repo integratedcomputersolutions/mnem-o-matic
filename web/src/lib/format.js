@@ -44,7 +44,6 @@ export function truncate(text, n = 160) {
 }
 
 export const TYPE_LABEL = { document: 'Document', knowledge: 'Knowledge', note: 'Note' };
-export const TYPE_PLURAL = { document: 'documents', knowledge: 'knowledge', note: 'notes' };
 
 export function typeLabel(t) {
   return TYPE_LABEL[t] || t || DASH;
@@ -58,9 +57,4 @@ export function itemTitle(item) {
 export function errorText(e) {
   if (!e) return '';
   return e.message || String(e);
-}
-
-export function pct(n, d) {
-  if (!d) return DASH;
-  return `${Math.round((100 * n) / d)}%`;
 }

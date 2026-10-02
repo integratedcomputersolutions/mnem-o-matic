@@ -25,3 +25,29 @@ export function remote(initial = null) {
   });
   return r;
 }
+
+// The same shape for "do something on click/submit": whether it is running
+// and the error if it failed. `run` returns whatever `fn` returns, or
+// undefined when it threw.
+//
+//   const save = action();
+//   const submit = () => save.run(() => api.post('/api/things', form));
+
+export function action() {
+  const a = $state({
+    error: null,
+    busy: false,
+    async run(fn) {
+      a.busy = true;
+      a.error = null;
+      try {
+        return await fn();
+      } catch (e) {
+        a.error = e;
+      } finally {
+        a.busy = false;
+      }
+    },
+  });
+  return a;
+}

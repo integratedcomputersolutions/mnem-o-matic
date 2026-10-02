@@ -7,48 +7,43 @@
   import CopyField from '../../components/CopyField.svelte';
   import StatusBadge from '../../components/StatusBadge.svelte';
   import { api } from '../../lib/api.js';
+  import { remote, action } from '../../lib/load.svelte.js';
   import { session } from '../../lib/session.svelte.js';
   import { fmtDay } from '../../lib/format.js';
 
-  let status = $state(null);
+  const https = remote();
+  const op = action();
+  const status = $derived(https.data);
   let name = $state('');
-  let busy = $state(false);
-  let error = $state(null);
   let probe = $state(null);          // null | 'checking' | 'unreachable' | 'mismatch' | 'ok'
 
-  async function load() {
-    try {
-      status = await api.get('/api/admin/https');
+  function show(s) {
+    https.data = s;
+    session.https = s;
+  }
+
+  $effect(() => {
+    https.load(async () => {
+      const s = await api.get('/api/admin/https');
       // Pre-fill with the hostname the browser used, unless it is an IP literal (the CA refuses those).
       const h = window.location.hostname;
-      if (!name) name = status.name || (/^[\d.]+$|:/.test(h) ? '' : h);
-      session.https = status;
-    } catch (e) {
-      error = e;
-    }
-  }
-  $effect(() => { load(); });
+      if (!name) name = s.name || (/^[\d.]+$|:/.test(h) ? '' : h);
+      session.https = s;
+      return s;
+    });
+  });
 
   const step = $derived(!status ? 0 : status.state === 'unconfigured' ? 0 : status.state === 'pending' ? 1 : 2);
 
-  async function setName(e) {
+  function setName(e) {
     e.preventDefault();
-    busy = true;
-    error = null;
-    probe = null;
-    try {
-      status = await api.post('/api/admin/https/name', { name: name.trim() });
-      session.https = status;
-    } catch (err) {
-      error = err;
-    } finally {
-      busy = false;
-    }
+    op.run(async () => {
+      probe = null;
+      show(await api.post('/api/admin/https/name', { name: name.trim() }));
+    });
   }
 
-  async function confirm() {
-    busy = true;
-    error = null;
+  const confirm = () => op.run(async () => {
     probe = 'checking';
     let id = null;
     try {
@@ -58,38 +53,25 @@
       id = (await r.json()).instance_id;
     } catch {
       probe = 'unreachable';
-      busy = false;
       return;
     }
     try {
-      status = await api.post('/api/admin/https/confirm', { name: status.name, instance_id: id });
-      session.https = status;
+      show(await api.post('/api/admin/https/confirm', { name: status.name, instance_id: id }));
       probe = 'ok';
     } catch (err) {
       probe = err.code === 'instance_mismatch' ? 'mismatch' : null;
-      error = err;
-    } finally {
-      busy = false;
+      throw err;
     }
-  }
+  });
 
-  async function disable() {
-    busy = true;
-    error = null;
-    try {
-      status = await api.post('/api/admin/https/disable');
-      session.https = status;
-      probe = null;
-    } catch (err) {
-      error = err;
-    } finally {
-      busy = false;
-    }
-  }
+  const disable = () => op.run(async () => {
+    show(await api.post('/api/admin/https/disable'));
+    probe = null;
+  });
 </script>
 
 <PageHeader title="HTTPS" subtitle="A private certificate authority, bound to one hostname, confirmed from your browser." />
-<ErrorBox {error} />
+<ErrorBox error={op.error || https.error} />
 
 {#if status}
   {#if status.state === 'off'}
@@ -121,7 +103,7 @@
             <div class="help">A name, not an IP: the certificate is bound to it. Changing it later issues a new CA.</div>
           </div>
           <div class="row">
-            <button class="btn primary" type="submit" disabled={busy || !name.trim()}>
+            <button class="btn primary" type="submit" disabled={op.busy || !name.trim()}>
               {status.state === 'unconfigured' ? 'Issue certificates' : 'Re-issue for this name'}
             </button>
             {#if status.state !== 'unconfigured'}
@@ -139,7 +121,7 @@
             <CopyField label="SHA-256 fingerprint" value={status.ca_fingerprint || ''} multiline />
             <p class="dim small">Install steps per OS and browser are on the <a href="/setup" target="_blank" rel="noopener">setup page</a>. Then:</p>
             {#if status.state === 'pending'}
-              <button class="btn primary" onclick={confirm} disabled={busy}>{probe === 'checking' ? 'Checking…' : 'Check and confirm HTTPS'}</button>
+              <button class="btn primary" onclick={confirm} disabled={op.busy}>{probe === 'checking' ? 'Checking…' : 'Check and confirm HTTPS'}</button>
               {#if probe === 'unreachable'}
                 <div class="alert warn">This browser could not reach <code>{status.https_url}</code>. Either the CA is not trusted here yet, or the name does not resolve to this server from this machine.</div>
               {:else if probe === 'mismatch'}
@@ -147,7 +129,7 @@
               {/if}
             {:else}
               <div class="alert good">Confirmed. Plain HTTP now only serves the setup page; everything else lives at <a href={status.https_url}>{status.https_url}</a>.</div>
-              <button class="btn danger sm" onclick={disable} disabled={busy}>Turn HTTPS enforcement off</button>
+              <button class="btn danger sm" onclick={disable} disabled={op.busy}>Turn HTTPS enforcement off</button>
             {/if}
           </div>
         </Card>

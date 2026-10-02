@@ -3,40 +3,31 @@
   import ErrorBox from '../components/ErrorBox.svelte';
   import { api } from '../lib/api.js';
   import { session } from '../lib/session.svelte.js';
+  import { action } from '../lib/load.svelte.js';
 
   let code = $state('');
   let username = $state('admin');
   let displayName = $state('');
   let password = $state('');
   let confirm = $state('');
-  let busy = $state(false);
-  let error = $state(null);
+  const op = action();
 
-  async function submit(e) {
+  function submit(e) {
     e.preventDefault();
-    error = null;
-    if (password !== confirm) {
-      error = 'The two passwords differ.';
-      return;
-    }
-    busy = true;
-    try {
+    op.run(async () => {
+      if (password !== confirm) throw new Error('The two passwords differ.');
       const r = await api.post('/api/first-run', {
         setup_code: code, username: username.trim(), display_name: displayName.trim(), password,
       });
       session.user = r.user;
       session.firstRun = false;
-    } catch (err) {
-      error = err.message;
-    } finally {
-      busy = false;
-    }
+    });
   }
 </script>
 
 <AuthCard title="Create the first administrator" subtitle="No users exist yet. The setup code is in the server's log.">
   <form class="stack" onsubmit={submit}>
-    <ErrorBox {error} />
+    <ErrorBox error={op.error} />
     <div class="field">
       <label for="c">Setup code</label>
       <input id="c" class="input mono" bind:value={code} placeholder="XXXX-XXXX-XXXX" autocomplete="off" spellcheck="false" required />
@@ -59,6 +50,6 @@
       <label for="p2">Confirm password</label>
       <input id="p2" class="input" type="password" bind:value={confirm} autocomplete="new-password" required />
     </div>
-    <button class="btn primary" type="submit" disabled={busy}>{busy ? 'Creating…' : 'Create administrator'}</button>
+    <button class="btn primary" type="submit" disabled={op.busy}>{op.busy ? 'Creating…' : 'Create administrator'}</button>
   </form>
 </AuthCard>

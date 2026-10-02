@@ -74,8 +74,9 @@ jobs:
           push: ${{ env.PUBLISH == 'true' }}
           labels: ${{ steps.meta.outputs.labels }}
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=${{ env.PUBLISH == 'true' }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # One cache per matrix leg, so the four builds do not overwrite each other's.
+          cache-from: type=gha,scope=${{ matrix.target }}-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.target }}-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
 
       - name: Export digest
         if: env.PUBLISH == 'true'
