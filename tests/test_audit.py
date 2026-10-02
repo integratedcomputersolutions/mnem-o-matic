@@ -198,7 +198,77 @@ class TestRequestMeta(unittest.TestCase):
         self.assertEqual(meta["client"], "other/2.0")
 
     def test_defaults_outside_a_request(self):
-        self.assertEqual(request_meta(), {"actor": None, "client": None, "ip": None})
+        self.assertEqual(request_meta(), {
+            "actor": None, "client": None, "ip": None,
+            "user": None, "user_id": None, "via": None, "token_id": None, "token_hint": None,
+        })
+
+    def test_principal_in_scope_is_copied(self):
+        from starlette.applications import Starlette
+        from starlette.responses import JSONResponse
+        from starlette.routing import Route
+        from starlette.testclient import TestClient
+
+        from mnemomatic.identity import Principal, User
+
+        user = User(id=7, username="matt", display_name="", role="admin", active=True,
+                    must_change_password=False, temp_password_expires_at=None, created_at="t")
+
+        async def echo(request):
+            return JSONResponse(request_meta())
+
+        async def inject(scope, receive, send):
+            scope.setdefault("state", {})["principal"] = Principal(user=user, via="token",
+                                                                   token_id=3, token_hint="mnm_abcdef")
+            await app(scope, receive, send)
+
+        app = RequestMetaMiddleware(Starlette(routes=[Route("/", echo)]))
+        meta = TestClient(inject).get("/", headers={"X-Mnemomatic-Actor": "laptop"}).json()
+        self.assertEqual(meta["user"], "matt")
+        self.assertEqual(meta["user_id"], 7)
+        self.assertEqual(meta["via"], "token")
+        self.assertEqual(meta["token_id"], 3)
+        self.assertEqual(meta["token_hint"], "mnm_abcdef")
+        self.assertEqual(meta["actor"], "laptop")
+
+
+class TestAuditEnrichment(ToolTestCase):
+    """runtime._audit turns the request meta into actor, token detail, label."""
+
+    def _with_meta(self, **fields):
+        from mnemomatic.audit import _EMPTY, _request_meta
+        return _request_meta.set({**_EMPTY, **fields})
+
+    def test_token_principal(self):
+        from mnemomatic.audit import _request_meta
+        tok = self._with_meta(user="matt", user_id=1, via="token", token_id=9, token_hint="mnm_xyz123",
+                              client="ua/1", ip="10.1.1.1")
+        try:
+            tools_content.store_note(namespace="proj", title="n", content="c")
+        finally:
+            _request_meta.reset(tok)
+        event = self.db.list_audit(op="store")[0]
+        self.assertEqual(event["actor"], "matt")
+        self.assertEqual(event["client"], "ua/1")
+        self.assertEqual(event["detail"]["token"], {"id": 9, "hint": "mnm_xyz123"})
+        self.assertNotIn("label", event["detail"])
+
+    def test_header_label_rides_in_detail(self):
+        from mnemomatic.audit import _request_meta
+        tok = self._with_meta(user="matt", user_id=1, via="session", actor="laptop")
+        try:
+            tools_content.store_note(namespace="proj", title="n", content="c")
+        finally:
+            _request_meta.reset(tok)
+        event = self.db.list_audit(op="store")[0]
+        self.assertEqual(event["actor"], "matt")
+        self.assertEqual(event["detail"]["label"], "laptop")
+        self.assertNotIn("token", event["detail"])
+
+    def test_no_principal_means_no_actor(self):
+        tools_content.store_note(namespace="proj", title="n", content="c")
+        event = self.db.list_audit(op="store")[0]
+        self.assertIsNone(event["actor"])
 
 
 if __name__ == "__main__":

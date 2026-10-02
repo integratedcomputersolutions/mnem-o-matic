@@ -15,10 +15,11 @@ import uvicorn
 
 from mnemomatic import config, runtime
 from mnemomatic.audit import RequestMetaMiddleware
-from mnemomatic.auth import BearerAuthMiddleware
+from mnemomatic.auth import AuthMiddleware
 from mnemomatic.bodylimit import BodyLimitMiddleware
 from mnemomatic.compact import CompactToolsMiddleware
 from mnemomatic.db import EMBEDDING_DIM
+from mnemomatic.identity import IdentityError, ensure_bootstrap
 from mnemomatic.runtime import (
     _audit,
     _embed_content,
@@ -135,6 +136,13 @@ def main():
     # Pre-warm db and resolve embedder so the first request doesn't pay setup costs
     logger.info("Initializing database...")
     runtime._db()
+    # Someone must be able to log in: create `admin` from the environment or
+    # print a one-time setup code for the browser's first-run screen.
+    try:
+        ensure_bootstrap(runtime._identity(), runtime.first_run, config.ADMIN_PASSWORD)
+    except IdentityError as e:
+        logger.error("MNEMOMATIC_ADMIN_PASSWORD rejected: %s", e.details)
+        raise SystemExit(1)
     logger.info("Initializing embedder...")
     runtime._embedder()
 
@@ -158,36 +166,24 @@ def main():
         logger.info("Scheduled backups: every %gh to %s (keeping %d)",
                     config.BACKUP_INTERVAL_HOURS, config.BACKUP_DIR, config.BACKUP_KEEP)
 
-    # Always use unified ASGI app + Uvicorn code path
-    # Authentication is optional based on config.API_KEY environment variable
     logger.info("Building ASGI application...")
     app = mcp.streamable_http_app()
 
-    # Both inserted ahead of the MCP catch-all. /export is NOT exempt from
-    # Bearer auth — it returns the entire store. /health is exempt (see
-    # BearerAuthMiddleware) so probes that cannot present credentials still work.
+    # Both inserted ahead of the MCP catch-all. /export returns the entire
+    # store and takes a session or a token; /health takes nothing (see
+    # AuthMiddleware) so probes that cannot present credentials still work.
     from starlette.routing import Route
     app.router.routes.insert(0, Route("/export", _export_route, methods=["GET"]))
     app.router.routes.insert(0, Route("/health", _health_route, methods=["GET"]))
 
-    # Optional read-only web viewer at /ui, gated by a single shared secret.
-    # Disabled unless MNEMOMATIC_UI_TOKEN is set, so it never exposes data by default.
-    if config.UI_TOKEN:
-        from mnemomatic.webui import register_webui
-        register_webui(app, runtime._db, config.UI_TOKEN, settings_info=_settings_info, make_export=_make_export)
-        logger.info("Web viewer enabled at /ui")
-    else:
-        logger.info("Web viewer disabled (set MNEMOMATIC_UI_TOKEN to enable)")
-
     app = CompactToolsMiddleware(app)
 
-    # Capture actor/client/ip per request for the audit log.
+    # Capture the principal, client and ip per request for the audit log.
+    # Inside AuthMiddleware, which is what puts the principal in the scope.
     app = RequestMetaMiddleware(app)
 
-    # Middleware handles both authenticated and non-authenticated modes
-    # If config.API_KEY is empty, auth is disabled but logging still tracks requests.
-    # /ui is exempt from Bearer auth only when the viewer is actually registered.
-    app = BearerAuthMiddleware(app, api_key=config.API_KEY, exempt_ui=bool(config.UI_TOKEN))
+    # Every /mcp call carries a per-user token; every /api call a session.
+    app = AuthMiddleware(app, identity=runtime._identity)
 
     # Outside auth so an oversized body is refused before anything buffers it,
     # inside CORS so a 413 still carries the CORS headers a browser needs.
@@ -196,10 +192,9 @@ def main():
     if config.CORS_ORIGINS:
         from starlette.middleware.cors import CORSMiddleware
         origins = [o.strip() for o in config.CORS_ORIGINS.split(",") if o.strip()]
-        if "*" in origins and not config.API_KEY:
+        if "*" in origins:
             logger.warning(
-                "SECURITY: CORS is open to all origins (*) and authentication is disabled — "
-                "any website can read from and write to this server."
+                "CORS is open to all origins (*): any website may call /mcp with a token it holds."
             )
         app = CORSMiddleware(
             app,

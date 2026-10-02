@@ -22,10 +22,20 @@ from starlette.testclient import TestClient
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from mnemomatic import config
-from mnemomatic.auth import BearerAuthMiddleware
+from mnemomatic.auth import AuthMiddleware
+from tests._support import IdentityFixture
 
-API_KEY = "test-secret-key-12345"
 PROXY = "10.0.0.1"
+_FX: IdentityFixture | None = None
+
+
+def setUpModule():
+    global _FX
+    _FX = IdentityFixture()
+
+
+def tearDownModule():
+    _FX.close()
 
 
 async def _ok(request):
@@ -34,16 +44,20 @@ async def _ok(request):
 
 def _client(trusted, peer=PROXY):
     """A TestClient whose stack matches the server's: uvicorn's proxy-header
-    middleware outermost, then Bearer auth with its throttle."""
+    middleware outermost, then token auth with its throttle."""
     app = Starlette(routes=[Route("/mcp", _ok, methods=["GET", "POST"])])
-    guarded = BearerAuthMiddleware(app, api_key=API_KEY)
+    guarded = AuthMiddleware(app, identity=lambda: _FX.identity)
     return TestClient(ProxyHeadersMiddleware(guarded, trusted_hosts=trusted),
                       client=(peer, 40000))
 
 
+def _good():
+    return f"Bearer {_FX.admin_token}"
+
+
 def _lock_out(client, forwarded_for):
     """Spend the throttle's allowance from one forwarded address."""
-    headers = {"Authorization": "Bearer wrong", "X-Forwarded-For": forwarded_for}
+    headers = {"Authorization": "Bearer mnm_wrong", "X-Forwarded-For": forwarded_for}
     for _ in range(5):
         client.post("/mcp", headers=headers)
 
@@ -78,14 +92,14 @@ class TestThrottleKeying(unittest.TestCase):
         _lock_out(client, "203.0.113.7")
 
         # The offender is locked out even with the right key...
-        locked = client.post("/mcp", headers={"Authorization": f"Bearer {API_KEY}",
+        locked = client.post("/mcp", headers={"Authorization": _good(),
                                               "X-Forwarded-For": "203.0.113.7"})
         self.assertEqual(locked.status_code, 429)
 
         # ...while everyone else behind the same proxy is unaffected. Without a
         # trusted proxy this is the denial of service: one client's failures
         # would lock the shared address for all of them.
-        other = client.post("/mcp", headers={"Authorization": f"Bearer {API_KEY}",
+        other = client.post("/mcp", headers={"Authorization": _good(),
                                              "X-Forwarded-For": "203.0.113.8"})
         self.assertEqual(other.status_code, 200)
 
@@ -94,7 +108,7 @@ class TestThrottleKeying(unittest.TestCase):
         # request keys on the peer: the lockout catches a different X-Forwarded-For.
         client = _client(["192.0.2.1"])
         _lock_out(client, "203.0.113.7")
-        resp = client.post("/mcp", headers={"Authorization": f"Bearer {API_KEY}",
+        resp = client.post("/mcp", headers={"Authorization": _good(),
                                             "X-Forwarded-For": "203.0.113.8"})
         self.assertEqual(resp.status_code, 429)
 
@@ -103,7 +117,7 @@ class TestThrottleKeying(unittest.TestCase):
         # the operator has declared trustworthy.
         client = _client([], peer="198.51.100.5")
         _lock_out(client, "203.0.113.7")
-        resp = client.post("/mcp", headers={"Authorization": f"Bearer {API_KEY}",
+        resp = client.post("/mcp", headers={"Authorization": _good(),
                                             "X-Forwarded-For": "203.0.113.9"})
         self.assertEqual(resp.status_code, 429)
 

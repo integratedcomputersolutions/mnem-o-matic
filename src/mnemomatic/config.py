@@ -22,13 +22,43 @@ logger = logging.getLogger("mnemomatic")
 DB_PATH = os.environ.get("MNEMOMATIC_DB_PATH", "/data/mnemomatic.db")
 HOST = os.environ.get("MNEMOMATIC_HOST", "0.0.0.0")
 PORT = int(os.environ.get("MNEMOMATIC_PORT", "8000"))
-API_KEY = os.environ.get("MNEMOMATIC_API_KEY", "")
 CORS_ORIGINS = os.environ.get("MNEMOMATIC_CORS_ORIGINS", "")
 EMBED_URL = os.environ.get("MNEMOMATIC_EMBED_URL", "")
 EMBED_MODEL = os.environ.get("MNEMOMATIC_EMBED_MODEL", "")
-UI_TOKEN = os.environ.get("MNEMOMATIC_UI_TOKEN", "").strip()
 MAX_SEARCH_LIMIT = 100
 MAX_LIST_LIMIT = 200
+
+# First-run bootstrap. Only read while the users table is empty: it creates
+# the initial `admin` without the setup-code dance, for compose files and CI.
+# With users present it is ignored (and logged as such), never re-applied.
+ADMIN_PASSWORD = os.environ.get("MNEMOMATIC_ADMIN_PASSWORD", "").strip() or None
+
+
+# Built-in TLS. "auto" (default) runs the built-in CA and a second HTTPS
+# listener once an admin names the host; "off" is for deployments that
+# terminate TLS in their own reverse proxy (pair it with TRUSTED_PROXIES).
+def _tls_mode() -> str:
+    raw = os.environ.get("MNEMOMATIC_TLS", "auto").strip().lower()
+    if raw in ("auto", ""):
+        return "auto"
+    if raw == "off":
+        return "off"
+    logger.warning("Ignoring unrecognised MNEMOMATIC_TLS=%r — expected 'auto' or 'off'; using 'auto'", raw)
+    return "auto"
+
+
+TLS_MODE = _tls_mode()
+HTTPS_PORT = int(os.environ.get("MNEMOMATIC_HTTPS_PORT", "8443"))
+# The DNS name the certificate must cover. Pre-seeds the HTTPS page; the admin
+# still confirms from a browser before HTTPS becomes the required entry point.
+PUBLIC_HOST = os.environ.get("MNEMOMATIC_PUBLIC_HOST", "").strip()
+# Where the CA and server certificate live — beside the database by default,
+# so the one mounted volume carries everything that must survive a restart.
+TLS_DIR = os.environ.get("MNEMOMATIC_TLS_DIR", "").strip() or os.path.join(os.path.dirname(DB_PATH) or ".", "tls")
+
+# Largest JSON body the browser API accepts. Nothing it takes is bigger than
+# a login form or a token name; the MCP endpoint has its own, larger limit.
+API_MAX_BODY = 1024 * 1024
 
 
 def _trusted_proxies() -> list[str]:

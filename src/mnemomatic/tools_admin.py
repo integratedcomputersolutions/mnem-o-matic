@@ -20,7 +20,7 @@ def health() -> str:
         "status": "ok",
         "version": _server_version(),
         "embedding_mode": embedding_mode,
-        "auth_enabled": bool(config.API_KEY),
+        "auth": "per-user",
     })
 
 
@@ -58,7 +58,9 @@ async def _health_route(request):
 
 
 async def _export_route(request):
-    """GET /export[?namespace=...] — zip download, behind the Bearer middleware."""
+    """GET /export[?namespace=...] — zip download. AuthMiddleware admits either
+    a session cookie or a bearer token here; every download is audited under
+    that identity, since the archive is the whole store."""
     from starlette.responses import JSONResponse, Response
 
     namespace = request.query_params.get("namespace") or None
@@ -68,6 +70,7 @@ async def _export_route(request):
             status_code=404,
         )
     data, filename = _make_export(namespace)
+    _audit("export", namespace=namespace, filename=filename)
     return Response(
         data,
         media_type="application/zip",

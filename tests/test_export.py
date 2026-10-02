@@ -15,7 +15,8 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from mnemomatic.auth import BearerAuthMiddleware
+from mnemomatic.auth import COOKIE_NAME, AuthMiddleware
+from tests._support import IdentityFixture
 from mnemomatic.db import Database
 from mnemomatic.export import EXPORT_FORMAT, _safe_name, _unique, build_export_zip
 from mnemomatic.models import Document, Knowledge, Note
@@ -169,9 +170,12 @@ class TestArchive(unittest.TestCase):
 
 
 class TestExportRoute(unittest.TestCase):
-    """The /export route as the server wires it: behind BearerAuthMiddleware."""
+    """The /export route as the server wires it: behind AuthMiddleware, which
+    admits a session cookie or a bearer token."""
 
     def setUp(self):
+        self.fx = IdentityFixture()
+        self.addCleanup(self.fx.close)
         # File-backed db: the TestClient serves requests on a worker thread,
         # and each thread gets its own connection — a ":memory:" database
         # would be empty there.
@@ -191,17 +195,24 @@ class TestExportRoute(unittest.TestCase):
                             headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
         app = Starlette(routes=[Route("/export", export_route, methods=["GET"])])
-        self.client = TestClient(BearerAuthMiddleware(app, api_key="k3y"), follow_redirects=False)
+        self.client = TestClient(AuthMiddleware(app, identity=lambda: self.fx.identity),
+                                 follow_redirects=False)
 
     def tearDown(self):
         self.db.close()
         Path(self._tmp.name).unlink(missing_ok=True)
 
-    def test_requires_bearer(self):
+    def test_requires_a_credential(self):
         self.assertEqual(self.client.get("/export").status_code, 401)
+        self.assertEqual(self.client.get("/export", headers={"Authorization": "Bearer mnm_nope"}).status_code, 403)
 
-    def test_downloads_zip_with_auth(self):
-        resp = self.client.get("/export", headers={"Authorization": "Bearer k3y"})
+    def test_downloads_zip_with_session_cookie(self):
+        resp = self.client.get("/export", cookies={COOKIE_NAME: self.fx.session_for(self.fx.user)})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.headers["content-type"], "application/zip")
+
+    def test_downloads_zip_with_token(self):
+        resp = self.client.get("/export", headers={"Authorization": f"Bearer {self.fx.user_token}"})
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.headers["content-type"], "application/zip")
         self.assertIn('filename="mnemomatic-export-', resp.headers["content-disposition"])
@@ -211,7 +222,7 @@ class TestExportRoute(unittest.TestCase):
 
     def test_unknown_namespace_404(self):
         resp = self.client.get("/export?namespace=nope",
-                               headers={"Authorization": "Bearer k3y"})
+                               headers={"Authorization": f"Bearer {self.fx.user_token}"})
         self.assertEqual(resp.status_code, 404)
 
 
