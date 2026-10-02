@@ -30,7 +30,7 @@
   .foot { margin-top: 22px; padding-top: 14px; border-top: 1px solid var(--line); display: flex; align-items: center;
           gap: 10px; color: var(--muted); font-size: 12.5px; }
   .foot img { flex: 0 0 auto; width: auto; object-fit: contain; }
-  .foot .bai { height: 26px; }
+  .foot .bai { height: 31px; }
   .foot .ics { height: 24px; border-radius: 4px; }
   .sep { width: 1px; height: 20px; background: var(--line-strong); }
 </style>

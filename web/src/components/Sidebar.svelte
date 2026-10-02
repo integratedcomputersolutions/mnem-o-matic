@@ -57,7 +57,7 @@
   .brands { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--line); }
   .logos { display: flex; align-items: center; gap: 10px; }
   .logos img { flex: 0 0 auto; width: auto; object-fit: contain; }
-  .logos .bai { height: 22px; }
+  .logos .bai { height: 26px; }
   .logos .ics { height: 20px; border-radius: 3px; }
   .sep { width: 1px; height: 18px; background: var(--line-strong); }
   .ver { color: var(--muted); font-size: 11.5px; }
