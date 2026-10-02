@@ -30,9 +30,12 @@
       <div class="muted small truncate">{session.user?.username} · {session.user?.role}</div>
     </div>
     <button type="button" class="btn ghost sm" onclick={logout}>Sign out</button>
-    <div class="ics">
-      <img src="/ics-logo.svg" alt="ICS" height="20" />
-      <span>Integrated Computer Solutions{#if session.version}&nbsp;· v{session.version}{/if}</span>
+    <div class="brands">
+      <img class="bai" src="/bostonai-logo.png" alt="Boston AI" height="22" />
+      <div class="ics">
+        <img src="/ics-logo.svg" alt="ICS" height="18" />
+        <span>A Division of ICS{#if session.version}&nbsp;· v{session.version}{/if}</span>
+      </div>
     </div>
   </div>
 </aside>
@@ -50,7 +53,8 @@
   .item:hover { background: var(--hover); color: var(--ink); text-decoration: none; }
   .item.on { background: var(--brand); color: #fff; }
   .bottom { padding: 12px 16px 16px; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 8px; }
-  .ics { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 11.5px; margin-top: 6px; }
+  .brands { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--line); }
+  .ics { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 11.5px; }
   .ics img { border-radius: 3px; }
   @media (max-width: 860px) {
     .sidebar { position: static; height: auto; }

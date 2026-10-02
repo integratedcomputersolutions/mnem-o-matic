@@ -120,7 +120,7 @@ def _setup_html(status: dict) -> str:
     fp = html.escape(status.get("ca_fingerprint") or "")
     head = (f"<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
             f"<title>Mnem-O-matic — HTTPS setup</title><style>{_SETUP_CSS}</style><main>"
-            f"<div class=brand><span class=mark>ICS</span><span>Mnem-O-matic · Integrated Computer Solutions</span></div>")
+            f"<div class=brand><span class=mark>ICS</span><span>Mnem-O-matic · Boston AI, a Division of ICS</span></div>")
     if state in ("unconfigured", "off") or not status.get("ca_fingerprint"):
         body = ("<h1>HTTPS is not set up yet</h1><p class=sub>Plain HTTP is still serving everything.</p>"
                 "<div class=card>An administrator can enable HTTPS from the web UI under "

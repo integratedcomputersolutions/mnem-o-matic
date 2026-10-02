@@ -11,8 +11,10 @@
     <div class="body">{@render children?.()}</div>
     {#if footer}<div class="foot-slot">{@render footer()}</div>{/if}
     <div class="foot">
-      <img src="/ics-logo.svg" alt="ICS" height="24" />
-      <span>Integrated Computer Solutions</span>
+      <img class="bai" src="/bostonai-logo.png" alt="Boston AI" height="26" />
+      <span class="sep" aria-hidden="true"></span>
+      <img src="/ics-logo.svg" alt="ICS" height="22" />
+      <span>A Division of ICS</span>
     </div>
   </div>
 </div>
@@ -29,4 +31,6 @@
   .foot { margin-top: 22px; padding-top: 14px; border-top: 1px solid var(--line); display: flex; align-items: center;
           gap: 10px; color: var(--muted); font-size: 12.5px; }
   .foot img { border-radius: 4px; }
+  .foot .bai { border-radius: 0; }
+  .sep { width: 1px; height: 20px; background: var(--line-strong); }
 </style>
