@@ -13,7 +13,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from mnemomatic_cli._mcp_client import MCPClient
+from mnemomatic_cli._mcp_client import MCPClient, _describe_http_error
 
 _DEFAULT_URL = "http://localhost:8000"
 _DEFAULT_MODE = "hybrid"
@@ -224,12 +224,7 @@ def _cmd_export(args, server_url: str, token: str, ssl_context=None) -> None:
             data = resp.read()
             disposition = resp.headers.get("Content-Disposition", "")
     except urllib.error.HTTPError as exc:
-        detail = ""
-        try:
-            detail = json.loads(exc.read()).get("details", "")
-        except Exception:
-            pass
-        _err(f"export failed: HTTP {exc.code}" + (f" — {detail}" if detail else ""))
+        _err(f"export failed: {_describe_http_error(exc)}")
     except urllib.error.URLError as exc:
         _err(f"cannot reach server at {url}: {exc.reason}")
 
