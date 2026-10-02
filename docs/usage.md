@@ -287,13 +287,14 @@ The config file lives at `~/.config/mnemomatic/config.toml`:
 ```toml
 [server]
 url = "https://your-server-hostname"
-api_key = "your-secret-key-here"
+token = "mnm_your_token"
+# ca_cert = "/home/you/mnemomatic-ca.crt"   # when the server uses its built-in CA
 
 [search]
 mode = "fulltext"
 ```
 
-> **Security:** Prefer the environment variable or config file for the API key — CLI flags are visible in the process list. The CLI warns if the config file is readable by other users.
+> **Security:** Prefer the environment variable or config file for the token — CLI flags are visible in the process list. The CLI warns if the config file is readable by other users.
 
 ### Commands
 
