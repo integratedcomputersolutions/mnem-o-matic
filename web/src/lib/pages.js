@@ -11,7 +11,7 @@ import Audit from '../pages/Audit.svelte';
 import Connect from '../pages/Connect.svelte';
 import Tokens from '../pages/Tokens.svelte';
 import Account from '../pages/Account.svelte';
-// import Users from '../pages/admin/Users.svelte';   // see the page table below
+import Users from '../pages/admin/Users.svelte';
 import Https from '../pages/admin/Https.svelte';
 import Settings from '../pages/admin/Settings.svelte';
 import NotFound from '../pages/NotFound.svelte';
@@ -27,10 +27,7 @@ export const pages = [
   { path: '/connect', page: Connect, role: 'any', label: 'Connect an agent', group: 'Agents' },
   { path: '/tokens', page: Tokens, role: 'any', label: 'My tokens', group: 'Agents' },
   { path: '/account', page: Account, role: 'any', label: 'Account', group: 'You' },
-  // User administration is held back for now: the page, its API and the
-  // identity model are all in place, but a single-operator deployment has no
-  // use for it yet. Re-add this line to bring it back.
-  // { path: '/admin/users', page: Users, role: 'admin', label: 'Users', group: 'Admin' },
+  { path: '/admin/users', page: Users, role: 'admin', label: 'Users', group: 'Admin' },
   { path: '/admin/https', page: Https, role: 'admin', label: 'HTTPS', group: 'Admin' },
   { path: '/admin/settings', page: Settings, role: 'admin', label: 'Settings', group: 'Admin' },
 ];
