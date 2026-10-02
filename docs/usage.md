@@ -95,6 +95,32 @@ The web UI is served at the root of the same port as the MCP endpoint. Stored co
 | HTTPS | admins | Name the host, trust the CA, confirm — see [HTTPS](installation.md#https) |
 | Settings | admins | The configuration the server runs with; export download |
 
+<div align="center">
+<table>
+<tr>
+<td align="center"><a href="../assets/mnemomatic-ui-dashboard.png"><img src="../assets/mnemomatic-ui-dashboard.png" alt="Dashboard" width="300"></a><br><sub>Dashboard</sub></td>
+<td align="center"><a href="../assets/mnemomatic-ui-browse.png"><img src="../assets/mnemomatic-ui-browse.png" alt="Browse: namespaces" width="300"></a><br><sub>Browse: namespaces</sub></td>
+<td align="center"><a href="../assets/mnemomatic-ui-browse-items.png"><img src="../assets/mnemomatic-ui-browse-items.png" alt="Browse: items in a namespace" width="300"></a><br><sub>Browse: items in a namespace</sub></td>
+</tr>
+<tr>
+<td align="center"><a href="../assets/mnemomatic-ui-item.png"><img src="../assets/mnemomatic-ui-item.png" alt="Item detail with revisions and related items" width="300"></a><br><sub>Item detail with revisions and related items</sub></td>
+<td align="center"><a href="../assets/mnemomatic-ui-search.png"><img src="../assets/mnemomatic-ui-search.png" alt="Search" width="300"></a><br><sub>Search</sub></td>
+<td align="center"><a href="../assets/mnemomatic-ui-activity.png"><img src="../assets/mnemomatic-ui-activity.png" alt="Activity" width="300"></a><br><sub>Activity</sub></td>
+</tr>
+<tr>
+<td align="center"><a href="../assets/mnemomatic-ui-connect.png"><img src="../assets/mnemomatic-ui-connect.png" alt="Connect an agent" width="300"></a><br><sub>Connect an agent</sub></td>
+<td align="center"><a href="../assets/mnemomatic-ui-tokens.png"><img src="../assets/mnemomatic-ui-tokens.png" alt="My tokens" width="300"></a><br><sub>My tokens</sub></td>
+<td align="center"><a href="../assets/mnemomatic-ui-users.png"><img src="../assets/mnemomatic-ui-users.png" alt="Users (admin)" width="300"></a><br><sub>Users (admin)</sub></td>
+</tr>
+<tr>
+<td align="center"><a href="../assets/mnemomatic-ui-https.png"><img src="../assets/mnemomatic-ui-https.png" alt="HTTPS (admin)" width="300"></a><br><sub>HTTPS (admin)</sub></td>
+<td align="center"><a href="../assets/mnemomatic-ui-settings.png"><img src="../assets/mnemomatic-ui-settings.png" alt="Settings (admin)" width="300"></a><br><sub>Settings (admin)</sub></td>
+<td align="center"><a href="../assets/mnemomatic-ui-login.png"><img src="../assets/mnemomatic-ui-login.png" alt="Sign in" width="300"></a><br><sub>Sign in</sub></td>
+</tr>
+</table>
+<sub><i>Click any image to view full size.</i></sub>
+</div>
+
 Security notes:
 - Every page carries `Content-Security-Policy` (scripts and connections from this origin only, no inline scripts), `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`; HTTPS responses add `Strict-Transport-Security`.
 - State-changing requests must come from the site itself: the API checks that the request's `Origin` matches its `Host`, and the session cookie is `SameSite=Strict`. That is the cross-site request forgery defence.

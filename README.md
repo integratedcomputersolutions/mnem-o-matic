@@ -77,7 +77,11 @@ The server ships its own web interface — sign in, browse everything the agents
 </tr>
 <tr>
 <td align="center"><a href="assets/mnemomatic-ui-item.png"><img src="assets/mnemomatic-ui-item.png" alt="Item detail" width="360"></a><br><sub>Item detail</sub></td>
+<td align="center"><a href="assets/mnemomatic-ui-search.png"><img src="assets/mnemomatic-ui-search.png" alt="Search" width="360"></a><br><sub>Search</sub></td>
+</tr>
+<tr>
 <td align="center"><a href="assets/mnemomatic-ui-connect.png"><img src="assets/mnemomatic-ui-connect.png" alt="Connect an agent" width="360"></a><br><sub>Connect an agent</sub></td>
+<td align="center"><a href="assets/mnemomatic-ui-activity.png"><img src="assets/mnemomatic-ui-activity.png" alt="Activity" width="360"></a><br><sub>Activity</sub></td>
 </tr>
 </table>
 <sub><i>Click any image to view full size.</i></sub>
