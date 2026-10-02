@@ -32,9 +32,9 @@
     <button type="button" class="btn ghost sm" onclick={logout}>Sign out</button>
     <div class="brands">
       <div class="logos">
-        <img class="bai" src="/bostonai-logo.png" alt="Boston AI" />
-        <span class="sep" aria-hidden="true"></span>
         <img class="ics" src="/ics-logo.svg" alt="ICS" />
+        <span class="sep" aria-hidden="true"></span>
+        <img class="bai" src="/bostonai-logo.png" alt="Boston AI" />
       </div>
       {#if session.version}<span class="ver">v{session.version}</span>{/if}
     </div>
@@ -57,7 +57,7 @@
   .brands { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--line); }
   .logos { display: flex; align-items: center; gap: 10px; }
   .logos img { flex: 0 0 auto; width: auto; object-fit: contain; }
-  .logos .bai { height: 18px; }
+  .logos .bai { height: 22px; }
   .logos .ics { height: 20px; border-radius: 3px; }
   .sep { width: 1px; height: 18px; background: var(--line-strong); }
   .ver { color: var(--muted); font-size: 11.5px; }

@@ -11,9 +11,9 @@
     <div class="body">{@render children?.()}</div>
     {#if footer}<div class="foot-slot">{@render footer()}</div>{/if}
     <div class="foot">
-      <img class="bai" src="/bostonai-logo.png" alt="Boston AI" />
-      <span class="sep" aria-hidden="true"></span>
       <img class="ics" src="/ics-logo.svg" alt="ICS" />
+      <span class="sep" aria-hidden="true"></span>
+      <img class="bai" src="/bostonai-logo.png" alt="Boston AI" />
     </div>
   </div>
 </div>
@@ -30,7 +30,7 @@
   .foot { margin-top: 22px; padding-top: 14px; border-top: 1px solid var(--line); display: flex; align-items: center;
           gap: 10px; color: var(--muted); font-size: 12.5px; }
   .foot img { flex: 0 0 auto; width: auto; object-fit: contain; }
-  .foot .bai { height: 22px; }
+  .foot .bai { height: 26px; }
   .foot .ics { height: 24px; border-radius: 4px; }
   .sep { width: 1px; height: 20px; background: var(--line-strong); }
 </style>
