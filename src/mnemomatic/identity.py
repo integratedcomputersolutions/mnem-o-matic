@@ -52,6 +52,8 @@ SESSION_TTL = timedelta(hours=24)
 SESSION_IDLE = timedelta(hours=2)
 TOUCH_INTERVAL = timedelta(seconds=60)      # how often last_seen / last_used are rewritten
 TEMP_PASSWORD_TTL = timedelta(days=7)
+DEVICE_COOKIE_TTL = timedelta(days=90)
+DEVICE_KEY_SETTING = "device_cookie_key"
 
 # No 0/O/1/I/L — these get read aloud and typed from a log line.
 SETUP_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
@@ -260,25 +262,48 @@ class Principal:
 # ── Login throttle ──────────────────────────────────────────────────────────
 
 class LoginThrottle:
-    """Two sliding windows over password attempts: a tight one per account
-    (so one name cannot be hammered from many addresses) and a looser one per
-    address (so one address cannot spray many names). Fifteen minutes each;
-    once over the line the client waits for the window to clear."""
+    """Three sliding windows over password attempts, fifteen minutes each:
+
+    - per account *and* address (5): the everyday guard. Locks out only the
+      address doing the guessing, so a stranger cannot lock the real owner
+      out of their own account.
+    - per address (20): one address cannot spray many names.
+    - per account (100): many addresses cannot pool their guesses against
+      one name. Browsers holding this account's known-device cookie (set on
+      a successful sign-in) skip this one, so a distributed attack cannot
+      lock the owner out either.
+
+    Usernames that cannot exist share a single bucket, so junk names neither
+    grow the tables nor get a fresh allowance each.
+    """
 
     def __init__(self):
-        self._by_account = FailureThrottle(max_failures=5, window=900.0, lockout=900.0)
+        self._by_account_ip = FailureThrottle(max_failures=5, window=900.0, lockout=900.0)
         self._by_ip = FailureThrottle(max_failures=20, window=900.0, lockout=900.0)
+        self._by_account = FailureThrottle(max_failures=100, window=900.0, lockout=900.0)
 
-    def retry_after(self, username: str, ip: str) -> int:
-        return max(self._by_account.retry_after(username), self._by_ip.retry_after(ip))
+    @staticmethod
+    def _account(username: str) -> str:
+        return username if USERNAME_RE.match(username) else "\0invalid"
+
+    def retry_after(self, username: str, ip: str, *, known_device: bool = False) -> int:
+        account = self._account(username)
+        waits = [self._by_account_ip.retry_after(f"{account}\0{ip}"), self._by_ip.retry_after(ip)]
+        if not known_device:
+            waits.append(self._by_account.retry_after(account))
+        return max(waits)
 
     def record_failure(self, username: str, ip: str) -> None:
-        self._by_account.record_failure(username)
+        account = self._account(username)
+        self._by_account_ip.record_failure(f"{account}\0{ip}")
         self._by_ip.record_failure(ip)
+        self._by_account.record_failure(account)
 
     def record_success(self, username: str, ip: str) -> None:
-        self._by_account.record_success(username)
+        account = self._account(username)
+        self._by_account_ip.record_success(f"{account}\0{ip}")
         self._by_ip.record_success(ip)
+        self._by_account.record_success(account)
 
 
 # ── First run ───────────────────────────────────────────────────────────────
@@ -415,17 +440,26 @@ class Identity:
             self._guard_last_admin(target)
         return target
 
-    def set_active(self, user_id: int, active: bool, *, acting_user_id: int) -> User:
+    def set_active(self, user_id: int, active: bool, *, acting_user_id: int) -> tuple[User, int]:
+        """Enable or disable an account. Returns (user, tokens revoked).
+
+        Disabling ends every session and revokes every live token for good:
+        an account is usually disabled because something went wrong, and
+        tokens that came back on reactivation would hand an attacker their
+        foothold back. The person mints new tokens after reactivation."""
         self._target(user_id, acting_user_id, self_message="You cannot change your own account's status.",
                      may_remove_admin=active)
         conn = self._conn()
         conn.execute("UPDATE users SET active = ? WHERE id = ?", (1 if active else 0, user_id))
+        revoked = 0
         if not active:
-            # Tokens stop working through the join on users.active; sessions
-            # are removed outright so an open browser is logged out.
             conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+            revoked = conn.execute(
+                "UPDATE api_tokens SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL",
+                (_iso(_now()), user_id),
+            ).rowcount
         conn.commit()
-        return self.get_user(user_id)
+        return self.get_user(user_id), revoked
 
     def set_role(self, user_id: int, role: str, *, acting_user_id: int) -> User:
         if role not in ROLES:
@@ -516,6 +550,43 @@ class Identity:
                          (hash_password(password), user.id))
             conn.commit()
         return user
+
+    # ── known devices ──
+    # A browser that signed in to an account gets a cookie proving it, which
+    # exempts it from the account-wide login throttle (see LoginThrottle). It
+    # is an HMAC over (username, issue time) under a key kept in the settings
+    # table, so it survives restarts, cannot be forged, and needs no table.
+
+    def _device_key(self) -> bytes:
+        stored = self._db.get_setting(DEVICE_KEY_SETTING)
+        if stored is None:
+            # First use. INSERT OR IGNORE so two racing first sign-ins agree
+            # on one key; re-read to get whichever won.
+            conn = self._conn()
+            conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
+                         (DEVICE_KEY_SETTING, secrets.token_hex(32)))
+            conn.commit()
+            stored = self._db.get_setting(DEVICE_KEY_SETTING)
+        return bytes.fromhex(stored)
+
+    def _device_mac(self, username: str, issued: int) -> str:
+        return hmac.new(self._device_key(), f"{username}|{issued}".encode(), hashlib.sha256).hexdigest()
+
+    def issue_device_proof(self, username: str) -> str:
+        issued = int(_now().timestamp())
+        return f"{issued}.{self._device_mac(username, issued)}"
+
+    def is_known_device(self, username: str, proof: str | None) -> bool:
+        if not proof or not USERNAME_RE.match(username):
+            return False
+        issued_raw, _, mac = proof.partition(".")
+        try:
+            issued = int(issued_raw)
+        except ValueError:
+            return False
+        if _now().timestamp() - issued > DEVICE_COOKIE_TTL.total_seconds():
+            return False
+        return hmac.compare_digest(mac.encode(), self._device_mac(username, issued).encode())
 
     # ── sessions ──
 

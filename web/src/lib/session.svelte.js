@@ -27,13 +27,17 @@ export async function refresh() {
   }
 }
 
+// Everything tied to the person signed in. A shared browser tab must not
+// carry one person's freshly minted token into the next person's session.
 export function signOutLocally() {
   session.user = null;
+  session.freshToken = null;
 }
 setSignedOutHandler(signOutLocally);
 
 export async function login(username, password) {
   const r = await api.post('/api/login', { username, password });
+  signOutLocally();
   session.user = r.user;
   session.firstRun = false;
   return r.user;
@@ -43,7 +47,7 @@ export async function logout() {
   try {
     await api.post('/api/logout');
   } finally {
-    session.user = null;
+    signOutLocally();
   }
 }
 

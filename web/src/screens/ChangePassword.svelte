@@ -2,7 +2,7 @@
   import AuthCard from '../components/AuthCard.svelte';
   import ErrorBox from '../components/ErrorBox.svelte';
   import { api } from '../lib/api.js';
-  import { session, refresh } from '../lib/session.svelte.js';
+  import { session, refresh, logout } from '../lib/session.svelte.js';
 
   // forced: the full-screen gate for temporary passwords. Otherwise an inline
   // form (the Account page).
@@ -56,7 +56,7 @@
     </div>
     <div class="row">
       <button class="btn primary" type="submit" disabled={busy}>{busy ? 'Saving…' : 'Change password'}</button>
-      {#if forced}<button class="btn ghost" type="button" onclick={() => api.post('/api/logout').finally(() => (session.user = null))}>Sign out</button>{/if}
+      {#if forced}<button class="btn ghost" type="button" onclick={logout}>Sign out</button>{/if}
     </div>
   </form>
 {/snippet}

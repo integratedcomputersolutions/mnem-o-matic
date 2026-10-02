@@ -331,6 +331,13 @@ def main():
     app = build_app(tls)
 
     logger.info("Trusted proxies: %s", ", ".join(config.TRUSTED_PROXIES) or "none")
+    if "*" in config.TRUSTED_PROXIES:
+        # The server cannot see whether its port is published, so say it once:
+        # with "*" any client that reaches the port directly can claim any
+        # address, which defeats the sign-in throttles and the audit log's ip.
+        logger.warning("MNEMOMATIC_TRUSTED_PROXIES=* believes X-Forwarded-For from every peer; "
+                       "this is safe only if the server port is reachable solely through your proxy. "
+                       "Otherwise name the proxy's address instead.")
     logger.info("Starting server on %s:%d", config.HOST, config.PORT)
     # With trusted proxies configured, uvicorn rewrites the client address and
     # scheme from X-Forwarded-For / X-Forwarded-Proto — but only for requests

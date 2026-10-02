@@ -46,9 +46,9 @@ There is no shared key. People sign in to the web UI with a username and passwor
 
 **First run.** With no users, the server prints a one-time setup code to its log and the web UI asks for it to create the first administrator. `MNEMOMATIC_ADMIN_PASSWORD` creates `admin` headlessly instead. The code stops working the moment a user exists or the server restarts.
 
-**Adding people.** An administrator creates a user and receives a temporary password (valid 7 days) to hand over out of band; the person must choose their own at first sign-in. Administrators can also reset a password the same way, disable an account (sessions end and tokens stop at once; enabling restores the tokens), change a role, or delete a user (sessions and tokens go, audit history keeps the username). An administrator cannot disable, demote or delete themself, and the last active administrator cannot be removed.
+**Adding people.** An administrator creates a user and receives a temporary password (valid 7 days) to hand over out of band; the person must choose their own at first sign-in. Administrators can also reset a password the same way, disable an account (sessions end and every token is revoked; enabling the account again does not bring them back, so the person creates new ones), change a role, or delete a user (sessions and tokens go, audit history keeps the username). An administrator cannot disable, demote or delete themself, and the last active administrator cannot be removed.
 
-**Passwords** are at least 10 characters, hashed with scrypt. Five wrong attempts on one account, or twenty from one address, within fifteen minutes pause sign-in for that account or address.
+**Passwords** are at least 10 characters, hashed with scrypt. Within fifteen minutes, five wrong attempts on one account from one address pause sign-in for that account from that address, and twenty from one address pause that address for every account — so a stranger cannot lock you out of your own account. A hundred wrong attempts on one account from any mix of addresses pause it everywhere, except in browsers that have signed in to it before (they carry an `HttpOnly` cookie, valid 90 days, that only the sign-in endpoint sees). A browser that clears cookies on exit is treated as new each time, so during such an attack it waits out the fifteen minutes; API tokens are never affected. Five wrong current passwords on the change-password form pause that form for fifteen minutes.
 
 **Sessions** are an `HttpOnly`, `SameSite=Strict` cookie, `Secure` over HTTPS, lasting 24 hours or 2 idle hours. Changing your password ends your other sessions.
 
@@ -87,7 +87,7 @@ The web UI is served at the root of the same port as the MCP endpoint. Stored co
 | Dashboard | everyone | Counts per type, embedder and index state, HTTPS state, recent activity |
 | Browse | everyone | Namespaces → items per type → one item with its metadata, revisions and related items |
 | Search | everyone | Full-text, semantic or hybrid, the same search the agents run |
-| Activity | everyone | The audit trail with filters by actor, operation, namespace and item type |
+| Activity | everyone | The audit trail with filters by actor, operation, namespace and item type; identity events for admins only |
 | Connect an agent | everyone | Per-client configuration snippets, the CA download, this server's URLs |
 | My tokens | everyone | Create, see last use, revoke |
 | Account | everyone | Change password |
@@ -211,6 +211,8 @@ Each event carries the timestamp, operation (`store`, `update`, `supersede`, `de
 
 Identity operations are audited too, with the acting user as `actor` and the affected user or token as the item: `auth.login`, `auth.login_failed` (with the reason), `auth.logout`, `password.changed`, `password.reset`, `user.created`, `user.deactivated`, `user.reactivated`, `user.role_changed`, `user.deleted`, `token.created`, `token.revoked`, `https.changed`, `admin.created`, `export`, and `schema.migrated` when the database moved to a new schema version. Events written before 3.0 keep whatever self-declared actor they had.
 
+The user, token and HTTPS events — which carry other people's addresses and the names tried at sign-in — are shown only to administrators, on the Activity page and through `list_audit`. A sign-in name that could not be a real username is not recorded, and attempts refused by the throttle are not logged one by one. Long header values (user agent, `X-Mnemomatic-Actor`) are truncated.
+
 To label a client within your own tokens, add the header to its MCP configuration:
 
 ```bash
@@ -256,7 +258,7 @@ Mnem-O-matic never needs its own LLM for memory upkeep — every MCP client alre
 
 **`similar` on store responses** — when newly stored content is nearly identical (cosine ≥ `MNEMOMATIC_SIMILAR_THRESHOLD`, default 0.8) to items already in the namespace, the store response includes a `similar` list (id, title, score). The agent that is mid-write is the best judge: merge, supersede, or ignore. Requires an embedder; chunked documents (no whole-document vector) are skipped; `0` disables the check.
 
-**`consolidation_report` tool** — mechanical consolidation candidates for a namespace: same-type near-duplicate clusters computed from the stored vectors, plus stale items (never retrieved since usage tracking began and not updated in `stale_days` days, default 90). Pure vector math and SQL — the report only *flags*.
+**`consolidation_report` tool** — mechanical consolidation candidates for a namespace: same-type near-duplicate clusters computed from the stored vectors, plus stale items (never retrieved since usage tracking began and not updated in `stale_days` days, default 90). Pure vector math and SQL — the report only *flags*. Clustering needs numpy, which the full image includes; the lite image returns the stale list and says duplicate detection is unavailable. The comparison runs off the request loop, so a large namespace does not stall the server.
 
 **Prompts** — two MCP prompts turn the report into workflows (in Claude Code they appear as slash commands):
 

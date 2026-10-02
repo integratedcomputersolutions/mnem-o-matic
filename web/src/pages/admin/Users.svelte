@@ -98,7 +98,7 @@
           <td class="right nowrap">
             {#if u.id !== me}
               <button class="btn sm" disabled={busy} onclick={() => reset(u)}>Reset password</button>
-              {#if u.active}<button class="btn sm" disabled={busy} onclick={() => setActive(u, false)}>Disable</button>
+              {#if u.active}<button class="btn sm" disabled={busy} title="Signs them out and revokes all their tokens" onclick={() => setActive(u, false)}>Disable</button>
               {:else}<button class="btn sm" disabled={busy} onclick={() => setActive(u, true)}>Enable</button>{/if}
               <button class="btn danger sm" disabled={busy} onclick={() => (confirmDelete = u)}>Delete</button>
             {:else}<span class="muted small">Change your own password on the Account page.</span>{/if}

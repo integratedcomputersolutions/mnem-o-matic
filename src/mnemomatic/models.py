@@ -45,6 +45,27 @@ def _validate_tags(v):
     return v
 
 
+def validate_namespace(v: str) -> str:
+    """The rules `_MemoryItem.namespace` enforces, for paths that write a
+    namespace without building a model (rename). Rows that skip them fail
+    validation on every later read, breaking export and backups."""
+    if not isinstance(v, str):
+        raise ValueError("namespace must be a string")
+    _validate_whitespace(v)
+    if not v or len(v) > MAX_NAMESPACE_LENGTH:
+        raise ValueError(f"namespace must be 1-{MAX_NAMESPACE_LENGTH} characters")
+    return v
+
+
+def validate_tag_list(v: list[str]) -> list[str]:
+    """The rules `_MemoryItem.tags` enforces, for paths that edit tags in
+    place (the tag tool)."""
+    _validate_tags(v)
+    if len(v) > MAX_TAGS:
+        raise ValueError(f"an item can carry at most {MAX_TAGS} tags, not {len(v)}")
+    return v
+
+
 def _validate_metadata(v):
     if not isinstance(v, dict):
         raise ValueError("metadata must be a dict")

@@ -30,6 +30,7 @@ import logging
 import secrets
 from urllib.parse import urlsplit
 
+from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Mount, Route
@@ -41,8 +42,11 @@ from mnemomatic.audit import request_meta, write_event
 from mnemomatic.auth import COOKIE_NAME
 from mnemomatic.db import _SPEC_BY_ITEM_TYPE
 from mnemomatic.tlsca import TlsError
+from mnemomatic.throttle import FailureThrottle
 from mnemomatic.identity import (
+    DEVICE_COOKIE_TTL,
     SESSION_TTL,
+    USERNAME_RE,
     FirstRun,
     Identity,
     IdentityError,
@@ -162,6 +166,24 @@ def _clear_session_cookie(resp: Response) -> None:
     resp.delete_cookie(COOKIE_NAME, path="/")
 
 
+# Proof that this browser has signed in to an account before (see
+# Identity.issue_device_proof). Sent only to the login endpoint.
+DEVICE_COOKIE = "mnm_device"
+DEVICE_COOKIE_PATH = "/api/login"
+
+
+def _set_device_cookie(resp: Response, proof: str, request: Request) -> None:
+    resp.set_cookie(DEVICE_COOKIE, proof, max_age=int(DEVICE_COOKIE_TTL.total_seconds()),
+                    path=DEVICE_COOKIE_PATH, httponly=True, samesite="strict", secure=_is_https(request))
+
+
+def _audit_username(username: str) -> str | None:
+    """A sign-in name fit for the audit log: one that could be a real
+    account. Anything else is dropped rather than stored, so junk (or a
+    password typed into the wrong box) never lands in the log."""
+    return username if USERNAME_RE.match(username) else None
+
+
 # ── Security headers ────────────────────────────────────────────────────────
 
 class SecurityHeadersMiddleware:
@@ -232,6 +254,7 @@ def build_api_routes(*, identity, db_getter, settings_info, first_run: FirstRun,
     https: the TLS state object (tlsca.TlsState) or None when built-in TLS is off.
     """
     throttle = throttle or LoginThrottle()
+    password_throttle = FailureThrottle(max_failures=5, window=900.0, lockout=900.0)
 
     def ident() -> Identity:
         return identity()
@@ -282,12 +305,13 @@ def build_api_routes(*, identity, db_getter, settings_info, first_run: FirstRun,
         if ident().count_users() > 0:
             return _error("already_set_up", 409, "A user already exists; sign in instead.")
         if not first_run.check(code):
-            record("auth.first_run_failed", item_type="user", item_id=normalize_username(username),
-                   reason="bad_setup_code")
+            record("auth.first_run_failed", item_type="user",
+                   item_id=_audit_username(normalize_username(username)), reason="bad_setup_code")
             return _error("bad_setup_code", 403, "That setup code is not the one in the server log.")
         validate_password(password)
-        user, _ = ident().create_user(username, role="admin", display_name=_str(data, "display_name", required=False)
-                                      or "Administrator", password=password)
+        user, _ = await run_in_threadpool(
+            ident().create_user, username, role="admin",
+            display_name=_str(data, "display_name", required=False) or "Administrator", password=password)
         first_run.clear()
         record("admin.created", actor=user.username, item_type="user", item_id=user.username,
                source="setup_code")
@@ -295,6 +319,7 @@ def build_api_routes(*, identity, db_getter, settings_info, first_run: FirstRun,
         record("auth.login", actor=user.username, item_type="user", item_id=user.username)
         resp = _json({"user": user.public()}, 201)
         _set_session_cookie(resp, raw, request)
+        _set_device_cookie(resp, ident().issue_device_proof(user.username), request)
         return resp
 
     async def login(request: Request):
@@ -302,23 +327,28 @@ def build_api_routes(*, identity, db_getter, settings_info, first_run: FirstRun,
         username = normalize_username(_str(data, "username"))
         password = _str(data, "password")
         ip = _client_ip(request)
-        wait = throttle.retry_after(username, ip)
+        known = ident().is_known_device(username, request.cookies.get(DEVICE_COOKIE))
+        wait = throttle.retry_after(username, ip, known_device=known)
         if wait:
-            record("auth.login_failed", item_type="user", item_id=username, reason="throttled")
+            # Not audited: the attempts that tripped the throttle already
+            # were, and a row per refused retry would let anyone grow the log.
             return _error("throttled", 429, f"Too many attempts; retry after {wait} seconds.",
                           {"Retry-After": str(wait)})
         try:
-            user = ident().authenticate(username, password)
+            # scrypt takes ~100 ms and 32 MiB; off the event loop so a burst
+            # of sign-ins does not stall every other request.
+            user = await run_in_threadpool(ident().authenticate, username, password)
         except IdentityError as e:
             if e.code == "invalid_credentials":
                 throttle.record_failure(username, ip)
-            record("auth.login_failed", item_type="user", item_id=username, reason=e.code)
+            record("auth.login_failed", item_type="user", item_id=_audit_username(username), reason=e.code)
             raise
         throttle.record_success(username, ip)
         raw = ident().create_session(user.id)
         record("auth.login", actor=user.username, item_type="user", item_id=user.username)
         resp = _json({"user": user.public()})
         _set_session_cookie(resp, raw, request)
+        _set_device_cookie(resp, ident().issue_device_proof(user.username), request)
         return resp
 
     async def logout(request: Request):
@@ -332,9 +362,22 @@ def build_api_routes(*, identity, db_getter, settings_info, first_run: FirstRun,
     async def password(request: Request):
         principal = _principal(request)
         data = await _body(request)
-        ident().change_password(principal.user.id, _str(data, "current_password"),
-                                _str(data, "new_password"),
-                                keep_session=request.cookies.get(COOKIE_NAME))
+        # A stolen session cookie must not become a way to brute-force the
+        # account's password through this endpoint.
+        key = str(principal.user.id)
+        wait = password_throttle.retry_after(key)
+        if wait:
+            return _error("throttled", 429, f"Too many attempts; retry after {wait} seconds.",
+                          {"Retry-After": str(wait)})
+        try:
+            await run_in_threadpool(ident().change_password, principal.user.id,
+                                    _str(data, "current_password"), _str(data, "new_password"),
+                                    keep_session=request.cookies.get(COOKIE_NAME))
+        except IdentityError as e:
+            if e.code == "wrong_password":
+                password_throttle.record_failure(key)
+            raise
+        password_throttle.record_success(key)
         record("password.changed", item_type="user", item_id=principal.user.username)
         return _no_content()
 
@@ -369,8 +412,8 @@ def build_api_routes(*, identity, db_getter, settings_info, first_run: FirstRun,
     async def users_create(request: Request):
         data = await _body(request)
         role = _str(data, "role", required=False, default="user") or "user"
-        user, temp = ident().create_user(_str(data, "username"), role=role,
-                                         display_name=_str(data, "display_name", required=False))
+        user, temp = await run_in_threadpool(ident().create_user, _str(data, "username"), role=role,
+                                             display_name=_str(data, "display_name", required=False))
         record("user.created", item_type="user", item_id=user.username, role=user.role)
         return _json({"user": user.public(), "temporary_password": temp,
                       "expires_at": user.temp_password_expires_at}, 201)
@@ -384,7 +427,7 @@ def build_api_routes(*, identity, db_getter, settings_info, first_run: FirstRun,
     async def users_reset_password(request: Request):
         me = _principal(request).user
         user = target(request)
-        temp, expires = ident().reset_password(user.id, acting_user_id=me.id)
+        temp, expires = await run_in_threadpool(ident().reset_password, user.id, acting_user_id=me.id)
         record("password.reset", item_type="user", item_id=user.username, expires_at=expires)
         return _json({"temporary_password": temp, "expires_at": expires})
 
@@ -395,9 +438,12 @@ def build_api_routes(*, identity, db_getter, settings_info, first_run: FirstRun,
         active = data.get("active")
         if not isinstance(active, bool):
             raise ApiError("invalid_field", 400, "'active' must be true or false.")
-        updated = ident().set_active(user.id, active, acting_user_id=me.id)
-        record("user.reactivated" if active else "user.deactivated", item_type="user", item_id=user.username)
-        return _json({"user": updated.public()})
+        updated, revoked = ident().set_active(user.id, active, acting_user_id=me.id)
+        if active:
+            record("user.reactivated", item_type="user", item_id=user.username)
+        else:
+            record("user.deactivated", item_type="user", item_id=user.username, tokens_revoked=revoked)
+        return _json({"user": updated.public(), "tokens_revoked": revoked})
 
     async def users_set_role(request: Request):
         me = _principal(request).user
@@ -424,6 +470,7 @@ def build_api_routes(*, identity, db_getter, settings_info, first_run: FirstRun,
         limit = _int_param(request, "limit", 50, 1, config.MAX_LIST_LIMIT)
         offset = _int_param(request, "offset", 0, 0, 10_000_000)
         filters = {k: (q.get(k) or None) for k in ("item_type", "item_id", "namespace", "op", "actor")}
+        filters["content_only"] = not _principal(request).user.is_admin
         db = db_getter()
         try:
             events = db.list_audit(**filters, limit=limit, offset=offset)

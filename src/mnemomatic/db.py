@@ -11,7 +11,9 @@ from pathlib import Path
 import sqlite_vec
 
 from mnemomatic import model_config
-from mnemomatic.models import Document, Knowledge, Note, SearchResult
+from mnemomatic.models import (
+    Document, Knowledge, Note, SearchResult, validate_namespace, validate_tag_list,
+)
 
 logger = logging.getLogger("mnemomatic")
 
@@ -135,7 +137,8 @@ _SPEC_BY_ITEM_TYPE: dict[str, _TableSpec] = {s.item_type: s for s in _SPECS.valu
 
 # What audit_log.item_type may hold: the content types, plus the identity and
 # server-state subjects the API writes events about.
-_AUDIT_ITEM_TYPES = frozenset(_SPEC_BY_ITEM_TYPE) | {"user", "token", "https", "schema"}
+AUDIT_IDENTITY_TYPES = frozenset({"user", "token", "https"})
+_AUDIT_ITEM_TYPES = frozenset(_SPEC_BY_ITEM_TYPE) | AUDIT_IDENTITY_TYPES | {"schema"}
 
 
 def _current_filter(table: str, alias: str = "") -> str:
@@ -241,6 +244,17 @@ def _safe_json_loads(s: str, default, context: str = ""):
         logger.warning("Corrupted JSON field%s — returning default. Error: %s",
                        f" ({context})" if context else "", e)
         return default
+
+
+# Longest value stored per audit column, and for the serialized detail.
+AUDIT_MAX_FIELD = 512
+AUDIT_MAX_DETAIL = 16_384
+
+
+def _clip(value: str | None) -> str | None:
+    if isinstance(value, str) and len(value) > AUDIT_MAX_FIELD:
+        return value[:AUDIT_MAX_FIELD] + "…"
+    return value
 
 
 def _dict_factory(cursor: sqlite3.Cursor, row: tuple) -> dict:
@@ -971,9 +985,10 @@ class Database:
         row["item"] = _row_to_model(_SPECS[table].model, payload)
         return row
 
-    def item_vectors(self, table: str, namespace: str) -> list[tuple[str, str, list[float]]]:
+    def item_vectors(self, table: str, namespace: str) -> list[tuple[str, str, bytes]]:
         """(id, title/subject, embedding) for every current item in the namespace
-        that has a whole-item vector.
+        that has a whole-item vector. The embedding stays the raw float32 blob
+        so a big namespace is not expanded into Python floats.
 
         Feeds the consolidation report's duplicate clustering. Chunked
         documents (no whole-document vector) and superseded facts (vector
@@ -987,11 +1002,7 @@ class Database:
             f"WHERE t.namespace = ?{_current_filter(table, 't')}",
             (namespace,),
         ).fetchall()
-        return [
-            (r["id"], r["title"],
-             list(struct.unpack(f"{len(r['embedding']) // 4}f", r["embedding"])))
-            for r in rows
-        ]
+        return [(r["id"], r["title"], r["embedding"]) for r in rows]
 
     def stale_items(self, namespace: str, cutoff: str, limit: int = 50) -> list[dict]:
         """Current items never retrieved since usage tracking began and not
@@ -1025,11 +1036,20 @@ class Database:
         """
         conn = self._get_conn()
         now = datetime.now(timezone.utc)
+        # Several of these come straight from request headers or bodies;
+        # capping them keeps one request from adding megabytes to a log that
+        # is kept for years.
+        item_id, namespace, title, actor, client, ip = (
+            _clip(v) for v in (item_id, namespace, title, actor, client, ip)
+        )
+        detail_json = json.dumps(detail) if detail else None
+        if detail_json and len(detail_json) > AUDIT_MAX_DETAIL:
+            detail_json = json.dumps({"truncated": True, "op_detail": detail_json[:AUDIT_MAX_DETAIL]})
         conn.execute(
             "INSERT INTO audit_log (ts, op, item_type, item_id, namespace, title, "
             "actor, client, ip, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (now.isoformat(), op, item_type, item_id, namespace,
-             title, actor, client, ip, json.dumps(detail) if detail else None),
+             title, actor, client, ip, detail_json),
         )
         if AUDIT_KEEP_DAYS > 0:
             cutoff = (now - timedelta(days=AUDIT_KEEP_DAYS)).isoformat()
@@ -1037,7 +1057,7 @@ class Database:
         conn.commit()
 
     @staticmethod
-    def _audit_where(item_type, item_id, namespace, op, actor) -> tuple[str, list]:
+    def _audit_where(item_type, item_id, namespace, op, actor, content_only) -> tuple[str, list]:
         if item_type is not None and item_type not in _AUDIT_ITEM_TYPES:
             raise ValueError(
                 f"Invalid type {item_type!r}: must be one of {', '.join(sorted(_AUDIT_ITEM_TYPES))}"
@@ -1048,13 +1068,22 @@ class Database:
             if value is not None:
                 clauses.append(f"{column} = ?")
                 params.append(value)
+        if content_only:
+            marks = ", ".join("?" * len(AUDIT_IDENTITY_TYPES))
+            clauses.append(f"(item_type IS NULL OR item_type NOT IN ({marks}))")
+            params.extend(sorted(AUDIT_IDENTITY_TYPES))
         return (" WHERE " + " AND ".join(clauses)) if clauses else "", params
 
     def list_audit(self, item_type: str | None = None, item_id: str | None = None,
                    namespace: str | None = None, op: str | None = None,
-                   actor: str | None = None, limit: int = 50, offset: int = 0) -> list[dict]:
-        """Audit events, newest first, with optional filters. detail is parsed JSON."""
-        where, params = self._audit_where(item_type, item_id, namespace, op, actor)
+                   actor: str | None = None, limit: int = 50, offset: int = 0,
+                   content_only: bool = False) -> list[dict]:
+        """Audit events, newest first, with optional filters. detail is parsed JSON.
+
+        content_only drops identity events (sign-ins, users, tokens, HTTPS):
+        what non-admins see, since those rows carry other people's addresses
+        and failed sign-in names."""
+        where, params = self._audit_where(item_type, item_id, namespace, op, actor, content_only)
         rows = self._get_conn().execute(
             f"SELECT * FROM audit_log{where} ORDER BY id DESC LIMIT ? OFFSET ?",
             [*params, limit, offset],
@@ -1066,9 +1095,9 @@ class Database:
 
     def count_audit(self, item_type: str | None = None, item_id: str | None = None,
                     namespace: str | None = None, op: str | None = None,
-                    actor: str | None = None) -> int:
+                    actor: str | None = None, content_only: bool = False) -> int:
         """How many audit events match the same filters list_audit takes."""
-        where, params = self._audit_where(item_type, item_id, namespace, op, actor)
+        where, params = self._audit_where(item_type, item_id, namespace, op, actor, content_only)
         return self._get_conn().execute(
             f"SELECT COUNT(*) AS n FROM audit_log{where}", params
         ).fetchone()["n"]
@@ -1400,13 +1429,17 @@ class Database:
         row = conn.execute(f"SELECT * FROM {table} WHERE id = ?", (item_id,)).fetchone()
         if not row:
             raise ValueError(f"{item_type} {item_id} not found")
-        self._capture_revision(conn, table, row, "update")
+        if row.get("valid_until") is not None:
+            raise ValueError(f"knowledge {item_id} is superseded history and cannot be retagged")
+        if add_tags:
+            validate_tag_list(add_tags)
         tags = set(_safe_json_loads(row["tags"], [], f"tags row {row.get('id','?')}"))
         if add_tags:
             tags.update(add_tags)
         if remove_tags:
             tags -= set(remove_tags)
-        tag_list = sorted(tags)
+        tag_list = validate_tag_list(sorted(tags))
+        self._capture_revision(conn, table, row, "update")
         conn.execute(
             f"UPDATE {table} SET tags = ?, updated_at = ? WHERE id = ?",
             (json.dumps(tag_list), datetime.now(timezone.utc).isoformat(), item_id),
@@ -1478,6 +1511,7 @@ class Database:
         mirroring the upsert semantics of the store_* operations. Returns
         (moved counts, replaced counts) per table.
         """
+        validate_namespace(new)
         if old == new:
             raise ValueError("old and new namespace are identical — nothing to rename")
         conn = self._get_conn()
