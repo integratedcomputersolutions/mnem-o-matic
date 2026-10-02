@@ -14,6 +14,7 @@ import logging
 import uvicorn
 
 from mnemomatic import config, runtime
+from mnemomatic.api import SecurityHeadersMiddleware, build_api_routes
 from mnemomatic.audit import RequestMetaMiddleware
 from mnemomatic.auth import AuthMiddleware
 from mnemomatic.bodylimit import BodyLimitMiddleware
@@ -176,7 +177,17 @@ def main():
     app.router.routes.insert(0, Route("/export", _export_route, methods=["GET"]))
     app.router.routes.insert(0, Route("/health", _health_route, methods=["GET"]))
 
+    # The browser's JSON API. Session-authenticated by AuthMiddleware; content
+    # stays read-only here — only MCP writes.
+    app.router.routes.insert(0, build_api_routes(
+        identity=runtime._identity, db_getter=runtime._db, settings_info=_settings_info,
+        first_run=runtime.first_run,
+    ))
+
     app = CompactToolsMiddleware(app)
+
+    # CSP, nosniff, referrer policy (and HSTS over TLS) on everything but /mcp.
+    app = SecurityHeadersMiddleware(app)
 
     # Capture the principal, client and ip per request for the audit log.
     # Inside AuthMiddleware, which is what puts the principal in the scope.
