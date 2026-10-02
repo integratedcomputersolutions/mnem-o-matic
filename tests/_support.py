@@ -15,7 +15,7 @@ from mnemomatic import server as runtime
 # mnemomatic.server directly: when those singletons move to their own module,
 # the patch target changes here once instead of at every call site.
 __all__ = [
-    "EMBEDDING_DIM", "FakeEmbedder", "axis", "mix", "tilted_axis", "runtime",
+    "EMBEDDING_DIM", "FakeEmbedder", "IdentityFixture", "axis", "mix", "tilted_axis", "runtime",
 ]
 
 # The dimension the suite embeds at. Matches the default the server falls back
@@ -66,3 +66,50 @@ class FakeEmbedder:
         vec = [0.0] * self.dim
         vec[hash(text) % self.dim] = 1.0
         return vec
+
+
+class IdentityFixture:
+    """A file-backed Database with an Identity store, one admin, one plain
+    user, and a token for each — for tests that drive AuthMiddleware.
+
+    File-backed because Starlette's TestClient serves on a worker thread and
+    each thread gets its own connection. scrypt is patched down to a cheap
+    work factor for the fixture's lifetime.
+
+        fx = IdentityFixture(); self.addCleanup(fx.close)
+        fx.admin_token, fx.user_token, fx.session_for(fx.admin)
+    """
+
+    ADMIN_PASSWORD = "admin-password-1"
+    USER_PASSWORD = "user-password-12"
+
+    def __init__(self):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from mnemomatic import identity as identity_module
+        from mnemomatic.db import Database
+        from mnemomatic.identity import Identity
+
+        self._patch = patch.multiple(identity_module, SCRYPT_LOG_N=10, SCRYPT_P=1)
+        self._patch.start()
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        self.path = Path(tmp.name)
+        self.db = Database(str(self.path))
+        self.identity = Identity(self.db)
+        self.admin, _ = self.identity.create_user("admin", role="admin", password=self.ADMIN_PASSWORD)
+        self.user, _ = self.identity.create_user("alice", role="user", password=self.USER_PASSWORD)
+        _, self.admin_token = self.identity.create_token(self.admin.id, "admin-agent")
+        _, self.user_token = self.identity.create_token(self.user.id, "alice-agent")
+
+    def session_for(self, user) -> str:
+        return self.identity.create_session(user.id)
+
+    def close(self):
+        from pathlib import Path
+        self.db.close()
+        self._patch.stop()
+        for p in (self.path, Path(str(self.path) + "-wal"), Path(str(self.path) + "-shm")):
+            p.unlink(missing_ok=True)

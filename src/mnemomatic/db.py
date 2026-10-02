@@ -36,7 +36,10 @@ BUSY_TIMEOUT_MS = 5000
 # it only constrains current rows.
 # Version 4: the append-only audit_log table — one row per write operation
 # (event trail for accountability, complementing revisions' content capture).
-SCHEMA_VERSION = 4
+# Version 5: identity — users, sessions, api_tokens, and a settings table.
+# Per-user credentials replace the single shared API key; the audit log's
+# actor becomes an authenticated username from here on.
+SCHEMA_VERSION = 5
 CHUNK_THRESHOLD = int(os.environ.get("MNEMOMATIC_CHUNK_THRESHOLD", "2000"))
 CHUNK_SIZE = int(os.environ.get("MNEMOMATIC_CHUNK_SIZE", "1000"))
 CHUNK_OVERLAP = int(os.environ.get("MNEMOMATIC_CHUNK_OVERLAP", "200"))
@@ -129,6 +132,10 @@ _SPECS: dict[str, _TableSpec] = {
 _TABLES = tuple(_SPECS)
 # Same specs keyed by the singular item_type the tools speak.
 _SPEC_BY_ITEM_TYPE: dict[str, _TableSpec] = {s.item_type: s for s in _SPECS.values()}
+
+# What audit_log.item_type may hold: the content types, plus the identity and
+# server-state subjects the API writes events about.
+_AUDIT_ITEM_TYPES = frozenset(_SPEC_BY_ITEM_TYPE) | {"user", "token", "https", "schema"}
 
 
 def _current_filter(table: str, alias: str = "") -> str:
@@ -598,11 +605,12 @@ class Database:
             self._check_identity(conn)
             if version < SCHEMA_VERSION:
                 self._migrate_content_schema(conn)
+                self._record_migration(conn, version)
                 # A pending rebuild leaves the version to rebuild_vec_tables,
                 # which stamps it once the vec tables actually match.
                 if not self.reindex_pending:
                     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-                    conn.commit()
+                conn.commit()
             return
 
         # Version 0: either a fresh database or one from before schema
@@ -663,7 +671,7 @@ class Database:
 
     @classmethod
     def _migrate_content_schema(cls, conn: sqlite3.Connection) -> None:
-        """Apply the content-table migrations (v2, v3, v4) in order.
+        """Apply the content-table migrations (v2 through v5) in order.
 
         Every step is idempotent (column-existence checks, IF NOT EXISTS) so
         this is safe to run on any database regardless of which path reached it.
@@ -671,6 +679,17 @@ class Database:
         cls._migrate_to_v2(conn)
         cls._migrate_to_v3(conn)
         cls._migrate_to_v4(conn)
+        cls._migrate_to_v5(conn)
+
+    @staticmethod
+    def _record_migration(conn: sqlite3.Connection, from_version: int) -> None:
+        """Leave one audit row saying the schema moved, so the point at which
+        audit actors stopped being self-declared is visible in the trail."""
+        conn.execute(
+            "INSERT INTO audit_log (ts, op, item_type, actor, detail) VALUES (?, ?, ?, ?, ?)",
+            (datetime.now(timezone.utc).isoformat(), "schema.migrated", "schema", "system",
+             json.dumps({"from": from_version, "to": SCHEMA_VERSION})),
+        )
 
     @staticmethod
     def _migrate_to_v2(conn: sqlite3.Connection) -> None:
@@ -738,6 +757,72 @@ class Database:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_item ON audit_log(item_type, item_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_ns ON audit_log(namespace, id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts)")
+
+    @staticmethod
+    def _migrate_to_v5(conn: sqlite3.Connection) -> None:
+        """Version 5: identity tables.
+
+        users carry a password hash and a role; sessions and api_tokens hold
+        only SHA-256 hashes of the credentials they stand for, so a copy of the
+        database cannot be replayed against the server. settings is a small
+        key/value store for state the UI changes at runtime (the HTTPS name).
+        The identity module (`identity.py`) owns the rows; this only shapes them.
+        """
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                display_name TEXT NOT NULL DEFAULT '',
+                role TEXT NOT NULL CHECK (role IN ('admin', 'user')),
+                password_hash TEXT NOT NULL,
+                must_change_password INTEGER NOT NULL DEFAULT 0,
+                temp_password_expires_at TEXT,
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token_hash TEXT NOT NULL UNIQUE,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                created_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+            CREATE TABLE IF NOT EXISTS api_tokens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                token_hash TEXT NOT NULL UNIQUE,
+                hint TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT,
+                last_used_at TEXT,
+                revoked_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_tokens_user ON api_tokens(user_id);
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+        """)
+
+    def connection(self) -> sqlite3.Connection:
+        """This thread's connection, for modules that own their own tables
+        (identity, TLS state) and would otherwise reach into a private name."""
+        return self._get_conn()
+
+    def get_setting(self, key: str) -> str | None:
+        row = self._get_conn().execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else None
+
+    def set_setting(self, key: str, value: str | None) -> None:
+        conn = self._get_conn()
+        if value is None:
+            conn.execute("DELETE FROM settings WHERE key = ?", (key,))
+        else:
+            conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
+        conn.commit()
 
     def rebuild_vec_tables(self) -> None:
         """Drop and recreate all vec0 tables empty, at the configured dimension.
@@ -951,28 +1036,42 @@ class Database:
             conn.execute("DELETE FROM audit_log WHERE ts < ?", (cutoff,))
         conn.commit()
 
-    def list_audit(self, item_type: str | None = None, item_id: str | None = None,
-                   namespace: str | None = None, op: str | None = None,
-                   limit: int = 50) -> list[dict]:
-        """Audit events, newest first, with optional filters. detail is parsed JSON."""
-        if item_type is not None and item_type not in _SPEC_BY_ITEM_TYPE:
-            raise ValueError(f"Invalid type {item_type!r}: must be 'document', 'knowledge', or 'note'")
-        sql = "SELECT * FROM audit_log"
+    @staticmethod
+    def _audit_where(item_type, item_id, namespace, op, actor) -> tuple[str, list]:
+        if item_type is not None and item_type not in _AUDIT_ITEM_TYPES:
+            raise ValueError(
+                f"Invalid type {item_type!r}: must be one of {', '.join(sorted(_AUDIT_ITEM_TYPES))}"
+            )
         clauses, params = [], []
         for column, value in (("item_type", item_type), ("item_id", item_id),
-                              ("namespace", namespace), ("op", op)):
+                              ("namespace", namespace), ("op", op), ("actor", actor)):
             if value is not None:
                 clauses.append(f"{column} = ?")
                 params.append(value)
-        if clauses:
-            sql += " WHERE " + " AND ".join(clauses)
-        sql += " ORDER BY id DESC LIMIT ?"
-        params.append(limit)
-        rows = self._get_conn().execute(sql, params).fetchall()
+        return (" WHERE " + " AND ".join(clauses)) if clauses else "", params
+
+    def list_audit(self, item_type: str | None = None, item_id: str | None = None,
+                   namespace: str | None = None, op: str | None = None,
+                   actor: str | None = None, limit: int = 50, offset: int = 0) -> list[dict]:
+        """Audit events, newest first, with optional filters. detail is parsed JSON."""
+        where, params = self._audit_where(item_type, item_id, namespace, op, actor)
+        rows = self._get_conn().execute(
+            f"SELECT * FROM audit_log{where} ORDER BY id DESC LIMIT ? OFFSET ?",
+            [*params, limit, offset],
+        ).fetchall()
         for row in rows:
             if row["detail"]:
                 row["detail"] = _safe_json_loads(row["detail"], None, f"audit {row['id']}")
         return rows
+
+    def count_audit(self, item_type: str | None = None, item_id: str | None = None,
+                    namespace: str | None = None, op: str | None = None,
+                    actor: str | None = None) -> int:
+        """How many audit events match the same filters list_audit takes."""
+        where, params = self._audit_where(item_type, item_id, namespace, op, actor)
+        return self._get_conn().execute(
+            f"SELECT COUNT(*) AS n FROM audit_log{where}", params
+        ).fetchone()["n"]
 
     def item_embedding(self, item_type: str, item_id: str) -> list[float] | None:
         """The stored embedding for an item, or None when it has no vector.

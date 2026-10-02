@@ -3,7 +3,8 @@
 ## Prerequisites
 
 - [Docker](https://docs.docker.com/get-docker/) and Docker Compose
-- [mkcert](https://github.com/FiloSottile/mkcert) — for generating locally-trusted TLS certificates (LAN deployments)
+
+Nothing else: TLS certificates come from the server's own certificate authority (see [HTTPS](#https)), and the web UI is built into the images. Building from source without Docker additionally needs Python 3.11+ and Node 22+ (for the web UI).
 
 ## Deployment Profiles
 
@@ -15,9 +16,45 @@
 
 Choose the profile that fits your setup. The `full` image is self-contained and works out of the box; its bundled embedding model is chosen with the `EMBED_MODEL` build argument (see [Choosing the built-in embedding model](#choosing-the-built-in-embedding-model)). The `lite` image is significantly smaller and delegates embedding to an Ollama instance (or any compatible API), or runs keyword-only search if no embedder is configured.
 
+## Upgrading from v2.x to v3.0
+
+v3.0 replaces the single shared API key and the viewer's shared secret with **users and personal API tokens**, serves HTTPS itself, and ships a new web UI. Your content is untouched — the database migrates forward automatically on first start (schema version 4 → 5) — but every client's credential changes, so plan a few minutes.
+
+### What breaks
+
+| 2.x | 3.0 |
+| --- | --- |
+| `MNEMOMATIC_API_KEY` shared by every agent | Removed. Each person creates `mnm_…` tokens in the web UI; `/mcp` refuses anything else |
+| `MNEMOMATIC_UI_TOKEN` and the viewer at `/ui` | Removed. The web UI is at `/`, behind a sign-in |
+| Caddy + mkcert in the default compose file | The server runs its own CA on port 8443; Caddy is an optional overlay under `deploy/caddy/` |
+| Ports 80/443 published by Caddy | Ports 8000 (plain, setup) and 8443 (HTTPS) published by the server |
+| `mnemomatic-cli --api-key` / `MNEMOMATIC_API_KEY` / `[server] api_key` | `--token` / `MNEMOMATIC_TOKEN` / `[server] token` (the old names still work for one release, with a warning) |
+| Audit `actor` = the self-declared `X-Mnemomatic-Actor` header | `actor` = the authenticated username; the header is kept as a label in the event detail |
+
+### Steps
+
+1. **Back up** — `cp data/mnemomatic.db data/mnemomatic.db.v2-backup`, or take an export. A 2.x image cannot open a database 3.0 has migrated.
+2. **Update the compose file** — take the new `docker-compose.yml`: it publishes `8000` and `8443` and drops the `caddy` service, `MNEMOMATIC_API_KEY`, `MNEMOMATIC_UI_TOKEN` and `MNEMOMATIC_TRUSTED_PROXIES`. Keep your own additions (embedding model, backups, `user:`). If you want to keep Caddy, use the overlay instead — see [Behind your own reverse proxy](#behind-your-own-reverse-proxy).
+3. **Start** — `docker compose up -d --build`, then `docker compose logs mnemomatic`. With no users yet the log shows a one-time **setup code**.
+4. **Create the first administrator** — open `http://your-host:8000`, enter the code, choose a username and password. (Or set `MNEMOMATIC_ADMIN_PASSWORD` before the first start to create `admin` headlessly.)
+5. **Add people** under **Admin → Users**; each gets a temporary password to replace at first sign-in.
+6. **Replace the key in every client** — each person creates tokens under **My tokens** and follows **Connect an agent** for their client. The old shared key stops working the moment 3.0 starts.
+7. **Enable HTTPS** under **Admin → HTTPS**: enter the hostname, download and trust the CA, confirm. Until then everything is served over plain HTTP on port 8000, exactly as a direct-port 2.x deployment was.
+
+The `./data` directory gains a `tls/` folder holding the CA and server certificate. Back it up with the database; losing it means every device trusts a CA again.
+
+### If nobody can sign in
+
+```bash
+docker exec mnemomatic-MCP /usr/bin/python3 -m mnemomatic.admin_cli reset-password <username>
+docker exec mnemomatic-MCP /usr/bin/python3 -m mnemomatic.admin_cli create-admin <username>
+```
+
+Both print a temporary password and leave an audit row attributed to `cli`.
+
 ## Upgrading from v1.x to v2.0
 
-v2.0 has two breaking changes. Neither touches your data, but the server will refuse to start until both are addressed.
+v2.0 has two breaking changes. Neither touches your data, but the server will refuse to start until both are addressed. (Upgrading straight from 1.x to 3.0 works: do these steps, then the 3.0 steps above.)
 
 ### Before you start: take a backup
 
@@ -95,19 +132,9 @@ docker compose logs -f mnemomatic
 ### 4. Verify
 
 ```bash
-# Through the bundled Caddy (the default compose setup)
-curl -k https://your-server-hostname/health   # {"status": "ok"} — no credentials needed
-
-docker compose ps                             # STATUS should read "healthy"
+curl http://your-server-hostname:8000/health   # {"status": "ok"} — no credentials needed
+docker compose ps                              # STATUS should read "healthy"
 ```
-
-The bundled Caddy config also serves `/health` directly on port 80, so a probe that cannot do TLS works without a redirect:
-
-```bash
-curl http://your-server-hostname/health
-```
-
-Everything else on port 80 still redirects to HTTPS. If you uncommented the server's direct-access `ports:` line, `http://localhost:8686/health` works too.
 
 From an MCP client, `embedding_info()` should report `matches_index: true` with the model you expect. If a reindex ran, `list_audit(op="reindex")` shows it with per-type counts and a failure count.
 
@@ -139,81 +166,64 @@ If you have already applied the chown and still see the error, it is the second 
 
 **The server refuses to start naming an embedding mismatch.** That is the identity check doing its job — it means the configured model is not the one that built your index. Either restore the previous `EMBED_MODEL`, or set `MNEMOMATIC_REINDEX=auto` to rebuild once.
 
-## TLS Setup (LAN deployments)
+## HTTPS
 
-When running on a machine that other devices on your network will connect to, use the included Caddy reverse proxy for HTTPS. Caddy terminates TLS and proxies to the Mnem-O-matic container — the app itself stays HTTP-only on the internal Docker network.
+The server carries its own certificate authority, so a LAN deployment gets HTTPS without an external tool. The CA is bound by name constraints to **one DNS name** and excludes IP addresses entirely: a device that trusts it trusts it for that hostname and nothing else, and a leaked CA key could not sign a certificate any client would accept for another site.
 
-### 1. Install mkcert and create a local CA
+### How it comes up
 
-[mkcert](https://github.com/FiloSottile/mkcert) creates a local certificate authority that your operating system trusts, so generated certificates work without browser/client warnings.
+1. Start the server; it listens on plain HTTP (port 8000). Sign in and open **Admin → HTTPS**.
+2. **Name the host** — the DNS name clients will use, e.g. `memory.example` or a bare LAN hostname. Not an IP. The server issues the CA and a server certificate (ECDSA P-256; CA valid 10 years, server certificate 397 days, renewed automatically a month before expiry) and starts the HTTPS listener on port 8443. Nothing is enforced yet.
+3. **Trust the CA** on the device you are using — download it from the page (also at `http://host:8000/ca.crt`), compare the SHA-256 fingerprint shown, install it. The setup page at `http://host:8000/setup` has the steps for macOS, Windows, Debian/Ubuntu, Fedora and Firefox (which keeps its own store), and the environment variables for tools that ignore the system store (`NODE_EXTRA_CA_CERTS` for Claude Code, Claude Desktop and Cursor; `SSL_CERT_FILE` for Python and `mnemomatic-cli`).
+4. **Confirm** — the page fetches a random per-process id from `https://<name>:8443` and sends it back. That proves the name resolves to this very server from your browser, and only then does plain HTTP close: port 8000 keeps serving `/health`, `/setup`, `/ca.crt` and nothing else, answering API and MCP calls with a 403 that names the HTTPS URL (never a redirect that would replay a credential in the clear). `Strict-Transport-Security` is sent only after this step and only when the HTTPS port is 443: browsers apply HSTS to the hostname regardless of port, so on any other port it would make them upgrade `http://host:8000` to `https://host:8000` — the plain listener — and lock you out of the setup page.
+5. Switch clients to `https://<name>:8443/mcp`. Tokens are unchanged.
 
-```bash
-# macOS
-brew install mkcert
-mkcert -install
+`MNEMOMATIC_PUBLIC_HOST` pre-fills step 2 at start-up; step 4 is still a browser action. **Turn HTTPS enforcement off** from the same page to reopen plain HTTP without discarding the certificates. Changing the name issues a new CA (the old constraints would not cover it) and goes back to step 3.
 
-# Linux (Debian/Ubuntu)
-sudo apt install mkcert
-mkcert -install
+Everything lives under `data/tls/` next to the database: `ca.crt`, `ca.key` (0600), `leaf.crt`, `leaf.key`. The directory is created `0700` by the container's user (uid 65532), so a host backup needs matching privileges. Back it up with the database.
 
-# Windows
-winget install FiloSottile.mkcert
-mkcert -install
+### If 8000 or 8443 is already taken
+
+Docker refuses to start the container with `Bind for 0.0.0.0:8443 failed: port is already allocated`. Move the port — but for HTTPS move **two things together**, because the HTTPS port is both where the server listens and the port written into every URL it hands out (the HTTPS page, the Connect page, the setup page, the plain-port 403s):
+
+```yaml
+services:
+  mnemomatic:
+    ports:
+      - "18000:8000"        # plain: only the host side changes, the UI derives its own URL from the browser
+      - "18443:18443"       # HTTPS: same number on both sides …
+    environment:
+      - MNEMOMATIC_HTTPS_PORT=18443   # … and the server told about it
 ```
 
-`mkcert -install` adds the CA to your system trust store. **Repeat this on every client device** that will connect to Mnem-O-matic.
+Or with `docker run`: `-p 18000:8000 -p 18443:18443 -e MNEMOMATIC_HTTPS_PORT=18443`. Publishing `18443:8443` without the variable looks like it works until a client follows the advertised `https://host:8443`, which is not where the server is.
 
-### 2. Generate a certificate for your server
+### Your own certificate
 
-On the **server machine**, generate a certificate covering its hostname and/or IP address:
+Drop `custom.crt` and `custom.key` (PEM) into `data/tls/`. They take precedence over the built-in pair, no CA is offered, HTTPS counts as active at once, and renewal is yours. The name comes from the certificate's first DNS SAN.
 
-```bash
-cd mnemomatic
-mkcert -cert-file certs/cert.pem -key-file certs/key.pem \
-    your-server-hostname your-server-ip 192.168.1.x localhost 127.0.0.1
-```
+### Behind your own reverse proxy
 
-Replace `your-server-hostname` and `your-server-ip` with the actual hostname and LAN IP of the server machine. Include all names clients might use to reach it. The generated files go into the `certs/` directory (gitignored).
-
-### 3. Trust the CA on client devices
-
-Copy the mkcert root CA certificate to each client device and trust it:
-
-```bash
-# On the server, find the CA location
-mkcert -CAROOT
-# e.g. /home/user/.local/share/mkcert
-
-# Copy rootCA.pem to each client and trust it
-# macOS: double-click → Keychain → set to "Always Trust"
-# Windows: double-click → Install Certificate → Trusted Root CAs
-# Linux: copy to /usr/local/share/ca-certificates/ and run update-ca-certificates
-```
-
-Alternatively, install mkcert on each client machine and run `mkcert -install` — they will share the same CA if you copy the `rootCA.pem` and `rootCA-key.pem` files from the server's CAROOT directory to the client's CAROOT directory first.
-
-### 4. Tell the server the proxy is trustworthy
-
-With Caddy in front, every request reaches the server from Caddy's address, so without further configuration the server sees one client rather than many. That matters in three places: the brute-force lockout would be shared (five wrong keys from anyone would lock out everybody for five minutes), the audit log's `ip` column would record the proxy, and the viewer's session cookie would never be marked `Secure` because the server only sees plain HTTP on the internal network.
-
-The shipped `docker-compose.yml` therefore sets:
+If TLS terminates in a proxy you already run, turn the built-in CA off and tell the server to believe the proxy's forwarded headers:
 
 ```yaml
 services:
   mnemomatic:
     environment:
-      - MNEMOMATIC_TRUSTED_PROXIES=*
+      - MNEMOMATIC_TLS=off
+      - MNEMOMATIC_TRUSTED_PROXIES=*      # or the proxy's IP / the Docker network CIDR
 ```
 
-`*` is safe there because the server's port is not published — Caddy on the internal Docker network is the only thing that can reach it, so its `X-Forwarded-For` and `X-Forwarded-Proto` are the only ones that can arrive. **If you publish the server port directly** (the commented-out `ports:` line), replace `*` with the proxy's address or the Docker network's CIDR — for example `MNEMOMATIC_TRUSTED_PROXIES=172.16.0.0/12`. Left as `*` on a directly reachable port, any client could set `X-Forwarded-For` itself and pick which address it is throttled and audited as.
+Without `MNEMOMATIC_TRUSTED_PROXIES` every request appears to come from the proxy's address: one person's failed sign-ins would lock everyone out, the audit log would record the proxy, and session cookies would never be marked `Secure`. `*` is safe only when the server port is not published — the proxy on the internal network is the only thing that can reach it. On a directly reachable port, name the proxy instead; a client could otherwise set `X-Forwarded-For` itself.
 
-Leaving it unset is the conservative choice for a server nobody proxies: the connection's own peer address is used, and no forwarded header is believed from anyone.
+A ready-made Caddy overlay is included:
 
-### 5. HSTS
+```bash
+mkdir -p deploy/caddy/certs      # cert.pem and key.pem from mkcert, your CA, ...
+docker compose -f docker-compose.yml -f deploy/caddy/docker-compose.caddy.yml up -d
+```
 
-The bundled Caddy config sends `Strict-Transport-Security: max-age=31536000` on HTTPS responses, so once a browser has loaded the site it refuses plain HTTP to that hostname for a year. `includeSubDomains` and `preload` are deliberately left off — this is a LAN deployment behind a private CA, and the same hostname may serve other things.
-
-If you later move that hostname to plain HTTP, browsers that already saw the header will keep refusing it until the year is up. Clear it per browser (Chrome: `chrome://net-internals/#hsts` → "Delete domain security policies"; Firefox: forget the site in History), or drop the `header Strict-Transport-Security` line from the `Caddyfile` before that migration and give browsers time to expire it.
+It unpublishes 8000/8443, publishes 80/443, serves `/health` on port 80 without the HTTPS redirect, caps request bodies, and sends `Strict-Transport-Security: max-age=31536000` on HTTPS responses — without `includeSubDomains` or `preload`, since the same hostname may serve other things. If you later move that hostname back to plain HTTP, browsers that saw the header keep refusing it until the year is up (Chrome: `chrome://net-internals/#hsts`; Firefox: forget the site). The server itself sends HSTS on its own HTTPS listener only once HTTPS is confirmed and only on port 443, for the reason given under [HTTPS](#https). For nginx, the equivalent is `proxy_pass http://mnemomatic:8000;` with `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;` and `X-Forwarded-Proto $scheme;`.
 
 ## Quick Start (Pre-built Images)
 
@@ -222,21 +232,18 @@ Pre-built images for `linux/amd64` and `linux/arm64` are published to the GitHub
 ### Full image (recommended)
 
 ```bash
-# Generate TLS certificates (see TLS Setup above)
-mkdir -p certs
-mkcert -cert-file certs/cert.pem -key-file certs/key.pem your-server-hostname your-server-ip
-
-# Create a data directory
 mkdir -p data
 
-# Pull and run
 docker run -d \
   --name mnemomatic \
-  -p 8000:8000 \
+  -p 8000:8000 -p 8443:8443 \
   -v "$(pwd)/data:/data" \
-  -e MNEMOMATIC_API_KEY=your-secret-key \
   ghcr.io/integratedcomputersolutions/mnem-o-matic:latest-full
+
+docker logs mnemomatic        # the one-time setup code is in here
 ```
+
+Open `http://your-host:8000`, enter the setup code, and create the first administrator. Then create a token under **My tokens**, connect your clients from **Connect an agent**, and enable HTTPS under **Admin → HTTPS** (see [HTTPS](#https)). To skip the setup code — in CI, or a compose file nobody watches — set `MNEMOMATIC_ADMIN_PASSWORD` for the first start; it creates `admin` and is ignored once any user exists.
 
 Or with `docker-compose.yml` — replace the `build:` block with the pre-built image:
 
@@ -244,10 +251,9 @@ Or with `docker-compose.yml` — replace the `build:` block with the pre-built i
 services:
   mnemomatic:
     image: ghcr.io/integratedcomputersolutions/mnem-o-matic:latest-full
+    ports: ["8000:8000", "8443:8443"]
     volumes:
       - ./data:/data
-    environment:
-      - MNEMOMATIC_API_KEY=your-secret-key
 ```
 
 Then:
@@ -264,8 +270,8 @@ services:
     image: ghcr.io/integratedcomputersolutions/mnem-o-matic:latest-lite
     volumes:
       - ./data:/data
+    ports: ["8000:8000", "8443:8443"]
     environment:
-      - MNEMOMATIC_API_KEY=your-secret-key
       - MNEMOMATIC_EMBED_URL=http://host.docker.internal:11434/v1/embeddings
       - MNEMOMATIC_EMBED_MODEL=nomic-embed-text
       - MNEMOMATIC_EMBED_DIM=768
@@ -279,9 +285,9 @@ Any OpenAI-compatible embedding endpoint works the same way — Ollama's `/v1/em
 |-----|-------------|
 | `latest-full` | Latest release, built-in ONNX embeddings |
 | `latest-lite` | Latest release, no ML stack |
-| `2.0.0-full` / `2.0.0-lite` | Exact version |
-| `2.0-full` / `2.0-lite` | Minor floating tag |
-| `2-full` / `2-lite` | Major floating tag |
+| `3.0.0-full` / `3.0.0-lite` | Exact version |
+| `3.0-full` / `3.0-lite` | Minor floating tag |
+| `3-full` / `3-lite` | Major floating tag |
 
 ---
 
@@ -296,16 +302,13 @@ If you prefer to build from source (required for local development or unreleased
 git clone git@github.com:integratedcomputersolutions/mnem-o-matic.git
 cd mnem-o-matic
 
-# Generate TLS certificates (see TLS Setup above)
-mkcert -cert-file certs/cert.pem -key-file certs/key.pem your-server-hostname your-server-ip
-
 # Build and start
 docker compose up --build
 ```
 
-The server is accessible at `https://your-server-hostname/mcp`.
+The web UI is at `http://your-server-hostname:8000`; the MCP endpoint at `http://your-server-hostname:8000/mcp` (and on `https://…:8443` once HTTPS is set up).
 
-The first build takes a few minutes — it downloads the embedding model (checksum-verified; ~90–330 MB depending on `EMBED_MODEL`). Subsequent builds use the cached layer.
+The first build takes a few minutes — it builds the web UI in a Node stage and downloads the embedding model (checksum-verified; ~90–330 MB depending on `EMBED_MODEL`). Subsequent builds use the cached layers.
 
 ### Choosing the built-in embedding model
 
@@ -384,25 +387,16 @@ docker compose down
 
 ## Health Endpoint
 
-`GET /health` reports liveness and is **reachable without credentials**, so a container healthcheck, load balancer, or uptime monitor can poll it even when `MNEMOMATIC_API_KEY` is set:
+`GET /health` reports liveness and is **reachable without credentials**, so a container healthcheck, load balancer, or uptime monitor can poll it:
 
 ```bash
-# Through the bundled Caddy reverse proxy
-curl -k https://your-server-hostname/health
+curl http://your-server-hostname:8000/health
 # {"status": "ok"}
 ```
 
-The default `docker-compose.yml` publishes only Caddy's ports 80 and 443; the server's own 8000 stays on the internal Docker network.
+It stays reachable on the plain port after HTTPS is enforced — monitors frequently cannot trust a private CA — and is served on the HTTPS port as well. The container's own `HEALTHCHECK` runs inside the container against `127.0.0.1:8000`.
 
-`/health` is also served **directly on port 80**, without the HTTPS redirect that applies to every other path — monitors and load balancers frequently cannot follow a 301 or trust a private CA, and this endpoint is unauthenticated by design:
-
-```bash
-curl http://your-server-hostname/health
-```
-
-The container's own `HEALTHCHECK` is unaffected either way: it runs inside the container against `127.0.0.1`, so it never crosses the proxy.
-
-The response is deliberately that and nothing more. Version, embedding model, and configuration stay behind authentication — an unauthenticated caller learns only what an open port already tells them. Every other path, `/export` included, still requires the Bearer token.
+The response is deliberately that and nothing more. Version, embedding model, and configuration stay behind authentication — an unauthenticated caller learns only what an open port already tells them. Every other path, `/export` included, requires a signed-in user or a token.
 
 Both images ship a `HEALTHCHECK` that polls it, so `docker compose up --wait` and orchestrator readiness gates work without configuration.
 
@@ -447,10 +441,13 @@ Environment variables (set in `docker-compose.yml` or passed to Docker):
 | --------------------------- | --------------------------- | -------------------------------------------------------- |
 | `MNEMOMATIC_DB_PATH`        | `/data/mnemomatic.db`       | Path to the SQLite database file                         |
 | `MNEMOMATIC_HOST`           | `0.0.0.0`                   | Server bind address                                      |
-| `MNEMOMATIC_PORT`           | `8000`                      | Server port (inside container)                           |
-| `MNEMOMATIC_API_KEY`        | *(unset)*                   | API key for Bearer token auth. Auth disabled when unset. |
-| `MNEMOMATIC_UI_TOKEN`       | *(unset)*                   | Shared secret for the read-only web viewer at `/ui`. Viewer disabled when unset. |
-| `MNEMOMATIC_TRUSTED_PROXIES` | *(unset)*                  | Reverse proxies whose `X-Forwarded-For` / `X-Forwarded-Proto` are believed: comma-separated IPs or CIDRs, or `*` when only the proxy can reach the server port. Unset means the socket peer is treated as the client. See [TLS Setup](#tls-setup-lan-deployments). |
+| `MNEMOMATIC_PORT`           | `8000`                      | Plain-HTTP port (inside container)                       |
+| `MNEMOMATIC_HTTPS_PORT`     | `8443`                      | HTTPS port, served once a hostname is set. It is also the port named in the HTTPS URL the UI and setup page show, so publish it under the same number (`8443:8443`) or set this to the published one. |
+| `MNEMOMATIC_TLS`            | `auto`                      | `auto` runs the built-in certificate authority; `off` for deployments that terminate TLS in their own proxy (the HTTPS page then reports it as off). See [HTTPS](#https). |
+| `MNEMOMATIC_PUBLIC_HOST`    | *(unset)*                   | DNS name to issue certificates for at start-up (pre-fills the HTTPS page). An administrator still confirms from a browser. A name, never an IP. |
+| `MNEMOMATIC_TLS_DIR`        | `<database directory>/tls`  | Where the CA and server certificate live (`ca.crt`, `ca.key`, `leaf.crt`, `leaf.key`, optional `custom.crt`/`custom.key`) |
+| `MNEMOMATIC_ADMIN_PASSWORD` | *(unset)*                   | First start only: create the `admin` user with this password instead of printing a setup code (10+ characters). Ignored once any user exists. |
+| `MNEMOMATIC_TRUSTED_PROXIES` | *(unset)*                  | Reverse proxies whose `X-Forwarded-For` / `X-Forwarded-Proto` are believed: comma-separated IPs or CIDRs, or `*` when only the proxy can reach the server port. Unset means the socket peer is treated as the client. See [Behind your own reverse proxy](#behind-your-own-reverse-proxy). |
 | `MNEMOMATIC_BACKUP_DIR`     | *(unset)*                   | Directory for scheduled export-zip backups. Backups disabled when unset. |
 | `MNEMOMATIC_BACKUP_INTERVAL` | `24`                       | Hours between scheduled backups                          |
 | `MNEMOMATIC_BACKUP_KEEP`    | `7`                         | Scheduled backup archives to retain; older ones are pruned |
@@ -573,15 +570,21 @@ pip install -e .
 # Install the CLI in development mode (separate package, no deps)
 pip install -e ./cli
 
+# Build the web UI once (Node 22+); the server serves it from src/mnemomatic/static/app
+npm --prefix web ci
+npm --prefix web run build
+
 # Set the database path to a local file
 export MNEMOMATIC_DB_PATH=./mnemomatic.db
 
-# Run the server
+# Run the server — the setup code is printed on first start
 mnemomatic
 
 # Use the CLI
 mnemomatic-cli --help
 ```
+
+While working on the UI, `npm --prefix web run dev` serves it on `http://localhost:5173` with live reload and proxies `/api`, `/mcp` and the rest to the Python server on port 8000 (`MNEMOMATIC_DEV_BACKEND` overrides the target). The proxy keeps the browser's `Host`, so the API's Origin check passes.
 
 The Docker images do not resolve dependencies at build time: they install
 exactly what `uv.lock` pins, with hash verification. Changing a dependency
@@ -594,57 +597,69 @@ than shipping a different resolution than the one that was tested.
 
 ### Unit tests
 
-Unit tests cover the database layer directly using an in-memory SQLite database — no Docker required.
+Unit tests need no Docker and no Node:
 
 ```bash
-uv run python -m unittest tests/test_db.py -v
+uv run --with pytest python -m pytest
+```
+
+### Web UI
+
+```bash
+npm --prefix web run check     # svelte-check, warnings are errors
+npm --prefix web run build
 ```
 
 ### Integration tests
 
-Integration tests run against the live MCP server over HTTP. They use Python's built-in `unittest` module — no extra dependencies required.
+Integration tests run against a live server over HTTP and need a token. Start the server with a bootstrap password, sign in, mint a token, and hand it to the suite:
 
 ```bash
-# Start the server
-docker compose up --build -d
-
-# Run the tests
-uv run python -m unittest tests/test_mcp_api.py -v
-
-# Stop when done
+docker compose up --build -d                 # with MNEMOMATIC_ADMIN_PASSWORD=ci-admin-password in the environment
+O='Origin: http://localhost:8000'; J='Content-Type: application/json'
+curl -fsS -c jar -H "$O" -H "$J" -d '{"username":"admin","password":"ci-admin-password"}' http://localhost:8000/api/login
+export MNEMOMATIC_TOKEN=$(curl -fsS -b jar -H "$O" -H "$J" -d '{"name":"ci"}' http://localhost:8000/api/me/tokens | jq -r .token)
+uv run --with pytest --with "mnemomatic-cli @ ./cli" python -m pytest tests/test_mcp_api.py
 docker compose down
 ```
 
-The integration tests cover storing, reading, upserting, and deleting documents, knowledge entries, and notes over the live MCP API.
+This is what `.github/workflows/ci.yml` does. The tests cover storing, reading, upserting, and deleting documents, knowledge entries, and notes over the live MCP API.
 
 ## Project Structure
 
 ```
 mnemomatic/
 ├── pyproject.toml              # mnemomatic-server package (server deps)
-├── Dockerfile                  # Multi-stage build: full (ONNX) and lite (no ML stack)
-├── docker-compose.yml          # Container orchestration (Caddy + Mnem-O-matic)
-├── Caddyfile                   # Caddy reverse proxy config (TLS termination)
+├── Dockerfile                  # Multi-stage build: web UI (Node), full (ONNX) and lite (no ML stack)
+├── docker-compose.yml          # One service: ports 8000 (plain) and 8443 (HTTPS)
+├── deploy/caddy/               # Optional overlay for terminating TLS in Caddy instead
 ├── LICENSE                     # Apache License 2.0
-├── certs/                      # TLS certificates (generated by mkcert, gitignored)
-│   ├── cert.pem
-│   └── key.pem
 ├── cli/
 │   ├── pyproject.toml          # mnemomatic-cli package (no dependencies)
 │   └── src/mnemomatic_cli/
 │       ├── cli.py              # CLI entry point and command definitions
 │       └── _mcp_client.py      # Minimal MCP HTTP client (stdlib only)
+├── web/                        # The web UI: Svelte 5 + Vite, built into src/mnemomatic/static/app
+│   ├── src/lib/pages.js        # Page table — drives the sidebar and the route guard
+│   ├── src/pages/              # One component per page (admin/ for administrator pages)
+│   └── src/components/         # Card, Modal, Tabs, CopyField, ...
 ├── src/mnemomatic/
-│   ├── server.py               # MCP server — tools and resources
-│   ├── db.py                   # SQLite schema, CRUD, and search
+│   ├── server.py               # Startup, ASGI assembly, the two listeners
+│   ├── tools_*.py              # MCP tools and resources
+│   ├── db.py                   # SQLite schema, migrations, CRUD, and search
+│   ├── identity.py             # Users, sessions, API tokens, password hashing
+│   ├── auth.py                 # Which credential each path takes
+│   ├── api.py                  # The browser's JSON API under /api
+│   ├── tlsca.py                # Built-in certificate authority and HTTPS state
+│   ├── spa.py                  # Serving the web UI, /setup, /ca.crt, the plain-port gate
 │   ├── embeddings.py           # OnnxEmbedder (built-in) and HttpEmbedder (external)
-│   ├── auth.py                 # Bearer token authentication middleware
 │   └── models.py               # Pydantic data models with input validation
 └── tests/
-    ├── test_db.py              # Database CRUD and search (in-memory SQLite)
-    ├── test_db_corruption.py   # JSON corruption graceful handling
-    ├── test_authentication.py  # Auth middleware unit tests
-    ├── test_input_validation.py # Pydantic model validation
-    ├── test_embedder_errors.py  # Embedder error handling and fallback
-    └── test_mcp_api.py         # Integration tests (run against live server)
+    ├── test_db.py              # Database CRUD and search
+    ├── test_identity.py        # Users, sessions, tokens, hashing
+    ├── test_auth_middleware.py # Credential resolution per path
+    ├── test_api.py             # The JSON API end to end
+    ├── test_tlsca.py           # CA, certificates, the HTTPS state machine
+    ├── test_spa.py             # Serving the web UI
+    └── test_mcp_api.py         # Integration tests (run against a live server)
 ```

@@ -22,12 +22,14 @@ _HEADERS = {
 class MCPClient:
     """Minimal MCP client over Streamable HTTP."""
 
-    def __init__(self, base_url: str = "http://localhost:8000/mcp", api_key: str = ""):
+    def __init__(self, base_url: str = "http://localhost:8000/mcp", api_key: str = "",
+                 ssl_context=None):
         scheme = urllib.parse.urlparse(base_url).scheme
         if scheme not in ("http", "https"):
             raise ValueError(f"Unsupported URL scheme {scheme!r} — use http or https")
         self.base_url = base_url
         self.api_key = api_key
+        self._ssl_context = ssl_context
         self.session_id = None
         self._next_id = 1
         self._initialize()
@@ -44,10 +46,10 @@ class MCPClient:
         data = json.dumps(payload).encode()
         req = urllib.request.Request(self.base_url, data=data, headers=headers)
         try:
-            resp = urllib.request.urlopen(req, timeout=30)
+            resp = urllib.request.urlopen(req, timeout=30, context=self._ssl_context)
         except urllib.error.HTTPError as exc:
             if exc.code in (401, 403):
-                raise RuntimeError("Authentication failed — check --api-key") from exc
+                raise RuntimeError("Authentication failed — check --token (or MNEMOMATIC_TOKEN)") from exc
             raise RuntimeError(f"HTTP {exc.code} from server: {exc.reason}") from exc
         except OSError as exc:
             raise RuntimeError(f"Cannot connect to server at {self.base_url}") from exc

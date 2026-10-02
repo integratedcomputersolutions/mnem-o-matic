@@ -21,7 +21,7 @@ from mcp.server.fastmcp import FastMCP
 from pydantic import ValidationError
 
 from mnemomatic import config
-from mnemomatic.audit import request_meta
+from mnemomatic.audit import write_event
 from mnemomatic.db import (
     CHUNK_OVERLAP,
     CHUNK_SIZE,
@@ -29,6 +29,7 @@ from mnemomatic.db import (
     Database,
     _chunk_text,
 )
+from mnemomatic.identity import FirstRun, Identity
 
 logger = logging.getLogger("mnemomatic")
 
@@ -58,6 +59,16 @@ def _db() -> Database:
                     config.DB_PATH, allow_reindex=config.REINDEX, embed_identity=config.embed_identity()
                 )
     return db
+
+
+def _identity() -> Identity:
+    """The identity store over the shared database. Stateless, so a fresh
+    wrapper per call costs nothing and follows a patched _db in tests."""
+    return Identity(_db())
+
+
+# The setup code issued at first start, consumed by POST /api/first-run.
+first_run = FirstRun()
 
 
 def _resolve_embedder():
@@ -275,16 +286,10 @@ def _record_access(refs: list[tuple[str, str]]) -> None:
 
 def _audit(op: str, *, item_type: str | None = None, item_id: str | None = None,
            namespace: str | None = None, title: str | None = None, **detail) -> None:
-    """Append an audit event, enriched with the request's identity fields.
-
-    Called from the write tools' success paths only; a failing audit write is
-    logged and never breaks the operation it describes.
-    """
+    """Append an audit event for a write tool's success path (see audit.write_event)."""
     try:
-        meta = request_meta()
-        _db().append_audit(op, item_type=item_type, item_id=item_id,
-                           namespace=namespace, title=title,
-                           actor=meta["actor"], client=meta["client"], ip=meta["ip"],
-                           detail=detail or None)
+        db = _db()
     except Exception as e:
         logger.warning("Audit write failed: %s: %s", type(e).__name__, e)
+        return
+    write_event(db, op, item_type=item_type, item_id=item_id, namespace=namespace, title=title, **detail)

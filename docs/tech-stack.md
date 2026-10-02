@@ -44,6 +44,27 @@ The external path is deliberately model-agnostic:
 
 The MCP server runs as an HTTP service, which means multiple LLM clients can connect simultaneously. This is what makes it a _shared_ memory — Claude Code and Copilot can both be connected at the same time, reading and writing to the same knowledge base.
 
+## Identity: users, sessions, tokens
+
+There is no shared secret anywhere in the system. People have passwords, agents have tokens, and both resolve to a user.
+
+- **Passwords** are hashed with `hashlib.scrypt` from the standard library (n = 2¹⁵, r = 8, p = 3 — about 32 MiB and 100 ms per hash) in a self-describing PHC-style string, so the parameters can be raised later and old hashes are upgraded on the next successful sign-in. A sign-in always performs exactly one verification — against a dummy hash when the username is unknown — so timing does not reveal valid names.
+- **Sessions and API tokens** are random 256-bit values stored only as SHA-256 hashes; a copy of the database cannot be replayed against the server. Sessions ride in an `HttpOnly`, `SameSite=Strict` cookie; tokens in the `Authorization` header. One pure-ASGI middleware decides, per path, which credential applies (`/mcp`: token; `/api`: session; `/export`: either) and leaves the resolved principal in the request scope for the audit log.
+- **CSRF** is handled without per-form tokens: state-changing API requests must carry an `Origin` matching the `Host`, and the strict cookie never accompanies a cross-site request in the first place.
+- **Brute force** is throttled in memory: per account and per address for passwords, per address for tokens.
+
+The choice of the standard library over bcrypt or argon2 was deliberate — one less compiled dependency in a distroless image, and scrypt at these parameters is in the same class.
+
+## Built-in TLS
+
+`cryptography` (already a transitive dependency) mints an ECDSA P-256 certificate authority whose name constraints permit exactly one DNS name and exclude every IP range, and a 397-day server certificate under it. The server runs two uvicorn listeners on one event loop — plain and TLS; the TLS one without the application lifespan, since the MCP session manager may only be entered once — and hands uvicorn an `ssl.SSLContext` whose SNI callback points at the current certificate, so a renewal (thirty days before expiry) takes effect without a restart.
+
+HTTPS is enforced only after the administrator's browser has fetched a random per-process instance id from the new HTTPS origin: the proof that the name resolves to this server. Until then plain HTTP serves everything; afterwards it serves only what a client needs to get onto HTTPS and refuses API and MCP calls with a 403 that names the right URL rather than a redirect that would replay a credential in the clear.
+
+## Web UI
+
+A Svelte 5 single-page application built with Vite, with no runtime dependencies and no CSS framework — one file of design tokens in the ICS purple. The build lands inside the Python package and ships in the wheel; Node exists only in a Docker build stage, never in a runtime image. The server serves hashed assets as immutable, never caches `index.html`, answers it for any path that wants HTML (the client router owns the URL space), and returns a JSON 404 to anything that does not — so an MCP client probing `/.well-known/…` after a 401 is not handed a page. A single page table drives both the sidebar and the route guard; the forced password change is a screen the shell is not mounted behind, so no URL skips it. The browser is read-only on content by design: the UI manages *access* (tokens, users, HTTPS) and shows the store; only MCP writes to it.
+
 ## Concurrency
 
 Mnem-O-matic is designed to handle up to 10 simultaneous LLM clients safely.

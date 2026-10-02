@@ -9,16 +9,24 @@ order is the registration order clients see, so it is kept stable.
 # not alphabetical, and sorting this file's imports would change the published
 # tool list. See the comment above them.
 
+import asyncio
+import contextlib
 import logging
+import signal
+from pathlib import Path
 
 import uvicorn
 
 from mnemomatic import config, runtime
+from mnemomatic.api import SecurityHeadersMiddleware, build_api_routes
 from mnemomatic.audit import RequestMetaMiddleware
-from mnemomatic.auth import BearerAuthMiddleware
+from mnemomatic.auth import AuthMiddleware
 from mnemomatic.bodylimit import BodyLimitMiddleware
 from mnemomatic.compact import CompactToolsMiddleware
 from mnemomatic.db import EMBEDDING_DIM
+from mnemomatic.spa import APP_DIR, ListenerTag, PlainPortGate, build_spa_routes, build_tls_routes
+from mnemomatic.tlsca import TlsState, start_renewal_thread
+from mnemomatic.identity import IdentityError, ensure_bootstrap
 from mnemomatic.runtime import (
     _audit,
     _embed_content,
@@ -126,6 +134,151 @@ def _run_reindex() -> None:
 # ── Tools ──
 
 
+class _Server(uvicorn.Server):
+    """A uvicorn Server that leaves signal handling to the caller, so two of
+    them can share one event loop (plain and TLS) without the second one
+    stealing the first's SIGTERM/SIGINT handlers."""
+
+    @contextlib.contextmanager
+    def capture_signals(self):
+        yield
+
+
+async def _serve_all(app, tls: TlsState | None) -> None:
+    """Run the plain listener, and the TLS listener whenever a certificate
+    exists — at boot, or the moment an admin names the host.
+
+    The TLS server runs with lifespan="off": the application's lifespan (the
+    MCP session manager) may only be entered once, and the plain server owns
+    it. Both listeners serve the same app; a per-listener tag lets the plain
+    port gate know which side a request came in on.
+    """
+    loop = asyncio.get_running_loop()
+    servers: list[_Server] = []
+    tasks: list[asyncio.Task] = []
+    common = dict(host=config.HOST, log_level="info",
+                  proxy_headers=bool(config.TRUSTED_PROXIES), forwarded_allow_ips=config.TRUSTED_PROXIES)
+
+    plain = _Server(uvicorn.Config(ListenerTag(app, "plain"), port=config.PORT, lifespan="on", **common))
+    servers.append(plain)
+    tasks.append(loop.create_task(plain.serve()))
+
+    tls_started = False
+
+    async def run_tls(server: _Server) -> None:
+        try:
+            await server.serve()
+        except SystemExit:
+            logger.error("HTTPS listener on port %d could not start (port in use?)", config.HTTPS_PORT)
+        except Exception as e:
+            logger.error("HTTPS listener failed: %s: %s", type(e).__name__, e)
+
+    def start_tls() -> None:
+        nonlocal tls_started
+        if tls is None or tls_started or not tls.holder.ready:
+            return
+        tls_started = True
+        server = _Server(uvicorn.Config(ListenerTag(app, "tls"), port=config.HTTPS_PORT, lifespan="off",
+                                        ssl_context_factory=tls.holder.factory, **common))
+        servers.append(server)
+        tasks.append(loop.create_task(run_tls(server)))
+        logger.info("HTTPS listening on %s:%d", config.HOST, config.HTTPS_PORT)
+
+    if tls is not None:
+        tls.on_ready = lambda: loop.call_soon_threadsafe(start_tls)
+        start_tls()
+
+    def stop() -> None:
+        for s in servers:
+            s.should_exit = True
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, stop)
+        except NotImplementedError:  # not the main thread, or Windows
+            pass
+
+    await tasks[0]
+    stop()
+    for task in tasks[1:]:
+        await task
+
+
+def build_app(tls: TlsState | None, app_dir: Path = APP_DIR):
+    """Assemble the ASGI application: the MCP endpoint, the plain HTTP routes,
+    the browser API, the setup and CA routes, the single-page app, and the
+    middleware around them — innermost first.
+
+    Pure assembly, no startup work: the database, embedder, bootstrap and TLS
+    state are prepared by main() (or a test) and handed in, which is what lets
+    a test build the real stack in-process.
+    """
+    app = mcp.streamable_http_app()
+
+    # Both inserted ahead of the MCP catch-all. /export returns the entire
+    # store and takes a session or a token; /health takes nothing (see
+    # AuthMiddleware) so probes that cannot present credentials still work.
+    from starlette.routing import Route
+    app.router.routes.insert(0, Route("/export", _export_route, methods=["GET"]))
+    app.router.routes.insert(0, Route("/health", _health_route, methods=["GET"]))
+
+    # The browser's JSON API. Session-authenticated by AuthMiddleware; content
+    # stays read-only here — only MCP writes.
+    app.router.routes.insert(0, build_api_routes(
+        identity=runtime._identity, db_getter=runtime._db, settings_info=_settings_info,
+        first_run=runtime.first_run, https=tls,
+    ))
+    app.router.routes[0:0] = build_tls_routes(tls)
+
+    # The single-page app last: its final route is a catch-all.
+    app.router.routes.extend(build_spa_routes(app_dir))
+
+    app = CompactToolsMiddleware(app)
+
+    # CSP, nosniff, referrer policy on everything but /mcp. HSTS only once
+    # HTTPS is confirmed and only on 443: it binds to the hostname, not the
+    # port, and would otherwise send browsers to https://host:<plain port>.
+    app = SecurityHeadersMiddleware(
+        app,
+        pending_origin=tls.pending_origin if tls else None,
+        hsts=(lambda: tls.active() and config.HTTPS_PORT == 443) if tls else None,
+    )
+
+    # Capture the principal, client and ip per request for the audit log.
+    # Inside AuthMiddleware, which is what puts the principal in the scope.
+    app = RequestMetaMiddleware(app)
+
+    # Every /mcp call carries a per-user token; every /api call a session.
+    app = AuthMiddleware(app, identity=runtime._identity)
+
+    # Outside auth so an oversized body is refused before anything buffers it,
+    # inside CORS so a 413 still carries the CORS headers a browser needs.
+    app = BodyLimitMiddleware(app, max_bytes=config.MAX_BODY_BYTES)
+
+    if config.CORS_ORIGINS:
+        from starlette.middleware.cors import CORSMiddleware
+        origins = [o.strip() for o in config.CORS_ORIGINS.split(",") if o.strip()]
+        if "*" in origins:
+            logger.warning(
+                "CORS is open to all origins (*): any website may call /mcp with a token it holds."
+            )
+        app = CORSMiddleware(
+            app,
+            allow_origins=origins,
+            allow_methods=["GET", "POST", "OPTIONS"],
+            allow_headers=["*"],
+            expose_headers=["Mcp-Session-Id"],
+        )
+        logger.info("CORS enabled for origins: %s", origins)
+
+    # Outermost: once HTTPS is confirmed, the plain port only hands clients
+    # over to it. Sits outside CORS on purpose — a 403 here is not for browsers
+    # that already reached the right origin.
+    app = PlainPortGate(app, tls)
+
+    return app
+
+
 def main():
     logging.basicConfig(level=logging.INFO)
 
@@ -135,6 +288,13 @@ def main():
     # Pre-warm db and resolve embedder so the first request doesn't pay setup costs
     logger.info("Initializing database...")
     runtime._db()
+    # Someone must be able to log in: create `admin` from the environment or
+    # print a one-time setup code for the browser's first-run screen.
+    try:
+        ensure_bootstrap(runtime._identity(), runtime.first_run, config.ADMIN_PASSWORD)
+    except IdentityError as e:
+        logger.error("MNEMOMATIC_ADMIN_PASSWORD rejected: %s", e.details)
+        raise SystemExit(1)
     logger.info("Initializing embedder...")
     runtime._embedder()
 
@@ -150,82 +310,35 @@ def main():
     # Scheduled backups on a daemon thread (the Database hands each thread its
     # own connection, so the loop reads safely alongside request handling).
     if config.BACKUP_DIR:
-        from pathlib import Path
-
         from mnemomatic.backup import start_backup_thread
         start_backup_thread(runtime._db, Path(config.BACKUP_DIR), interval_hours=config.BACKUP_INTERVAL_HOURS,
                             keep=config.BACKUP_KEEP, server_version=_server_version())
         logger.info("Scheduled backups: every %gh to %s (keeping %d)",
                     config.BACKUP_INTERVAL_HOURS, config.BACKUP_DIR, config.BACKUP_KEEP)
 
-    # Always use unified ASGI app + Uvicorn code path
-    # Authentication is optional based on config.API_KEY environment variable
-    logger.info("Building ASGI application...")
-    app = mcp.streamable_http_app()
-
-    # Both inserted ahead of the MCP catch-all. /export is NOT exempt from
-    # Bearer auth — it returns the entire store. /health is exempt (see
-    # BearerAuthMiddleware) so probes that cannot present credentials still work.
-    from starlette.routing import Route
-    app.router.routes.insert(0, Route("/export", _export_route, methods=["GET"]))
-    app.router.routes.insert(0, Route("/health", _health_route, methods=["GET"]))
-
-    # Optional read-only web viewer at /ui, gated by a single shared secret.
-    # Disabled unless MNEMOMATIC_UI_TOKEN is set, so it never exposes data by default.
-    if config.UI_TOKEN:
-        from mnemomatic.webui import register_webui
-        register_webui(app, runtime._db, config.UI_TOKEN, settings_info=_settings_info, make_export=_make_export)
-        logger.info("Web viewer enabled at /ui")
+    # Built-in TLS: a private CA plus an HTTPS listener, enabled from the UI.
+    # Off means TLS terminates elsewhere (a reverse proxy) and the HTTPS
+    # endpoints answer 409.
+    tls = None
+    if config.TLS_MODE == "auto":
+        tls = TlsState(runtime._db, Path(config.TLS_DIR), config.HTTPS_PORT, public_host=config.PUBLIC_HOST)
+        tls.bootstrap()
+        start_renewal_thread(tls)
     else:
-        logger.info("Web viewer disabled (set MNEMOMATIC_UI_TOKEN to enable)")
+        logger.info("Built-in TLS is off (MNEMOMATIC_TLS=off)")
 
-    app = CompactToolsMiddleware(app)
-
-    # Capture actor/client/ip per request for the audit log.
-    app = RequestMetaMiddleware(app)
-
-    # Middleware handles both authenticated and non-authenticated modes
-    # If config.API_KEY is empty, auth is disabled but logging still tracks requests.
-    # /ui is exempt from Bearer auth only when the viewer is actually registered.
-    app = BearerAuthMiddleware(app, api_key=config.API_KEY, exempt_ui=bool(config.UI_TOKEN))
-
-    # Outside auth so an oversized body is refused before anything buffers it,
-    # inside CORS so a 413 still carries the CORS headers a browser needs.
-    app = BodyLimitMiddleware(app, max_bytes=config.MAX_BODY_BYTES)
-
-    if config.CORS_ORIGINS:
-        from starlette.middleware.cors import CORSMiddleware
-        origins = [o.strip() for o in config.CORS_ORIGINS.split(",") if o.strip()]
-        if "*" in origins and not config.API_KEY:
-            logger.warning(
-                "SECURITY: CORS is open to all origins (*) and authentication is disabled — "
-                "any website can read from and write to this server."
-            )
-        app = CORSMiddleware(
-            app,
-            allow_origins=origins,
-            allow_methods=["GET", "POST", "OPTIONS"],
-            allow_headers=["*"],
-            expose_headers=["Mcp-Session-Id"],
-        )
-        logger.info("CORS enabled for origins: %s", origins)
+    logger.info("Building ASGI application...")
+    app = build_app(tls)
 
     logger.info("Trusted proxies: %s", ", ".join(config.TRUSTED_PROXIES) or "none")
     logger.info("Starting server on %s:%d", config.HOST, config.PORT)
     # With trusted proxies configured, uvicorn rewrites the client address and
     # scheme from X-Forwarded-For / X-Forwarded-Proto — but only for requests
     # whose socket peer is on the list. Everything downstream (the throttles,
-    # the audit log, the viewer's Secure cookie) then reads the real client
-    # without doing its own header parsing. Unset means no forwarded header is
-    # believed from anyone.
-    uvicorn.run(
-        app,
-        host=config.HOST,
-        port=config.PORT,
-        log_level="info",
-        proxy_headers=bool(config.TRUSTED_PROXIES),
-        forwarded_allow_ips=config.TRUSTED_PROXIES,
-    )
+    # the audit log, the session cookie's Secure flag) then reads the real
+    # client without doing its own header parsing. Unset means no forwarded
+    # header is believed from anyone.
+    asyncio.run(_serve_all(app, tls))
 
 
 if __name__ == "__main__":

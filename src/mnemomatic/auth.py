@@ -1,159 +1,187 @@
-"""Authentication middleware for MCP server.
+"""Who is calling, decided once per request.
 
-Supports optional Bearer token authentication via the Authorization header.
-When api_key is empty, authentication is disabled but logging still tracks all requests.
+Two credentials, two audiences:
+
+- **Bearer tokens** (``Authorization: Bearer mnm_…``) are what agents hold.
+  They are the only thing accepted on ``/mcp``.
+- **Session cookies** (``mnm_session``) are what a browser holds after
+  logging in. They are the only thing accepted under ``/api``.
+
+``/export`` takes either, since both the CLI and the web UI download it.
+``/health``, the login endpoints, the CA download, the setup page, and the
+SPA itself need nothing — they either carry no data or exist so a client can
+*get* a credential. Whatever is resolved lands in ``scope["state"]["principal"]``
+for route handlers (``request.state.principal``) and for the audit log.
+
+Pure ASGI rather than BaseHTTPMiddleware so streamed MCP responses pass
+through untouched, and so a rejection is one small send rather than a
+Response object built around a request that never reached the app.
 """
 
-import hmac
+import json
 import logging
+from http.cookies import CookieError, SimpleCookie
 
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.types import ASGIApp, Receive, Scope, Send
 
+from mnemomatic.identity import Principal
 from mnemomatic.throttle import FailureThrottle
 
 logger = logging.getLogger("mnemomatic")
 
+COOKIE_NAME = "mnm_session"
 
-class BearerAuthMiddleware(BaseHTTPMiddleware):
-    """HTTP middleware for optional Bearer token authentication.
+# Reachable with no credential at all.
+PUBLIC_PATHS = frozenset({
+    "/health", "/api/instance-id", "/api/login", "/api/first-run", "/ca.crt", "/setup",
+})
+# What a user who must still choose a password may call.
+PASSWORD_GATE_EXEMPT = frozenset({"/api/password", "/api/logout", "/api/session"})
 
-    When initialized with api_key="", authentication is disabled but request
-    logging is still performed. This allows a single code path regardless of
-    auth configuration.
+_BEARER_FORMAT = "Required format: 'Authorization: Bearer <token>'"
 
-    Repeated invalid-key attempts from the same client are throttled: after a
-    burst of failures the client gets 429 responses (with Retry-After) until
-    the lockout expires, regardless of what credential it presents.
+
+def classify(method: str, path: str) -> str:
+    """Which credential a path takes: public, bearer, session, or any."""
+    if path in PUBLIC_PATHS:
+        return "public"
+    if path == "/api/session" and method in ("GET", "HEAD"):
+        return "public"
+    if path == "/mcp" or path.startswith("/mcp/"):
+        return "bearer"
+    if path == "/export":
+        return "any"
+    if path == "/api" or path.startswith("/api/"):
+        return "session"
+    return "public"          # the SPA and its assets
+
+
+async def _send_json(send: Send, status: int, body: dict, headers: dict[str, str] | None = None) -> None:
+    payload = json.dumps(body).encode()
+    raw_headers = [
+        (b"content-type", b"application/json"),
+        (b"content-length", str(len(payload)).encode()),
+        (b"cache-control", b"no-store"),
+    ]
+    for k, v in (headers or {}).items():
+        raw_headers.append((k.lower().encode(), v.encode()))
+    await send({"type": "http.response.start", "status": status, "headers": raw_headers})
+    await send({"type": "http.response.body", "body": payload})
+
+
+def _cookie_value(headers: dict[str, str], name: str) -> str:
+    raw = headers.get("cookie")
+    if not raw:
+        return ""
+    jar = SimpleCookie()
+    try:
+        jar.load(raw)
+    except CookieError:
+        return ""
+    morsel = jar.get(name)
+    return morsel.value if morsel else ""
+
+
+class AuthMiddleware:
+    """Resolve the caller's principal, or refuse the request.
+
+    `identity` is a callable returning the Identity store (so tests can hand
+    in their own, and the server can hand in the lazily built singleton).
+    Repeated invalid tokens from one address trip the same lockout the old
+    shared key had: five failures in a minute, five minutes out.
     """
 
-    def __init__(self, app, api_key: str = "", exempt_ui: bool = False):
-        """Initialize middleware.
+    def __init__(self, app: ASGIApp, identity, *, throttle: FailureThrottle | None = None):
+        self.app = app
+        self._identity = identity
+        self._throttle = throttle or FailureThrottle()
 
-        Args:
-            app: ASGI application
-            api_key: API key for Bearer token validation. If empty, auth is disabled.
-            exempt_ui: Skip Bearer validation for /ui paths. Only set this when the
-                web viewer is registered — it carries its own shared-secret gate.
-        """
-        super().__init__(app)
-        self.api_key = api_key.strip()
-        self.auth_enabled = bool(self.api_key)
-        self.exempt_ui = exempt_ui
-        self._throttle = FailureThrottle()
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
 
-        if self.auth_enabled:
-            logger.info("Authentication enabled (Bearer token required)")
-        else:
-            logger.warning("Authentication disabled — server is running without API key validation")
+        method, path = scope["method"], scope["path"]
+        headers = {k.decode("latin-1").lower(): v.decode("latin-1")
+                   for k, v in scope.get("headers", [])}
+        ip = scope["client"][0] if scope.get("client") else "unknown"
+        kind = classify(method, path)
+        principal: Principal | None = None
 
-    def _reject(self, reason: str, error: str, details: str, status: int,
-                method: str, path: str, client_ip: str,
-                headers: dict | None = None) -> JSONResponse:
-        """Log an unauthorized request and build its JSON error response."""
-        logger.warning(
-            "Unauthorized request: %s (%s %s from %s)", reason, method, path, client_ip,
-        )
-        return JSONResponse({"error": error, "details": details}, status_code=status, headers=headers)
+        if kind == "public":
+            # A public /api route (the session probe) still likes to know who
+            # is asking; a bad or absent cookie simply means "nobody".
+            if path.startswith("/api"):
+                principal = self._from_cookie(headers)
+        elif kind == "bearer":
+            principal, refusal = self._from_bearer(headers, ip, method, path)
+            if refusal:
+                await _send_json(send, *refusal)
+                return
+        elif kind == "any":
+            if "authorization" in headers:
+                principal, refusal = self._from_bearer(headers, ip, method, path)
+                if refusal:
+                    await _send_json(send, *refusal)
+                    return
+            else:
+                principal = self._from_cookie(headers)
+                if principal is None:
+                    await _send_json(send, 401, {
+                        "error": "unauthenticated",
+                        "details": "Sign in, or send 'Authorization: Bearer <token>'.",
+                    })
+                    return
+        else:  # session
+            principal = self._from_cookie(headers)
+            if principal is None:
+                logger.debug("Unauthenticated %s %s from %s", method, path, ip)
+                await _send_json(send, 401, {"error": "unauthenticated", "details": "Sign in first."})
+                return
+            if principal.user.must_change_password and path not in PASSWORD_GATE_EXEMPT:
+                await _send_json(send, 403, {
+                    "error": "password_change_required",
+                    "details": "Choose a new password before doing anything else.",
+                })
+                return
 
-    async def dispatch(self, request: Request, call_next):
-        """Process request and enforce authentication if enabled.
+        scope.setdefault("state", {})["principal"] = principal
+        await self.app(scope, receive, send)
 
-        Args:
-            request: HTTP request
-            call_next: ASGI callable to proceed to next middleware/handler
+    # ── resolvers ──
 
-        Returns:
-            Response (either error or result from next handler)
-        """
-        # Extract Authorization header
-        auth_header = request.headers.get("authorization", "").strip()
+    def _from_cookie(self, headers: dict[str, str]) -> Principal | None:
+        raw = _cookie_value(headers, COOKIE_NAME)
+        return self._identity().resolve_session(raw) if raw else None
 
-        # Get client IP for logging
-        client_ip = request.client[0] if request.client else "unknown"
-        method = request.method
-        path = request.url.path
-
-        # Liveness probes cannot usually present credentials — a container
-        # HEALTHCHECK, a load balancer, an uptime monitor. /health is therefore
-        # always reachable, and deliberately answers with nothing but
-        # {"status": "ok"}: no version, no configuration, nothing an
-        # unauthenticated caller could not already infer from the port being
-        # open. Everything descriptive stays behind auth.
-        if path == "/health":
-            return await call_next(request)
-
-        # The web viewer under /ui carries its own shared-secret gate, so the
-        # MCP Bearer token does not apply to it. Only honored when the viewer
-        # is actually registered — otherwise /ui is protected like any path.
-        if self.exempt_ui and (path == "/ui" or path.startswith("/ui/")):
-            return await call_next(request)
-
-        # If auth is disabled, just log and proceed
-        if not self.auth_enabled:
-            response = await call_next(request)
-            logger.debug(
-                "Request: %s %s from %s (auth disabled)",
-                method, path, client_ip,
-            )
-            return response
-
-        # Locked-out clients are refused before any credential check
-        wait = self._throttle.retry_after(client_ip)
+    def _from_bearer(self, headers: dict[str, str], ip: str, method: str, path: str):
+        """(principal, None) on success, (None, (status, body, headers)) to refuse."""
+        wait = self._throttle.retry_after(ip)
         if wait:
-            return self._reject(
-                "throttled (too many failed attempts)",
-                "Too many failed authentication attempts",
-                f"Retry after {wait} seconds",
-                429, method, path, client_ip,
-                headers={"Retry-After": str(wait)},
-            )
+            logger.warning("Throttled %s %s from %s (too many failed tokens)", method, path, ip)
+            return None, (429, {"error": "throttled",
+                                "details": f"Too many failed authentication attempts; retry after {wait} seconds"},
+                          {"Retry-After": str(wait)})
 
-        # Auth is enabled — validate token
-        if not auth_header:
-            return self._reject(
-                "missing Authorization header",
-                "Missing Authorization header",
-                "Required format: 'Authorization: Bearer <token>'",
-                401, method, path, client_ip,
-            )
-
-        # Validate header format
-        if not auth_header.lower().startswith("bearer "):
-            return self._reject(
-                "invalid Authorization header format",
-                "Invalid Authorization header format",
-                "Required format: 'Authorization: Bearer <token>'",
-                401, method, path, client_ip,
-            )
-
-        # Extract token
-        token = auth_header[7:].strip()  # Remove "Bearer " prefix
-
+        header = headers.get("authorization", "").strip()
+        if not header:
+            logger.warning("Missing Authorization header (%s %s from %s)", method, path, ip)
+            return None, (401, {"error": "missing_authorization", "details": _BEARER_FORMAT}, None)
+        if not header.lower().startswith("bearer "):
+            logger.warning("Malformed Authorization header (%s %s from %s)", method, path, ip)
+            return None, (401, {"error": "invalid_authorization", "details": _BEARER_FORMAT}, None)
+        token = header[7:].strip()
         if not token:
-            return self._reject(
-                "empty token",
-                "Invalid Authorization header",
-                "Token is empty",
-                401, method, path, client_ip,
-            )
+            return None, (401, {"error": "invalid_authorization", "details": "Token is empty"}, None)
 
-        # Validate token using constant-time comparison (prevents timing attacks)
-        if not hmac.compare_digest(token, self.api_key):
-            self._throttle.record_failure(client_ip)
-            return self._reject(
-                "invalid API key",
-                "Invalid API key",
-                "The provided token does not match the server's API key",
-                403, method, path, client_ip,
-            )
-
-        # Authentication successful
-        self._throttle.record_success(client_ip)
-        logger.debug(
-            "Authenticated request: %s %s from %s",
-            method, path, client_ip,
-        )
-        response = await call_next(request)
-        return response
+        principal = self._identity().resolve_token(token)
+        if principal is None:
+            self._throttle.record_failure(ip)
+            logger.warning("Invalid API token (%s %s from %s)", method, path, ip)
+            return None, (403, {"error": "invalid_token",
+                                "details": "The token is unknown, revoked, expired, or its owner is disabled"},
+                          None)
+        self._throttle.record_success(ip)
+        logger.debug("Authenticated %s via token %s (%s %s from %s)",
+                     principal.user.username, principal.token_hint, method, path, ip)
+        return principal, None

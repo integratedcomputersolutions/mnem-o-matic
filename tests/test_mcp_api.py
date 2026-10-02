@@ -6,11 +6,14 @@ Start with: docker compose up --build -d
 Run with: python -m unittest tests/test_mcp_api.py -v
 """
 
+import os
 import unittest
 
 from mnemomatic_cli._mcp_client import MCPClient
 
 BASE_URL = "http://localhost:8686/mcp"
+# Minted by the CI workflow after logging in as the bootstrapped admin.
+TOKEN = os.environ.get("MNEMOMATIC_TOKEN", "")
 NS = "test-integration"
 
 
@@ -29,7 +32,7 @@ def _search_ids(client: MCPClient, query: str) -> list[str]:
 class TestDocuments(unittest.TestCase):
 
     def setUp(self):
-        self.client = MCPClient(BASE_URL)
+        self.client = MCPClient(BASE_URL, api_key=TOKEN)
         self._cleanup_ids = []
 
     def tearDown(self):
@@ -93,7 +96,7 @@ class TestDocuments(unittest.TestCase):
 class TestKnowledge(unittest.TestCase):
 
     def setUp(self):
-        self.client = MCPClient(BASE_URL)
+        self.client = MCPClient(BASE_URL, api_key=TOKEN)
         self._cleanup_ids = []
 
     def tearDown(self):
@@ -174,7 +177,7 @@ class TestKnowledge(unittest.TestCase):
 class TestNotes(unittest.TestCase):
 
     def setUp(self):
-        self.client = MCPClient(BASE_URL)
+        self.client = MCPClient(BASE_URL, api_key=TOKEN)
         self._cleanup_ids = []
 
     def tearDown(self):

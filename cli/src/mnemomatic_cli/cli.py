@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import re
+import ssl
 import stat
 import sys
 import tomllib
@@ -35,10 +36,11 @@ def _load_config(path: Path) -> dict:
     except tomllib.TOMLDecodeError as exc:
         print(f"Warning: could not parse config file {path}: {exc}", file=sys.stderr)
         return {}
-    if cfg.get("server", {}).get("api_key"):
+    server = cfg.get("server", {})
+    if server.get("token") or server.get("api_key"):
         mode = path.stat().st_mode
         if mode & (stat.S_IRGRP | stat.S_IROTH):
-            print(f"Warning: {path} contains api_key and is readable by others (mode {oct(mode)[-3:]})", file=sys.stderr)
+            print(f"Warning: {path} contains a token and is readable by others (mode {oct(mode)[-3:]})", file=sys.stderr)
     return cfg
 
 
@@ -53,6 +55,35 @@ def _resolve(cli_val, env_var: str, cfg_section: str, cfg_key: str, cfg: dict, d
     if cfg_key in section:
         return section[cfg_key]
     return default
+
+
+def _resolve_token(cli_val, cfg: dict) -> str:
+    """The bearer token: --token, MNEMOMATIC_TOKEN, or [server] token.
+
+    3.0 renamed the credential from the shared API key to a per-user token.
+    The old spellings (MNEMOMATIC_API_KEY, [server] api_key) are still read
+    for one release so an upgrade does not break scripts, with a reminder.
+    """
+    token = _resolve(cli_val, "MNEMOMATIC_TOKEN", "server", "token", cfg, None)
+    if token is not None:
+        return token
+    legacy = _resolve(None, "MNEMOMATIC_API_KEY", "server", "api_key", cfg, None)
+    if legacy is not None:
+        print("Warning: MNEMOMATIC_API_KEY / [server] api_key are deprecated; "
+              "use MNEMOMATIC_TOKEN / [server] token", file=sys.stderr)
+        return legacy
+    return ""
+
+
+def _ssl_context(ca_cert: str | None) -> ssl.SSLContext | None:
+    """A verifying TLS context that also trusts `ca_cert` (the server's own
+    CA, downloaded from /ca.crt). None means the system trust store alone."""
+    if not ca_cert:
+        return None
+    try:
+        return ssl.create_default_context(cafile=ca_cert)
+    except (OSError, ssl.SSLError) as exc:
+        _err(f"cannot load CA certificate {ca_cert}: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +205,7 @@ def _suggested_name(disposition: str) -> str:
     return suggested
 
 
-def _cmd_export(args, server_url: str, api_key: str) -> None:
+def _cmd_export(args, server_url: str, token: str, ssl_context=None) -> None:
     """Download the zip export; write it where -o points, atomically.
 
     -o accepts a directory (server-suggested filename inside it), a file
@@ -186,10 +217,10 @@ def _cmd_export(args, server_url: str, api_key: str) -> None:
     if args.namespace:
         url += "?" + urllib.parse.urlencode({"namespace": args.namespace})
     req = urllib.request.Request(url)
-    if api_key:
-        req.add_header("Authorization", f"Bearer {api_key}")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
     try:
-        with urllib.request.urlopen(req, timeout=300) as resp:
+        with urllib.request.urlopen(req, timeout=300, context=ssl_context) as resp:
             data = resp.read()
             disposition = resp.headers.get("Content-Disposition", "")
     except urllib.error.HTTPError as exc:
@@ -240,8 +271,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     root.add_argument("--server-url", metavar="URL", default=None,
                       help="Server base URL (env: MNEMOMATIC_SERVER_URL, default: http://localhost:8000)")
-    root.add_argument("--api-key", metavar="KEY", default=None,
-                      help="Bearer token (env: MNEMOMATIC_API_KEY — preferred over this flag to avoid exposure in process list)")
+    root.add_argument("--token", metavar="TOKEN", default=None,
+                      help="Your API token, mnm_... (env: MNEMOMATIC_TOKEN — preferred over this flag to avoid exposure in process list)")
+    root.add_argument("--api-key", dest="token", metavar="KEY", default=None, help=argparse.SUPPRESS)
+    root.add_argument("--ca-cert", metavar="FILE", default=None,
+                      help="CA certificate to trust for HTTPS, e.g. the server's /ca.crt (env: MNEMOMATIC_CA_CERT)")
     root.add_argument("--config", metavar="FILE", default=None,
                       help=f"Config file path (default: {_CONFIG_PATH})")
     root.add_argument("--pretty", action="store_true",
@@ -405,7 +439,8 @@ def main():
 
     # Resolve connection settings
     server_url = _resolve(args.server_url, "MNEMOMATIC_SERVER_URL", "server", "url", cfg, _DEFAULT_URL)
-    api_key = _resolve(args.api_key, "MNEMOMATIC_API_KEY", "server", "api_key", cfg, "")
+    token = _resolve_token(args.token, cfg)
+    ssl_context = _ssl_context(_resolve(args.ca_cert, "MNEMOMATIC_CA_CERT", "server", "ca_cert", cfg, None))
 
     # Resolve default search mode
     default_mode = _resolve(None, "MNEMOMATIC_SEARCH_MODE", "search", "mode", cfg, _DEFAULT_MODE)
@@ -416,13 +451,13 @@ def main():
 
     # Export is a plain HTTP download — no MCP session needed.
     if args.command == "export":
-        _cmd_export(args, server_url, api_key)
+        _cmd_export(args, server_url, token, ssl_context)
         return
 
     base_url = server_url.rstrip("/") + "/mcp"
 
     try:
-        client = MCPClient(base_url=base_url, api_key=api_key)
+        client = MCPClient(base_url=base_url, api_key=token, ssl_context=ssl_context)
     except (RuntimeError, ValueError) as exc:
         _err(str(exc))
 
