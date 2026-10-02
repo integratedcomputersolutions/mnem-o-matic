@@ -53,14 +53,11 @@ class MCPClient:
         self._initialize()
 
     def _send(self, payload: dict) -> dict | None:
-        if self.session_id or self.api_key:
-            headers = dict(_HEADERS)
-            if self.session_id:
-                headers["mcp-session-id"] = self.session_id
-            if self.api_key:
-                headers["Authorization"] = f"Bearer {self.api_key}"
-        else:
-            headers = _HEADERS
+        headers = dict(_HEADERS)
+        if self.session_id:
+            headers["mcp-session-id"] = self.session_id
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
         data = json.dumps(payload).encode()
         req = urllib.request.Request(self.base_url, data=data, headers=headers)
         try:
@@ -87,11 +84,6 @@ class MCPClient:
         })
         self._send({"jsonrpc": "2.0", "method": "notifications/initialized"})
 
-    @staticmethod
-    def _check_error(body: dict) -> None:
-        if "error" in body:
-            raise RuntimeError(body["error"].get("message", str(body["error"])))
-
     def _rpc(self, method: str, params: dict) -> dict:
         self._next_id += 1
         body = self._send({
@@ -100,19 +92,19 @@ class MCPClient:
             "method": method,
             "params": params,
         })
-        self._check_error(body)
+        if "error" in body:
+            raise RuntimeError(body["error"].get("message", str(body["error"])))
         return body["result"]
 
     def call_tool(self, name: str, arguments: dict) -> dict | list:
         result = self._rpc("tools/call", {"name": name, "arguments": arguments})
-        items = result["content"]
-        if len(items) == 1:
-            return json.loads(items[0]["text"])
-        return [json.loads(item["text"]) for item in items]
+        return _one_or_all([json.loads(item["text"]) for item in result["content"]])
 
     def read_resource(self, uri: str) -> str | list[str]:
         result = self._rpc("resources/read", {"uri": uri})
-        items = result["contents"]
-        if len(items) == 1:
-            return items[0]["text"]
-        return [item["text"] for item in items]
+        return _one_or_all([item["text"] for item in result["contents"]])
+
+
+def _one_or_all(values: list):
+    """A single result unwrapped; several as a list."""
+    return values[0] if len(values) == 1 else values
