@@ -9,7 +9,11 @@ order is the registration order clients see, so it is kept stable.
 # not alphabetical, and sorting this file's imports would change the published
 # tool list. See the comment above them.
 
+import asyncio
+import contextlib
 import logging
+import signal
+from pathlib import Path
 
 import uvicorn
 
@@ -20,6 +24,8 @@ from mnemomatic.auth import AuthMiddleware
 from mnemomatic.bodylimit import BodyLimitMiddleware
 from mnemomatic.compact import CompactToolsMiddleware
 from mnemomatic.db import EMBEDDING_DIM
+from mnemomatic.spa import ListenerTag, PlainPortGate, build_spa_routes, build_tls_routes
+from mnemomatic.tlsca import TlsState, start_renewal_thread
 from mnemomatic.identity import IdentityError, ensure_bootstrap
 from mnemomatic.runtime import (
     _audit,
@@ -128,6 +134,76 @@ def _run_reindex() -> None:
 # ── Tools ──
 
 
+class _Server(uvicorn.Server):
+    """A uvicorn Server that leaves signal handling to the caller, so two of
+    them can share one event loop (plain and TLS) without the second one
+    stealing the first's SIGTERM/SIGINT handlers."""
+
+    @contextlib.contextmanager
+    def capture_signals(self):
+        yield
+
+
+async def _serve_all(app, tls: TlsState | None) -> None:
+    """Run the plain listener, and the TLS listener whenever a certificate
+    exists — at boot, or the moment an admin names the host.
+
+    The TLS server runs with lifespan="off": the application's lifespan (the
+    MCP session manager) may only be entered once, and the plain server owns
+    it. Both listeners serve the same app; a per-listener tag lets the plain
+    port gate know which side a request came in on.
+    """
+    loop = asyncio.get_running_loop()
+    servers: list[_Server] = []
+    tasks: list[asyncio.Task] = []
+    common = dict(host=config.HOST, log_level="info",
+                  proxy_headers=bool(config.TRUSTED_PROXIES), forwarded_allow_ips=config.TRUSTED_PROXIES)
+
+    plain = _Server(uvicorn.Config(ListenerTag(app, "plain"), port=config.PORT, lifespan="on", **common))
+    servers.append(plain)
+    tasks.append(loop.create_task(plain.serve()))
+
+    tls_started = False
+
+    async def run_tls(server: _Server) -> None:
+        try:
+            await server.serve()
+        except SystemExit:
+            logger.error("HTTPS listener on port %d could not start (port in use?)", config.HTTPS_PORT)
+        except Exception as e:
+            logger.error("HTTPS listener failed: %s: %s", type(e).__name__, e)
+
+    def start_tls() -> None:
+        nonlocal tls_started
+        if tls is None or tls_started or not tls.holder.ready:
+            return
+        tls_started = True
+        server = _Server(uvicorn.Config(ListenerTag(app, "tls"), port=config.HTTPS_PORT, lifespan="off",
+                                        ssl_context_factory=tls.holder.factory, **common))
+        servers.append(server)
+        tasks.append(loop.create_task(run_tls(server)))
+        logger.info("HTTPS listening on %s:%d", config.HOST, config.HTTPS_PORT)
+
+    if tls is not None:
+        tls.on_ready = lambda: loop.call_soon_threadsafe(start_tls)
+        start_tls()
+
+    def stop() -> None:
+        for s in servers:
+            s.should_exit = True
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, stop)
+        except NotImplementedError:  # not the main thread, or Windows
+            pass
+
+    await tasks[0]
+    stop()
+    for task in tasks[1:]:
+        await task
+
+
 def main():
     logging.basicConfig(level=logging.INFO)
 
@@ -159,8 +235,6 @@ def main():
     # Scheduled backups on a daemon thread (the Database hands each thread its
     # own connection, so the loop reads safely alongside request handling).
     if config.BACKUP_DIR:
-        from pathlib import Path
-
         from mnemomatic.backup import start_backup_thread
         start_backup_thread(runtime._db, Path(config.BACKUP_DIR), interval_hours=config.BACKUP_INTERVAL_HOURS,
                             keep=config.BACKUP_KEEP, server_version=_server_version())
@@ -177,17 +251,32 @@ def main():
     app.router.routes.insert(0, Route("/export", _export_route, methods=["GET"]))
     app.router.routes.insert(0, Route("/health", _health_route, methods=["GET"]))
 
+    # Built-in TLS: a private CA plus an HTTPS listener, enabled from the UI.
+    # Off means TLS terminates elsewhere (a reverse proxy) and the HTTPS
+    # endpoints answer 409.
+    tls = None
+    if config.TLS_MODE == "auto":
+        tls = TlsState(runtime._db, Path(config.TLS_DIR), config.HTTPS_PORT, public_host=config.PUBLIC_HOST)
+        tls.bootstrap()
+        start_renewal_thread(tls)
+    else:
+        logger.info("Built-in TLS is off (MNEMOMATIC_TLS=off)")
+
     # The browser's JSON API. Session-authenticated by AuthMiddleware; content
     # stays read-only here — only MCP writes.
     app.router.routes.insert(0, build_api_routes(
         identity=runtime._identity, db_getter=runtime._db, settings_info=_settings_info,
-        first_run=runtime.first_run,
+        first_run=runtime.first_run, https=tls,
     ))
+    app.router.routes[0:0] = build_tls_routes(tls)
+
+    # The single-page app last: its final route is a catch-all.
+    app.router.routes.extend(build_spa_routes())
 
     app = CompactToolsMiddleware(app)
 
     # CSP, nosniff, referrer policy (and HSTS over TLS) on everything but /mcp.
-    app = SecurityHeadersMiddleware(app)
+    app = SecurityHeadersMiddleware(app, pending_origin=tls.pending_origin if tls else None)
 
     # Capture the principal, client and ip per request for the audit log.
     # Inside AuthMiddleware, which is what puts the principal in the scope.
@@ -216,22 +305,20 @@ def main():
         )
         logger.info("CORS enabled for origins: %s", origins)
 
+    # Outermost: once HTTPS is confirmed, the plain port only hands clients
+    # over to it. Sits outside CORS on purpose — a 403 here is not for browsers
+    # that already reached the right origin.
+    app = PlainPortGate(app, tls)
+
     logger.info("Trusted proxies: %s", ", ".join(config.TRUSTED_PROXIES) or "none")
     logger.info("Starting server on %s:%d", config.HOST, config.PORT)
     # With trusted proxies configured, uvicorn rewrites the client address and
     # scheme from X-Forwarded-For / X-Forwarded-Proto — but only for requests
     # whose socket peer is on the list. Everything downstream (the throttles,
-    # the audit log, the viewer's Secure cookie) then reads the real client
-    # without doing its own header parsing. Unset means no forwarded header is
-    # believed from anyone.
-    uvicorn.run(
-        app,
-        host=config.HOST,
-        port=config.PORT,
-        log_level="info",
-        proxy_headers=bool(config.TRUSTED_PROXIES),
-        forwarded_allow_ips=config.TRUSTED_PROXIES,
-    )
+    # the audit log, the session cookie's Secure flag) then reads the real
+    # client without doing its own header parsing. Unset means no forwarded
+    # header is believed from anyone.
+    asyncio.run(_serve_all(app, tls))
 
 
 if __name__ == "__main__":

@@ -313,7 +313,7 @@ USER 65532:65532
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD ["/usr/bin/python3", "-c", "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('MNEMOMATIC_PORT','8000')+'/health',timeout=4).read()"]
 
-EXPOSE 8000
+EXPOSE 8000 8443
 
 CMD ["-c", "from mnemomatic.server import main; main()"]
 
@@ -348,6 +348,6 @@ USER 65532:65532
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD ["/usr/bin/python3", "-c", "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('MNEMOMATIC_PORT','8000')+'/health',timeout=4).read()"]
 
-EXPOSE 8000
+EXPOSE 8000 8443
 
 CMD ["-c", "from mnemomatic.server import main; main()"]

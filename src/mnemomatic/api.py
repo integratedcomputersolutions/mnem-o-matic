@@ -40,6 +40,7 @@ from mnemomatic import db as db_module
 from mnemomatic.audit import request_meta
 from mnemomatic.auth import COOKIE_NAME
 from mnemomatic.db import _SPEC_BY_ITEM_TYPE
+from mnemomatic.tlsca import TlsError
 from mnemomatic.identity import (
     SESSION_TTL,
     FirstRun,
@@ -254,9 +255,7 @@ def build_api_routes(*, identity, db_getter, settings_info, first_run: FirstRun,
                 if admin and not _principal(request).user.is_admin:
                     return _error("forbidden", 403, "Administrators only.")
                 return await fn(request)
-            except IdentityError as e:
-                return _error(e.code, e.status, e.details)
-            except ApiError as e:
+            except (IdentityError, TlsError, ApiError) as e:
                 return _error(e.code, e.status, e.details)
         handler.__name__ = fn.__name__
         return handler
