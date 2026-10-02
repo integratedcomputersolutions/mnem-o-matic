@@ -24,7 +24,7 @@ from mnemomatic.auth import AuthMiddleware
 from mnemomatic.bodylimit import BodyLimitMiddleware
 from mnemomatic.compact import CompactToolsMiddleware
 from mnemomatic.db import EMBEDDING_DIM
-from mnemomatic.spa import ListenerTag, PlainPortGate, build_spa_routes, build_tls_routes
+from mnemomatic.spa import APP_DIR, ListenerTag, PlainPortGate, build_spa_routes, build_tls_routes
 from mnemomatic.tlsca import TlsState, start_renewal_thread
 from mnemomatic.identity import IdentityError, ensure_bootstrap
 from mnemomatic.runtime import (
@@ -204,44 +204,15 @@ async def _serve_all(app, tls: TlsState | None) -> None:
         await task
 
 
-def main():
-    logging.basicConfig(level=logging.INFO)
+def build_app(tls: TlsState | None, app_dir: Path = APP_DIR):
+    """Assemble the ASGI application: the MCP endpoint, the plain HTTP routes,
+    the browser API, the setup and CA routes, the single-page app, and the
+    middleware around them — innermost first.
 
-    logger.info("Starting Mnem-O-matic MCP server")
-    logger.info("Configuration: db_path=%s, host=%s, port=%s", config.DB_PATH, config.HOST, config.PORT)
-
-    # Pre-warm db and resolve embedder so the first request doesn't pay setup costs
-    logger.info("Initializing database...")
-    runtime._db()
-    # Someone must be able to log in: create `admin` from the environment or
-    # print a one-time setup code for the browser's first-run screen.
-    try:
-        ensure_bootstrap(runtime._identity(), runtime.first_run, config.ADMIN_PASSWORD)
-    except IdentityError as e:
-        logger.error("MNEMOMATIC_ADMIN_PASSWORD rejected: %s", e.details)
-        raise SystemExit(1)
-    logger.info("Initializing embedder...")
-    runtime._embedder()
-
-    # Opt-in full re-embed (model/dim/prefix changes) before serving traffic.
-    # Under "auto" the database has already compared the recorded embedding
-    # identity against the configured one, so reindex_pending is the whole
-    # question: nothing changed, nothing to do.
-    if config.REINDEX_MODE == "force" or (config.REINDEX_MODE == "auto" and runtime._db().reindex_pending):
-        _run_reindex()
-    elif config.REINDEX_MODE == "auto":
-        logger.info("Embedder matches the stored index — no reindex needed")
-
-    # Scheduled backups on a daemon thread (the Database hands each thread its
-    # own connection, so the loop reads safely alongside request handling).
-    if config.BACKUP_DIR:
-        from mnemomatic.backup import start_backup_thread
-        start_backup_thread(runtime._db, Path(config.BACKUP_DIR), interval_hours=config.BACKUP_INTERVAL_HOURS,
-                            keep=config.BACKUP_KEEP, server_version=_server_version())
-        logger.info("Scheduled backups: every %gh to %s (keeping %d)",
-                    config.BACKUP_INTERVAL_HOURS, config.BACKUP_DIR, config.BACKUP_KEEP)
-
-    logger.info("Building ASGI application...")
+    Pure assembly, no startup work: the database, embedder, bootstrap and TLS
+    state are prepared by main() (or a test) and handed in, which is what lets
+    a test build the real stack in-process.
+    """
     app = mcp.streamable_http_app()
 
     # Both inserted ahead of the MCP catch-all. /export returns the entire
@@ -250,17 +221,6 @@ def main():
     from starlette.routing import Route
     app.router.routes.insert(0, Route("/export", _export_route, methods=["GET"]))
     app.router.routes.insert(0, Route("/health", _health_route, methods=["GET"]))
-
-    # Built-in TLS: a private CA plus an HTTPS listener, enabled from the UI.
-    # Off means TLS terminates elsewhere (a reverse proxy) and the HTTPS
-    # endpoints answer 409.
-    tls = None
-    if config.TLS_MODE == "auto":
-        tls = TlsState(runtime._db, Path(config.TLS_DIR), config.HTTPS_PORT, public_host=config.PUBLIC_HOST)
-        tls.bootstrap()
-        start_renewal_thread(tls)
-    else:
-        logger.info("Built-in TLS is off (MNEMOMATIC_TLS=off)")
 
     # The browser's JSON API. Session-authenticated by AuthMiddleware; content
     # stays read-only here — only MCP writes.
@@ -271,7 +231,7 @@ def main():
     app.router.routes[0:0] = build_tls_routes(tls)
 
     # The single-page app last: its final route is a catch-all.
-    app.router.routes.extend(build_spa_routes())
+    app.router.routes.extend(build_spa_routes(app_dir))
 
     app = CompactToolsMiddleware(app)
 
@@ -315,6 +275,60 @@ def main():
     # over to it. Sits outside CORS on purpose — a 403 here is not for browsers
     # that already reached the right origin.
     app = PlainPortGate(app, tls)
+
+    return app
+
+
+def main():
+    logging.basicConfig(level=logging.INFO)
+
+    logger.info("Starting Mnem-O-matic MCP server")
+    logger.info("Configuration: db_path=%s, host=%s, port=%s", config.DB_PATH, config.HOST, config.PORT)
+
+    # Pre-warm db and resolve embedder so the first request doesn't pay setup costs
+    logger.info("Initializing database...")
+    runtime._db()
+    # Someone must be able to log in: create `admin` from the environment or
+    # print a one-time setup code for the browser's first-run screen.
+    try:
+        ensure_bootstrap(runtime._identity(), runtime.first_run, config.ADMIN_PASSWORD)
+    except IdentityError as e:
+        logger.error("MNEMOMATIC_ADMIN_PASSWORD rejected: %s", e.details)
+        raise SystemExit(1)
+    logger.info("Initializing embedder...")
+    runtime._embedder()
+
+    # Opt-in full re-embed (model/dim/prefix changes) before serving traffic.
+    # Under "auto" the database has already compared the recorded embedding
+    # identity against the configured one, so reindex_pending is the whole
+    # question: nothing changed, nothing to do.
+    if config.REINDEX_MODE == "force" or (config.REINDEX_MODE == "auto" and runtime._db().reindex_pending):
+        _run_reindex()
+    elif config.REINDEX_MODE == "auto":
+        logger.info("Embedder matches the stored index — no reindex needed")
+
+    # Scheduled backups on a daemon thread (the Database hands each thread its
+    # own connection, so the loop reads safely alongside request handling).
+    if config.BACKUP_DIR:
+        from mnemomatic.backup import start_backup_thread
+        start_backup_thread(runtime._db, Path(config.BACKUP_DIR), interval_hours=config.BACKUP_INTERVAL_HOURS,
+                            keep=config.BACKUP_KEEP, server_version=_server_version())
+        logger.info("Scheduled backups: every %gh to %s (keeping %d)",
+                    config.BACKUP_INTERVAL_HOURS, config.BACKUP_DIR, config.BACKUP_KEEP)
+
+    # Built-in TLS: a private CA plus an HTTPS listener, enabled from the UI.
+    # Off means TLS terminates elsewhere (a reverse proxy) and the HTTPS
+    # endpoints answer 409.
+    tls = None
+    if config.TLS_MODE == "auto":
+        tls = TlsState(runtime._db, Path(config.TLS_DIR), config.HTTPS_PORT, public_host=config.PUBLIC_HOST)
+        tls.bootstrap()
+        start_renewal_thread(tls)
+    else:
+        logger.info("Built-in TLS is off (MNEMOMATIC_TLS=off)")
+
+    logger.info("Building ASGI application...")
+    app = build_app(tls)
 
     logger.info("Trusted proxies: %s", ", ".join(config.TRUSTED_PROXIES) or "none")
     logger.info("Starting server on %s:%d", config.HOST, config.PORT)
