@@ -109,6 +109,22 @@ class ToolTestCase(unittest.TestCase):
     def _ops(self, **filters):
         return [e["op"] for e in self.db.list_audit(**filters)]
 
+    def test_oversized_fields_are_clipped(self):
+        self.db.append_audit("auth.login_failed", item_type="user", item_id="u" * 100_000,
+                             client="ua" * 100_000, detail={"label": "x" * 100_000})
+        event = self.db.list_audit()[0]
+        self.assertLessEqual(len(event["item_id"]), 513)
+        self.assertLessEqual(len(event["client"]), 513)
+        self.assertTrue(event["detail"]["truncated"])
+
+    def test_mcp_list_audit_shows_identity_events_to_admins_only(self):
+        self.db.append_audit("auth.login", item_type="user", item_id="alice")
+        self.db.append_audit("store", item_type="note", item_id="n1", namespace="ns")
+        with patch.object(tools_history, "request_meta", return_value={"user": "bob", "is_admin": False}):
+            self.assertEqual([e["op"] for e in tools_history.list_audit()["events"]], ["store"])
+        with patch.object(tools_history, "request_meta", return_value={"user": "root", "is_admin": True}):
+            self.assertEqual([e["op"] for e in tools_history.list_audit()["events"]], ["store", "auth.login"])
+
 
 class TestToolCoverage(ToolTestCase):
     def test_full_write_lifecycle_is_audited(self):
@@ -200,7 +216,8 @@ class TestRequestMeta(unittest.TestCase):
     def test_defaults_outside_a_request(self):
         self.assertEqual(request_meta(), {
             "actor": None, "client": None, "ip": None,
-            "user": None, "user_id": None, "via": None, "token_id": None, "token_hint": None, "token_name": None,
+            "user": None, "user_id": None, "is_admin": False, "via": None,
+            "token_id": None, "token_hint": None, "token_name": None,
         })
 
     def test_principal_in_scope_is_copied(self):

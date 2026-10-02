@@ -6,6 +6,8 @@ clusters from stored vectors + stale never-retrieved items), the clustering
 helper, and the consolidate/briefing prompts.
 """
 
+import asyncio
+import struct
 import unittest
 from unittest.mock import patch
 
@@ -17,6 +19,23 @@ from mnemomatic import runtime
 from mnemomatic import tools_content
 from mnemomatic import tools_history
 from tests._support import axis, mix
+
+needs_numpy = unittest.skipIf(tools_history.np is None, "duplicate clustering needs numpy")
+
+
+def _blob(vector):
+    return struct.pack(f"{len(vector)}f", *vector)
+
+
+def _clusters(vectors, threshold):
+    clusters, truncated = tools_history._duplicate_clusters(
+        "note", [(i, t, _blob(v)) for i, t, v in vectors], threshold)
+    assert not truncated
+    return clusters
+
+
+def _report(**kwargs):
+    return asyncio.run(tools_history.consolidation_report(**kwargs))
 
 
 class ToolTestCase(unittest.TestCase):
@@ -83,6 +102,7 @@ class TestSimilarOnStore(ToolTestCase):
         self.assertEqual([s["id"] for s in second["similar"]], [first["id"]])
 
 
+@needs_numpy
 class TestDuplicateClusters(unittest.TestCase):
     def test_clusters_and_scores(self):
         vectors = [
@@ -92,7 +112,7 @@ class TestDuplicateClusters(unittest.TestCase):
             ("d", "D", axis(3)),
             ("e", "E", axis(3)),                  # identical to d
         ]
-        clusters = tools_history._duplicate_clusters("note", vectors, threshold=0.8)
+        clusters = _clusters(vectors, 0.8)
         clusters.sort(key=lambda c: c["similarity"])
         self.assertEqual(len(clusters), 2)
         self.assertEqual({i["id"] for i in clusters[0]["items"]}, {"a", "b"})
@@ -106,22 +126,30 @@ class TestDuplicateClusters(unittest.TestCase):
             ("b", "B", mix(0, 1, 0.9, 0.44)),
             ("c", "C", mix(0, 1, 0.62, 0.78)),
         ]
-        clusters = tools_history._duplicate_clusters("note", vectors, threshold=0.85)
+        clusters = _clusters(vectors, 0.85)
         self.assertEqual(len(clusters), 1)
         self.assertEqual({i["id"] for i in clusters[0]["items"]}, {"a", "b", "c"})
 
     def test_empty_and_singleton(self):
-        self.assertEqual(tools_history._duplicate_clusters("note", [], 0.8), [])
-        self.assertEqual(tools_history._duplicate_clusters("note", [("a", "A", axis(0))], 0.8), [])
+        self.assertEqual(_clusters([], 0.8), [])
+        self.assertEqual(_clusters([("a", "A", axis(0))], 0.8), [])
+
+    def test_too_many_pairs_truncates(self):
+        vectors = [(str(i), str(i), _blob(axis(0))) for i in range(10)]   # 45 identical pairs
+        with patch.object(tools_history, "MAX_CLUSTER_PAIRS", 5):
+            clusters, truncated = tools_history._duplicate_clusters("note", vectors, 0.8)
+        self.assertTrue(truncated)
+        self.assertEqual(sum(len(c["items"]) for c in clusters), 6)   # 5 pairs reach 6 items
 
 
 class TestConsolidationReport(ToolTestCase):
+    @needs_numpy
     def test_report_shape_clusters_and_stale(self):
         self.db.store_knowledge(Knowledge(namespace="proj", subject="s1", fact="f1"), axis(0))
         self.db.store_knowledge(Knowledge(namespace="proj", subject="s2", fact="f2"), axis(0))
         self.db.store_note(Note(namespace="proj", title="lonely", content="x"), axis(5))
 
-        report = tools_history.consolidation_report(namespace="proj", stale_days=0)
+        report = _report(namespace="proj", stale_days=0)
         self.assertEqual(len(report["duplicate_clusters"]), 1)
         cluster = report["duplicate_clusters"][0]
         self.assertEqual(cluster["type"], "knowledge")
@@ -134,22 +162,35 @@ class TestConsolidationReport(ToolTestCase):
         note, _ = self.db.store_note(Note(namespace="proj", title="used", content="x"), None)
         self.db.store_note(Note(namespace="proj", title="unused", content="y"), None)
         self.db.record_access([("note", note.id)])
-        report = tools_history.consolidation_report(namespace="proj", stale_days=0)
+        report = _report(namespace="proj", stale_days=0)
         self.assertEqual([r["title"] for r in report["stale"]], ["unused"])
 
     def test_superseded_facts_do_not_cluster(self):
         self.db.store_knowledge(Knowledge(namespace="proj", subject="s", fact="old"), axis(0))
         self.db.store_knowledge(Knowledge(namespace="proj", subject="s", fact="new"), axis(0))
-        report = tools_history.consolidation_report(namespace="proj", stale_days=0)
+        report = _report(namespace="proj", stale_days=0)
         # The superseded row lost its vector; only the current fact remains.
         self.assertEqual(report["duplicate_clusters"], [])
 
     def test_invalid_threshold(self):
-        self.assertIn("error", tools_history.consolidation_report(namespace="proj",
-                                                           similarity_threshold=0))
+        self.assertIn("error", _report(namespace="proj",
+                                      similarity_threshold=0))
+
+    def test_without_numpy_clustering_is_skipped_not_failed(self):
+        self.db.store_note(Note(namespace="proj", title="a", content="x"), axis(0))
+        self.db.store_note(Note(namespace="proj", title="b", content="y"), axis(0))
+        with patch.object(tools_history, "np", None):
+            report = _report(namespace="proj", stale_days=0)
+        self.assertEqual(report["duplicate_clusters"], [])
+        self.assertIn("numpy", report["duplicate_clusters_unavailable"])
+        self.assertEqual(len(report["stale"]), 2)
+
+    def test_huge_stale_days_is_clamped(self):
+        report = _report(namespace="proj", stale_days=10**10)
+        self.assertEqual(report["stale_days"], tools_history._MAX_STALE_DAYS)
 
     def test_empty_namespace(self):
-        report = tools_history.consolidation_report(namespace="nothing-here")
+        report = _report(namespace="nothing-here")
         self.assertEqual(report["duplicate_clusters"], [])
         self.assertEqual(report["stale"], [])
         self.assertEqual(report["counts"], {})

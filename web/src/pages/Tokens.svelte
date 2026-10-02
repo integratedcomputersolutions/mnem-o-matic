@@ -57,6 +57,7 @@
   async function revoke(t) {
     try {
       await api.del(`/api/me/tokens/${t.id}`);
+      if (session.freshToken?.startsWith(t.hint)) session.freshToken = null;
       confirmRevoke = null;
       await load();
     } catch (e) {

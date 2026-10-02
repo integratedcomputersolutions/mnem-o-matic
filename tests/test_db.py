@@ -357,6 +357,26 @@ class TestTags(unittest.TestCase):
         tags = self.db.update_tags(note_id, "note", add_tags=["y"])
         self.assertIn("y", tags)
 
+    def test_invalid_tags_are_refused_and_nothing_changes(self):
+        # Rows that break model validation fail every later read, which took
+        # export and backups down with them; the tag path must refuse first.
+        for bad in (["x" * 51], ["  "], [""], [f"t{i}" for i in range(99)]):
+            with self.subTest(bad=bad[:2]), self.assertRaises(ValueError):
+                self.db.update_tags(self.doc_id, "document", add_tags=bad)
+        self.assertEqual(self.db.get_document(self.doc_id).tags, ["a", "b"])
+        self.assertEqual(len(self.db.list_documents("ns")), 1)
+        self.assertEqual(self.db.list_revisions(item_id=self.doc_id), [])
+
+    def test_up_to_the_limit_is_fine(self):
+        tags = self.db.update_tags(self.doc_id, "document", add_tags=[f"t{i}" for i in range(98)])
+        self.assertEqual(len(tags), 100)
+
+    def test_superseded_knowledge_cannot_be_retagged(self):
+        old, _, _ = self.db.store_knowledge(Knowledge(namespace="ns", subject="s", fact="v1"), None)
+        self.db.store_knowledge(Knowledge(namespace="ns", subject="s", fact="v2"), None)
+        with self.assertRaises(ValueError):
+            self.db.update_tags(old.id, "knowledge", add_tags=["late"])
+
 
 # ── Namespaces ─────────────────────────────────────────────────────────────────
 
@@ -474,6 +494,13 @@ class TestRenameNamespace(unittest.TestCase):
         # The loser's vector is gone: searching with it returns only the winner.
         results = self.db.search_vec(loser_emb, table="documents", namespace="new", limit=5)
         self.assertEqual([r.id for r in results], [winner.id])
+
+    def test_rename_to_invalid_namespace_raises(self):
+        self._store_all()
+        for bad in ("", "   ", "x" * 101):
+            with self.subTest(bad=bad[:5]), self.assertRaises(ValueError):
+                self.db.rename_namespace("old", bad)
+        self.assertEqual(len(self.db.list_documents("old")), 1)
 
     def test_rename_to_same_namespace_raises(self):
         self._store_all()

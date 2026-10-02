@@ -3,6 +3,7 @@ sessions, API tokens, the login throttle, and first-run bootstrap."""
 
 import io
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
@@ -12,6 +13,7 @@ from unittest.mock import patch
 from mnemomatic import identity
 from mnemomatic.db import Database
 from mnemomatic.identity import (
+    DEVICE_COOKIE_TTL,
     DUMMY_HASH,
     FirstRun,
     Identity,
@@ -230,19 +232,23 @@ class TestAdminGuards(IdentityCase):
             self.ident.set_role(root.id, "user", acting_user_id=sleeper.id)
         self.assertEqual(cm.exception.code, "last_admin")
 
-    def test_deactivate_ends_sessions_and_blocks_tokens(self):
+    def test_deactivate_ends_sessions_and_revokes_tokens(self):
         root = self.admin()
         user, _ = self.ident.create_user("frank", password="frankpassword")
         sid = self.ident.create_session(user.id)
         _, raw = self.ident.create_token(user.id, "laptop")
-        self.ident.set_active(user.id, False, acting_user_id=root.id)
+        _, revoked = self.ident.set_active(user.id, False, acting_user_id=root.id)
+        self.assertEqual(revoked, 1)
         self.assertIsNone(self.ident.resolve_session(sid))
         self.assertIsNone(self.ident.resolve_token(raw))
         with self.assertRaises(IdentityError) as cm:
             self.ident.authenticate("frank", "frankpassword")
         self.assertEqual(cm.exception.code, "account_disabled")
+        # Reactivating must not revive the old tokens: an account is usually
+        # disabled because a credential leaked.
         self.ident.set_active(user.id, True, acting_user_id=root.id)
-        self.assertIsNotNone(self.ident.resolve_token(raw))
+        self.assertIsNone(self.ident.resolve_token(raw))
+        self.assertIsNotNone(self.ident.authenticate("frank", "frankpassword"))
 
     def test_delete_cascades(self):
         root = self.admin()
@@ -408,17 +414,35 @@ class TestTokens(IdentityCase):
 
 
 class TestLoginThrottle(unittest.TestCase):
-    def test_per_account_and_per_ip(self):
+    def test_per_account_and_ip(self):
         t = LoginThrottle()
         for _ in range(4):
             t.record_failure("alice", "10.0.0.1")
         self.assertEqual(t.retry_after("alice", "10.0.0.1"), 0)
         t.record_failure("alice", "10.0.0.1")
-        self.assertGreater(t.retry_after("alice", "10.0.0.2"), 0)      # account locked from anywhere
+        self.assertGreater(t.retry_after("alice", "10.0.0.1"), 0)      # the guessing address is out
+        self.assertEqual(t.retry_after("alice", "10.0.0.2"), 0)        # the owner elsewhere is not
         self.assertEqual(t.retry_after("bob", "10.0.0.1"), 0)          # ip still under its own limit
+
+    def test_per_ip(self):
+        t = LoginThrottle()
         for i in range(20):
             t.record_failure(f"user{i}", "10.0.0.9")
         self.assertGreater(t.retry_after("fresh", "10.0.0.9"), 0)      # ip locked for any name
+
+    def test_account_wide_limit_spares_known_devices(self):
+        t = LoginThrottle()
+        for i in range(100):                                           # 25 addresses, 4 guesses each
+            t.record_failure("alice", f"10.1.{i // 4}.1")
+        self.assertGreater(t.retry_after("alice", "10.9.9.9"), 0)
+        self.assertEqual(t.retry_after("alice", "10.9.9.9", known_device=True), 0)
+
+    def test_impossible_names_share_one_bucket(self):
+        t = LoginThrottle()
+        for i in range(5):
+            t.record_failure(f"No Such User {i}!", "10.0.0.1")
+        self.assertGreater(t.retry_after("Another Junk Name", "10.0.0.1"), 0)
+        self.assertEqual(t.retry_after("alice", "10.0.0.1"), 0)
 
     def test_success_clears(self):
         t = LoginThrottle()
@@ -428,6 +452,25 @@ class TestLoginThrottle(unittest.TestCase):
         for _ in range(4):
             t.record_failure("alice", "ip")
         self.assertEqual(t.retry_after("alice", "ip"), 0)
+
+
+class TestKnownDevice(IdentityCase):
+    def test_proof_round_trip(self):
+        proof = self.ident.issue_device_proof("alice")
+        self.assertTrue(self.ident.is_known_device("alice", proof))
+        self.assertFalse(self.ident.is_known_device("bob", proof))           # bound to the account
+        self.assertFalse(self.ident.is_known_device("alice", proof[:-1] + "0"))
+        self.assertFalse(self.ident.is_known_device("alice", None))
+        self.assertFalse(self.ident.is_known_device("alice", "garbage"))
+
+    def test_proof_expires(self):
+        issued = int(time.time()) - int(DEVICE_COOKIE_TTL.total_seconds()) - 60
+        stale = f"{issued}.{self.ident._device_mac('alice', issued)}"
+        self.assertFalse(self.ident.is_known_device("alice", stale))
+
+    def test_key_survives_a_new_identity_object(self):
+        proof = self.ident.issue_device_proof("alice")
+        self.assertTrue(Identity(self.db).is_known_device("alice", proof))
 
 
 class TestFirstRun(unittest.TestCase):

@@ -3,9 +3,16 @@ the consolidation report, and the maintenance prompts."""
 import json
 from datetime import datetime, timedelta, timezone
 
+import anyio
 from pydantic import ValidationError
 
+try:
+    import numpy as np
+except ImportError:  # the lite image installs without the onnx extra
+    np = None
+
 from mnemomatic import config, runtime
+from mnemomatic.audit import request_meta
 from mnemomatic.db import _SPEC_BY_ITEM_TYPE, _SPECS
 from mnemomatic.runtime import (
     _audit,
@@ -18,6 +25,13 @@ from mnemomatic.runtime import (
     mcp,
 )
 from mnemomatic.tools_content import _OPS, _handle_update
+
+# Duplicate clustering: rows of the similarity matrix computed per step
+# (512 x n float32, ~20 MB at 10,000 items) and the most qualifying pairs
+# grouped before the report gives up and flags itself truncated.
+_CLUSTER_BLOCK_ROWS = 512
+MAX_CLUSTER_PAIRS = 100_000
+_MAX_STALE_DAYS = 36_500
 
 
 @mcp.tool(annotations=config.ANN_READ_ONLY)
@@ -98,10 +112,11 @@ def list_audit(
 
     Each event carries: ts, op (store/update/supersede/delete/tag/restore/
     rename_namespace/delete_namespace, plus reindex when the whole store was
-    re-embedded), item_type/item_id/namespace/title,
-    actor (the client's self-declared X-Mnemomatic-Actor header, if any),
-    client (user-agent), ip, and op-specific detail. With a shared API key
-    the actor is self-reported, not authenticated.
+    re-embedded), item_type/item_id/namespace/title, actor (the authenticated
+    user behind the token), client (user-agent), ip, and op-specific detail
+    (including `label`, the client's self-declared X-Mnemomatic-Actor header,
+    and `token` when the request came through one). Administrators also see
+    identity events (sign-ins, users, tokens, HTTPS).
 
     Args:
         item_type: Filter by type — "document", "knowledge", or "note" (optional).
@@ -114,7 +129,8 @@ def list_audit(
         return {"error": "Invalid item_type", "details": f"Must be one of: {', '.join(sorted(_OPS))}"}
     limit = max(1, min(int(limit), config.MAX_LIST_LIMIT))
     events = runtime._db().list_audit(item_type=item_type, item_id=item_id,
-                              namespace=namespace, op=op, limit=limit)
+                                      namespace=namespace, op=op, limit=limit,
+                                      content_only=not request_meta().get("is_admin"))
     return {"events": events, "limit": limit}
 
 
@@ -180,14 +196,23 @@ def restore(revision_id: int) -> dict:
             "restored_revision": revision_id, "recreated": True}
 
 
-def _duplicate_clusters(item_type: str, vectors: list[tuple[str, str, list[float]]],
-                        threshold: float) -> list[dict]:
+def _duplicate_clusters(item_type: str, items: list[tuple[str, str, bytes]],
+                        threshold: float) -> tuple[list[dict], bool]:
     """Group items whose pairwise cosine similarity reaches the threshold.
 
-    Vectors are stored L2-normalized, so the dot product is the cosine.
-    Union-find over qualifying pairs; clusters report their strongest pair.
+    `items` are (id, title, embedding blob) as item_vectors returns them.
+    Vectors are stored L2-normalized, so the dot product is the cosine. The
+    similarity matrix is computed a block of rows at a time to keep memory
+    flat; union-find over qualifying pairs, clusters report their strongest
+    pair. Returns (clusters, truncated): a namespace full of near-identical
+    items could yield millions of pairs, so grouping stops after
+    MAX_CLUSTER_PAIRS and says so.
     """
-    parent = list(range(len(vectors)))
+    n = len(items)
+    if n < 2:
+        return [], False
+    matrix = np.frombuffer(b"".join(blob for _, _, blob in items), dtype=np.float32).reshape(n, -1)
+    parent = list(range(n))
 
     def find(i: int) -> int:
         while parent[i] != i:
@@ -196,32 +221,51 @@ def _duplicate_clusters(item_type: str, vectors: list[tuple[str, str, list[float
         return i
 
     pairs = []
-    for i in range(len(vectors)):
-        for j in range(i + 1, len(vectors)):
-            score = sum(a * b for a, b in zip(vectors[i][2], vectors[j][2]))
-            if score >= threshold:
-                pairs.append((i, j, score))
-                parent[find(i)] = find(j)
+    truncated = False
+    for start in range(0, n, _CLUSTER_BLOCK_ROWS):
+        sims = matrix[start:start + _CLUSTER_BLOCK_ROWS] @ matrix.T
+        rows, cols = np.nonzero(sims >= threshold)
+        upper = rows + start < cols          # each pair once, never an item with itself
+        rows, cols = rows[upper], cols[upper]
+        for i, j, score in zip((rows + start).tolist(), cols.tolist(), sims[rows, cols].tolist()):
+            if len(pairs) >= MAX_CLUSTER_PAIRS:
+                truncated = True
+                break
+            pairs.append((i, j, score))
+            parent[find(i)] = find(j)
+        if truncated:
+            break
 
     members: dict[int, list[int]] = {}
-    for i in range(len(vectors)):
+    for i in range(n):
         members.setdefault(find(i), []).append(i)
     best: dict[int, float] = {}
     for i, j, score in pairs:
         root = find(i)
         best[root] = max(best.get(root, 0.0), score)
 
-    return [
+    clusters = [
         {"type": item_type,
-         "similarity": round(best[root], 3),
-         "items": [{"id": vectors[i][0], "title": vectors[i][1]} for i in group]}
+         "similarity": round(min(best[root], 1.0), 3),
+         "items": [{"id": items[i][0], "title": items[i][1]} for i in group]}
         for root, group in members.items() if len(group) > 1
     ]
+    return clusters, truncated
+
+
+def _cluster_namespace(vectors_by_type: dict[str, list], threshold: float) -> tuple[list[dict], bool]:
+    clusters, truncated = [], False
+    for item_type, items in vectors_by_type.items():
+        found, cut = _duplicate_clusters(item_type, items, threshold)
+        clusters.extend(found)
+        truncated = truncated or cut
+    clusters.sort(key=lambda c: c["similarity"], reverse=True)
+    return clusters, truncated
 
 
 @mcp.tool(annotations=config.ANN_READ_ONLY)
-def consolidation_report(namespace: str, similarity_threshold: float | None = None,
-                         stale_days: int = 90) -> dict:
+async def consolidation_report(namespace: str, similarity_threshold: float | None = None,
+                               stale_days: int = 90) -> dict:
     """Mechanical consolidation candidates for a namespace: near-duplicate
     clusters and stale items. The report only flags — reviewing each candidate
     and deciding to merge, supersede, tag, delete, or keep is your job (the
@@ -229,7 +273,10 @@ def consolidation_report(namespace: str, similarity_threshold: float | None = No
 
     - duplicate_clusters: groups of same-type items whose embeddings are
       nearly identical (cosine >= similarity_threshold). Chunked documents
-      have no whole-document vector and can't be clustered.
+      have no whole-document vector and can't be clustered. When the server
+      can't cluster (no numpy in the lite image), the list is empty and
+      `duplicate_clusters_unavailable` says why; when there were too many
+      matching pairs to group, `duplicate_clusters_truncated` is true.
     - stale: current items never retrieved since usage tracking began and not
       updated in `stale_days` days, oldest first. On a server where tracking
       was enabled recently, "never retrieved" spans only that period — don't
@@ -245,24 +292,29 @@ def consolidation_report(namespace: str, similarity_threshold: float | None = No
     threshold = config.SIMILAR_THRESHOLD if similarity_threshold is None else float(similarity_threshold)
     if threshold <= 0:
         return {"error": "Invalid similarity_threshold", "details": "Must be positive (cosine similarity)"}
+    stale_days = max(0, min(int(stale_days), _MAX_STALE_DAYS))
 
-    clusters = []
-    for table, spec in _SPECS.items():
-        vectors = runtime._db().item_vectors(table, namespace)
-        clusters.extend(_duplicate_clusters(spec.item_type, vectors, threshold))
-    clusters.sort(key=lambda c: c["similarity"], reverse=True)
+    db = runtime._db()
+    report = {"namespace": namespace, "similarity_threshold": threshold, "stale_days": stale_days}
+    if np is None:
+        clusters, truncated = [], False
+        report["duplicate_clusters_unavailable"] = (
+            "Duplicate detection needs numpy, which the lite image does not include; "
+            "use the full image to cluster near-duplicates."
+        )
+    else:
+        # Reads stay on this thread (one SQLite connection per thread); the
+        # number crunching moves off the event loop so other requests keep flowing.
+        vectors = {spec.item_type: db.item_vectors(table, namespace) for table, spec in _SPECS.items()}
+        clusters, truncated = await anyio.to_thread.run_sync(_cluster_namespace, vectors, threshold)
+    report["duplicate_clusters"] = clusters
+    if truncated:
+        report["duplicate_clusters_truncated"] = True
 
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=max(0, int(stale_days)))).isoformat()
-    stale = runtime._db().stale_items(namespace, cutoff)
-
-    return {
-        "namespace": namespace,
-        "similarity_threshold": threshold,
-        "stale_days": stale_days,
-        "duplicate_clusters": clusters,
-        "stale": stale,
-        "counts": runtime._db().namespace_counts().get(namespace, {}),
-    }
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=stale_days)).isoformat()
+    report["stale"] = db.stale_items(namespace, cutoff)
+    report["counts"] = db.namespace_counts().get(namespace, {})
+    return report
 
 
 # ── Prompts ──

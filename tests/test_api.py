@@ -184,10 +184,41 @@ class TestSessionAndLogin(ApiCase):
         resp = self.post("/api/login", {"username": "admin", "password": IdentityFixture.ADMIN_PASSWORD})
         self.assertEqual(resp.status_code, 429)
         self.assertIn("Retry-After", resp.headers)
-        self.assertEqual(self.events("auth.login_failed")[0]["detail"]["reason"], "throttled")
+        # The refused retry is not audited; only the five real attempts are.
+        failed = self.events("auth.login_failed")
+        self.assertEqual(len(failed), 5)
+        self.assertEqual({e["detail"]["reason"] for e in failed}, {"invalid_credentials"})
         # Another account from the same address is still fine (per-ip limit is higher).
         resp = self.post("/api/login", {"username": "alice", "password": IdentityFixture.USER_PASSWORD})
         self.assertEqual(resp.status_code, 200)
+
+    def test_login_sets_device_cookie_for_login_only(self):
+        resp = self.post("/api/login", {"username": "admin", "password": IdentityFixture.ADMIN_PASSWORD})
+        self.assertEqual(resp.status_code, 200)
+        device = [c for c in resp.headers.get_list("set-cookie") if c.startswith("mnm_device=")]
+        self.assertEqual(len(device), 1)
+        self.assertIn("Path=/api/login", device[0])
+        self.assertIn("HttpOnly", device[0])
+        proof = resp.cookies["mnm_device"]
+        self.assertTrue(self.fx.identity.is_known_device("admin", proof))
+
+    def test_impossible_username_is_not_audited(self):
+        junk = "Correct Horse Battery Staple " * 100
+        resp = self.post("/api/login", {"username": junk, "password": "nope"})
+        self.assertEqual(resp.status_code, 401)
+        failed = self.events("auth.login_failed")
+        self.assertEqual(len(failed), 1)
+        self.assertIsNone(failed[0]["item_id"])
+
+    def test_password_change_throttle(self):
+        cookies = self.user()
+        for _ in range(5):
+            resp = self.post("/api/password", {"current_password": "wrong-password",
+                                               "new_password": "a-brand-new-password"}, cookies=cookies)
+            self.assertEqual(resp.status_code, 401)
+        resp = self.post("/api/password", {"current_password": IdentityFixture.USER_PASSWORD,
+                                           "new_password": "a-brand-new-password"}, cookies=cookies)
+        self.assertEqual(resp.status_code, 429)
 
     def test_disabled_account(self):
         self.fx.identity.set_active(self.fx.user.id, False, acting_user_id=self.fx.admin.id)
@@ -398,20 +429,31 @@ class TestStoreViews(ApiCase):
 
     def test_audit_listing(self):
         self.post("/api/login", {"username": "admin", "password": IdentityFixture.ADMIN_PASSWORD})
-        body = self.client.get("/api/audit?op=auth.login", cookies=self.user()).json()
+        body = self.client.get("/api/audit?op=auth.login", cookies=self.admin()).json()
         self.assertEqual(body["total"], 1)
         self.assertEqual(body["events"][0]["actor"], "admin")
         self.post("/api/logout", cookies=self.admin())
-        body = self.client.get("/api/audit?limit=1", cookies=self.user()).json()
+        body = self.client.get("/api/audit?limit=1", cookies=self.admin()).json()
         self.assertEqual(len(body["events"]), 1)
         self.assertEqual(body["events"][0]["op"], "auth.logout")
         self.assertGreaterEqual(body["total"], 2)
-        body = self.client.get("/api/audit?limit=1&offset=1", cookies=self.user()).json()
+        body = self.client.get("/api/audit?limit=1&offset=1", cookies=self.admin()).json()
         self.assertEqual(body["events"][0]["op"], "auth.login")
-        body = self.client.get("/api/audit?actor=nobody", cookies=self.user()).json()
+        body = self.client.get("/api/audit?actor=nobody", cookies=self.admin()).json()
         self.assertEqual(body["total"], 0)
         self.assertEqual(self.client.get("/api/audit?item_type=bogus", cookies=self.user()).json()["error"],
                          "invalid_filter")
+
+    def test_audit_hides_identity_events_from_non_admins(self):
+        self.post("/api/login", {"username": "ghost", "password": "nope"})
+        self.fx.db.append_audit("store", item_type="note", item_id="n1", namespace="ns", actor="alice")
+        body = self.client.get("/api/audit", cookies=self.user()).json()
+        self.assertEqual([e["op"] for e in body["events"]], ["store"])
+        self.assertEqual(body["total"], 1)
+        body = self.client.get("/api/audit?op=auth.login_failed", cookies=self.user()).json()
+        self.assertEqual(body["total"], 0)
+        body = self.client.get("/api/audit?op=auth.login_failed", cookies=self.admin()).json()
+        self.assertEqual(body["total"], 1)
 
 
 class TestConnectSettingsHttps(ApiCase):
