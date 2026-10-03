@@ -488,6 +488,9 @@ class TestStoreViews(ApiCase):
 
     def test_audit_listing(self):
         self.post("/api/login", {"username": "admin", "password": IdentityFixture.ADMIN_PASSWORD})
+        # Only the login's audit row is wanted; its cookie would arrive next to
+        # the explicit one below, and two session cookies count as none.
+        self.client.cookies.clear()
         body = self.client.get("/api/audit?op=auth.login", cookies=self.admin()).json()
         self.assertEqual(body["total"], 1)
         self.assertEqual(body["events"][0]["actor"], "admin")
