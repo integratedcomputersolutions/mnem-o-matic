@@ -28,7 +28,7 @@ from http.cookies import CookieError, SimpleCookie
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from mnemomatic.identity import Principal
-from mnemomatic.throttle import FailureThrottle
+from mnemomatic.throttle import FailureThrottle, client_key
 
 logger = logging.getLogger("mnemomatic")
 
@@ -165,7 +165,7 @@ class AuthMiddleware:
 
     def _from_bearer(self, headers: dict[str, str], ip: str, method: str, path: str):
         """(principal, None) on success, (None, (status, body, headers)) to refuse."""
-        wait = self._throttle.retry_after(ip)
+        wait = self._throttle.retry_after(client_key(ip))
         if wait:
             logger.warning("Throttled %s %s from %s (too many failed tokens)", method, path, ip)
             return None, (429, {"error": "throttled",
@@ -185,12 +185,12 @@ class AuthMiddleware:
 
         principal = self._identity().resolve_token(token)
         if principal is None:
-            self._throttle.record_failure(ip)
+            self._throttle.record_failure(client_key(ip))
             logger.warning("Invalid API token (%s %s from %s)", method, path, ip)
             return None, (403, {"error": "invalid_token",
                                 "details": "The token is unknown, revoked, expired, or its owner is disabled"},
                           None)
-        self._throttle.record_success(ip)
+        self._throttle.record_success(client_key(ip))
         logger.debug("Authenticated %s via token %s (%s %s from %s)",
                      principal.user.username, principal.token_hint, method, path, ip)
         return principal, None

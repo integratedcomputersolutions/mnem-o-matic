@@ -42,7 +42,7 @@ from mnemomatic.audit import write_event
 from mnemomatic.auth import session_cookie_name
 from mnemomatic.db import _SPEC_BY_ITEM_TYPE
 from mnemomatic.tlsca import TlsError
-from mnemomatic.throttle import FailureThrottle
+from mnemomatic.throttle import FailureThrottle, client_key
 from mnemomatic.identity import (
     DEVICE_COOKIE_TTL,
     SESSION_TTL,
@@ -259,6 +259,9 @@ def build_api_routes(*, identity, db_getter, settings_info, first_run: FirstRun,
     """
     throttle = throttle or LoginThrottle()
     password_throttle = FailureThrottle(max_failures=5, window=900.0, lockout=900.0)
+    # Before the first admin exists, /api/first-run is open to anyone who can
+    # reach the server, and each wrong code is an audit row.
+    first_run_throttle = FailureThrottle(max_failures=5, window=900.0, lockout=900.0)
 
     def ident() -> Identity:
         return identity()
@@ -308,7 +311,14 @@ def build_api_routes(*, identity, db_getter, settings_info, first_run: FirstRun,
         password = _str(data, "password")
         if ident().count_users() > 0:
             return _error("already_set_up", 409, "A user already exists; sign in instead.")
+        ip = client_key(_client_ip(request))
+        wait = first_run_throttle.retry_after(ip)
+        if wait:
+            # Not audited, as with sign-in: the attempts that tripped it were.
+            return _error("throttled", 429, f"Too many attempts; retry after {wait} seconds.",
+                          {"Retry-After": str(wait)})
         if not first_run.check(code):
+            first_run_throttle.record_failure(ip)
             record("auth.first_run_failed", item_type="user",
                    item_id=_audit_username(normalize_username(username)), reason="bad_setup_code")
             return _error("bad_setup_code", 403, "That setup code is not the one in the server log.")

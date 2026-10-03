@@ -301,6 +301,26 @@ class TestFirstRun(ApiCase):
                          ("matt", "matt", "setup_code"))
         self.assertTrue(self.client.get("/api/session").json()["authenticated"])
 
+    def test_wrong_codes_are_throttled_and_refusals_not_audited(self):
+        self._empty()
+        code = self.first_run.issue()
+        body = {"setup_code": "XXXX-XXXX-XXXX", "username": "matt", "password": "a long enough password"}
+        for _ in range(5):
+            self.assertEqual(self.post("/api/first-run", body).status_code, 403)
+        resp = self.post("/api/first-run", {**body, "setup_code": code})
+        self.assertEqual(resp.status_code, 429)
+        self.assertIn("Retry-After", resp.headers)
+        for _ in range(10):
+            self.post("/api/first-run", body)
+        self.assertEqual(len(self.events("auth.first_run_failed")), 5)
+
+    def test_non_ascii_code_is_refused_not_a_500(self):
+        self._empty()
+        self.first_run.issue()
+        resp = self.post("/api/first-run", {"setup_code": "ÅÅÅÅ-ÅÅÅÅ-ÅÅÅÅ", "username": "matt",
+                                            "password": "a long enough password"})
+        self.assertEqual(resp.status_code, 403)
+
     def test_refused_once_users_exist(self):
         code = self.first_run.issue()
         resp = self.post("/api/first-run", {"setup_code": code, "username": "x", "password": "a long password 1"})
