@@ -13,7 +13,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from mnemomatic_cli._mcp_client import MCPClient, _describe_http_error, _open
+from mnemomatic_cli._mcp_client import MCPClient, _check_scheme, _describe_http_error, _open
 
 _DEFAULT_URL = "http://localhost:8000"
 _DEFAULT_MODE = "hybrid"
@@ -81,10 +81,14 @@ def _ssl_context(ca_cert: str | None) -> ssl.SSLContext | None:
     CA, downloaded from /ca.crt). None means the system trust store alone."""
     if not ca_cert:
         return None
+    # create_default_context(cafile=...) would load *only* that file and drop
+    # the system store, breaking servers with a public certificate.
+    ctx = ssl.create_default_context()
     try:
-        return ssl.create_default_context(cafile=ca_cert)
+        ctx.load_verify_locations(cafile=ca_cert)
     except (OSError, ssl.SSLError) as exc:
         _err(f"cannot load CA certificate {ca_cert}: {exc}")
+    return ctx
 
 
 # ---------------------------------------------------------------------------
@@ -370,6 +374,10 @@ def main():
 
     # Resolve connection settings
     server_url = _resolve(args.server_url, "MNEMOMATIC_SERVER_URL", "server", "url", cfg, _DEFAULT_URL)
+    try:
+        _check_scheme(server_url)
+    except ValueError as exc:
+        _err(str(exc))
     token = _resolve_token(args.token, cfg)
     ssl_context = _ssl_context(_resolve(args.ca_cert, "MNEMOMATIC_CA_CERT", "server", "ca_cert", cfg, None))
 
