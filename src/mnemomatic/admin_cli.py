@@ -47,9 +47,8 @@ def cmd_reset_password(args) -> int:
     # (meant for the web UI) does not apply to an operator at the console.
     temp, expires = identity.reset_password(user.id, acting_user_id=0)
     if not user.active:
-        conn = db.connection()
-        conn.execute("UPDATE users SET active = 1 WHERE id = ?", (user.id,))
-        conn.commit()
+        with db.write() as conn:
+            conn.execute("UPDATE users SET active = 1 WHERE id = ?", (user.id,))
         print(f"Reactivated {user.username!r}.")
     write_event(db, "password.reset", actor="cli", item_type="user", item_id=user.username,
                 source="cli", expires_at=expires)

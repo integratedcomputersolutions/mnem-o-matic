@@ -423,18 +423,17 @@ class Identity:
         else:
             validate_password(password)
             secret, must_change, temp_expires = password, 0, None
-        conn = self._conn()
+        password_hash = hash_password(secret)          # ~100 ms: not while holding the write lock
         try:
-            cur = conn.execute(
-                "INSERT INTO users (username, display_name, role, password_hash, "
-                "must_change_password, temp_password_expires_at, active, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, 1, ?)",
-                (username, display_name.strip()[:128], role, hash_password(secret),
-                 must_change, temp_expires, _iso(_now())),
-            )
-            conn.commit()
+            with self._db.write() as conn:
+                cur = conn.execute(
+                    "INSERT INTO users (username, display_name, role, password_hash, "
+                    "must_change_password, temp_password_expires_at, active, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 1, ?)",
+                    (username, display_name.strip()[:128], role, password_hash,
+                     must_change, temp_expires, _iso(_now())),
+                )
         except sqlite3.IntegrityError:
-            conn.rollback()
             raise IdentityError("user_exists", 409, f"A user named {username!r} already exists.")
         return self.get_user(cur.lastrowid), temp
 
@@ -475,38 +474,37 @@ class Identity:
         an account is usually disabled because something went wrong, and
         tokens that came back on reactivation would hand an attacker their
         foothold back. The person mints new tokens after reactivation."""
-        self._target(user_id, acting_user_id, self_message="You cannot change your own account's status.",
-                     may_remove_admin=active)
-        conn = self._conn()
-        conn.execute("UPDATE users SET active = ? WHERE id = ?", (1 if active else 0, user_id))
-        revoked = 0
-        if not active:
-            conn.execute("UPDATE users SET credential_version = credential_version + 1 WHERE id = ?",
-                         (user_id,))
-            conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
-            revoked = conn.execute(
-                "UPDATE api_tokens SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL",
-                (_iso(_now()), user_id),
-            ).rowcount
-        conn.commit()
+        # The last-admin guard reads inside the transaction, so two admins
+        # disabling each other at once cannot both pass it.
+        with self._db.write() as conn:
+            self._target(user_id, acting_user_id, self_message="You cannot change your own account's status.",
+                         may_remove_admin=active)
+            conn.execute("UPDATE users SET active = ? WHERE id = ?", (1 if active else 0, user_id))
+            revoked = 0
+            if not active:
+                conn.execute("UPDATE users SET credential_version = credential_version + 1 WHERE id = ?",
+                             (user_id,))
+                conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+                revoked = conn.execute(
+                    "UPDATE api_tokens SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL",
+                    (_iso(_now()), user_id),
+                ).rowcount
         return self.get_user(user_id), revoked
 
     def set_role(self, user_id: int, role: str, *, acting_user_id: int) -> User:
         if role not in ROLES:
             raise IdentityError("invalid_role", 400, f"Role must be one of: {', '.join(ROLES)}.")
-        self._target(user_id, acting_user_id, self_message="You cannot change your own role.",
-                     may_remove_admin=(role == "admin"))
-        conn = self._conn()
-        conn.execute("UPDATE users SET role = ? WHERE id = ?", (role, user_id))
-        conn.commit()
+        with self._db.write() as conn:
+            self._target(user_id, acting_user_id, self_message="You cannot change your own role.",
+                         may_remove_admin=(role == "admin"))
+            conn.execute("UPDATE users SET role = ? WHERE id = ?", (role, user_id))
         return self.get_user(user_id)
 
     def delete_user(self, user_id: int, *, acting_user_id: int) -> User:
-        target = self._target(user_id, acting_user_id, self_message="You cannot delete your own account.",
-                              may_remove_admin=False)
-        conn = self._conn()
-        conn.execute("DELETE FROM users WHERE id = ?", (user_id,))   # cascades to sessions/tokens
-        conn.commit()
+        with self._db.write() as conn:
+            target = self._target(user_id, acting_user_id, self_message="You cannot delete your own account.",
+                                  may_remove_admin=False)
+            conn.execute("DELETE FROM users WHERE id = ?", (user_id,))   # cascades to sessions/tokens
         return target
 
     def reset_password(self, user_id: int, *, acting_user_id: int) -> tuple[str, str]:
@@ -518,14 +516,14 @@ class Identity:
                      may_remove_admin=True)       # a reset leaves the account in place
         temp = generate_temp_password()
         expires = _iso(_now() + TEMP_PASSWORD_TTL)
-        conn = self._conn()
-        conn.execute(
-            "UPDATE users SET password_hash = ?, must_change_password = 1, "
-            "temp_password_expires_at = ?, credential_version = credential_version + 1 WHERE id = ?",
-            (hash_password(temp), expires, user_id),
-        )
-        conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
-        conn.commit()
+        password_hash = hash_password(temp)
+        with self._db.write() as conn:
+            conn.execute(
+                "UPDATE users SET password_hash = ?, must_change_password = 1, "
+                "temp_password_expires_at = ?, credential_version = credential_version + 1 WHERE id = ?",
+                (password_hash, expires, user_id),
+            )
+            conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
         return temp, expires
 
     def change_password(self, user_id: int, current: str, new: str, *,
@@ -540,18 +538,18 @@ class Identity:
         validate_password(new)
         if new == current:
             raise IdentityError("weak_password", 400, "The new password must differ from the current one.")
-        conn = self._conn()
-        conn.execute(
-            "UPDATE users SET password_hash = ?, must_change_password = 0, "
-            "temp_password_expires_at = NULL, credential_version = credential_version + 1 WHERE id = ?",
-            (hash_password(new), user_id),
-        )
-        if keep_session:
-            conn.execute("DELETE FROM sessions WHERE user_id = ? AND token_hash != ?",
-                         (user_id, _sha256(keep_session)))
-        else:
-            conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
-        conn.commit()
+        password_hash = hash_password(new)
+        with self._db.write() as conn:
+            conn.execute(
+                "UPDATE users SET password_hash = ?, must_change_password = 0, "
+                "temp_password_expires_at = NULL, credential_version = credential_version + 1 WHERE id = ?",
+                (password_hash, user_id),
+            )
+            if keep_session:
+                conn.execute("DELETE FROM sessions WHERE user_id = ? AND token_hash != ?",
+                             (user_id, _sha256(keep_session)))
+            else:
+                conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
         logger.info("Password changed for %s", user.username)
 
     def authenticate(self, username: str, password: str) -> User:
@@ -575,10 +573,9 @@ class Identity:
                 raise IdentityError("temp_password_expired", 403,
                                     "The temporary password has expired; ask an admin for a new one.")
         if needs_rehash(stored):
-            conn = self._conn()
-            conn.execute("UPDATE users SET password_hash = ? WHERE id = ?",
-                         (hash_password(password), user.id))
-            conn.commit()
+            password_hash = hash_password(password)
+            with self._db.write() as conn:
+                conn.execute("UPDATE users SET password_hash = ? WHERE id = ?", (password_hash, user.id))
         return user
 
     # ── known devices ──
@@ -595,10 +592,9 @@ class Identity:
         if stored is None:
             # First use. INSERT OR IGNORE so two racing first sign-ins agree
             # on one key; re-read to get whichever won.
-            conn = self._conn()
-            conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
-                         (DEVICE_KEY_SETTING, secrets.token_hex(32)))
-            conn.commit()
+            with self._db.write() as conn:
+                conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
+                             (DEVICE_KEY_SETTING, secrets.token_hex(32)))
             stored = self._db.get_setting(DEVICE_KEY_SETTING)
         return bytes.fromhex(stored)
 
@@ -648,13 +644,12 @@ class Identity:
         self.prune_sessions()
         raw = secrets.token_urlsafe(32)
         now = _now()
-        conn = self._conn()
-        conn.execute(
-            "INSERT INTO sessions (token_hash, user_id, created_at, last_seen_at, expires_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (_sha256(raw), user_id, _iso(now), _iso(now), _iso(now + SESSION_TTL)),
-        )
-        conn.commit()
+        with self._db.write() as conn:
+            conn.execute(
+                "INSERT INTO sessions (token_hash, user_id, created_at, last_seen_at, expires_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (_sha256(raw), user_id, _iso(now), _iso(now), _iso(now + SESSION_TTL)),
+            )
         return raw
 
     def resolve_session(self, raw: str) -> Principal | None:
@@ -675,38 +670,33 @@ class Identity:
         if (_parse(row["expires_at"]) < now
                 or now - _parse(row["last_seen_at"]) > SESSION_IDLE
                 or not row["active"]):
-            conn.execute("DELETE FROM sessions WHERE id = ?", (row["sid"],))
-            conn.commit()
+            with self._db.write() as w:
+                w.execute("DELETE FROM sessions WHERE id = ?", (row["sid"],))
             return None
         if now - _parse(row["last_seen_at"]) > TOUCH_INTERVAL:
-            conn.execute("UPDATE sessions SET last_seen_at = ? WHERE id = ?", (_iso(now), row["sid"]))
-            conn.commit()
+            with self._db.write() as w:
+                w.execute("UPDATE sessions SET last_seen_at = ? WHERE id = ?", (_iso(now), row["sid"]))
         return Principal(user=_row_to_user(row), via="session")
 
     def delete_session(self, raw: str) -> None:
         if not raw:
             return
-        conn = self._conn()
-        conn.execute("DELETE FROM sessions WHERE token_hash = ?", (_sha256(raw),))
-        conn.commit()
+        with self._db.write() as conn:
+            conn.execute("DELETE FROM sessions WHERE token_hash = ?", (_sha256(raw),))
 
     def end_all_sessions(self) -> int:
         """Sign every browser out. Returns how many sessions there were."""
-        conn = self._conn()
-        cur = conn.execute("DELETE FROM sessions")
-        conn.commit()
-        return cur.rowcount
+        with self._db.write() as conn:
+            return conn.execute("DELETE FROM sessions").rowcount
 
     def prune_sessions(self) -> int:
         """Drop sessions past their lifetime or idle limit. Returns how many."""
         now = _now()
-        conn = self._conn()
-        cur = conn.execute(
-            "DELETE FROM sessions WHERE expires_at < ? OR last_seen_at < ?",
-            (_iso(now), _iso(now - SESSION_IDLE)),
-        )
-        conn.commit()
-        return cur.rowcount
+        with self._db.write() as conn:
+            return conn.execute(
+                "DELETE FROM sessions WHERE expires_at < ? OR last_seen_at < ?",
+                (_iso(now), _iso(now - SESSION_IDLE)),
+            ).rowcount
 
     # ── API tokens ──
 
@@ -735,25 +725,26 @@ class Identity:
             raise IdentityError("invalid_expiry", 400,
                                 f"expires_in_days must be between 0 (never) and {MAX_TOKEN_DAYS}.")
         now = _now()
-        conn = self._conn()
-        live = conn.execute(
-            "SELECT COUNT(*) AS n FROM api_tokens WHERE user_id = ? AND revoked_at IS NULL "
-            "AND (expires_at IS NULL OR expires_at > ?)",
-            (user_id, _iso(now)),
-        ).fetchone()["n"]
-        if live >= MAX_ACTIVE_TOKENS:
-            raise IdentityError("token_limit", 409,
-                                f"At most {MAX_ACTIVE_TOKENS} active tokens per user; revoke one first.")
-        raw = generate_token()
-        expires = _iso(now + timedelta(days=days)) if days else None
-        cur = conn.execute(
-            "INSERT INTO api_tokens (user_id, name, token_hash, hint, created_at, expires_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (user_id, name, _sha256(raw), raw[:TOKEN_HINT_LEN], _iso(now), expires),
-        )
-        conn.commit()
-        row = conn.execute("SELECT * FROM api_tokens WHERE id = ?", (cur.lastrowid,)).fetchone()
-        return self._token_public(row), raw
+        # The limit check and the insert share one transaction, so a burst of
+        # requests cannot all see room for one more token.
+        with self._db.write() as conn:
+            live = conn.execute(
+                "SELECT COUNT(*) AS n FROM api_tokens WHERE user_id = ? AND revoked_at IS NULL "
+                "AND (expires_at IS NULL OR expires_at > ?)",
+                (user_id, _iso(now)),
+            ).fetchone()["n"]
+            if live >= MAX_ACTIVE_TOKENS:
+                raise IdentityError("token_limit", 409,
+                                    f"At most {MAX_ACTIVE_TOKENS} active tokens per user; revoke one first.")
+            raw = generate_token()
+            expires = _iso(now + timedelta(days=days)) if days else None
+            cur = conn.execute(
+                "INSERT INTO api_tokens (user_id, name, token_hash, hint, created_at, expires_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (user_id, name, _sha256(raw), raw[:TOKEN_HINT_LEN], _iso(now), expires),
+            )
+            row = conn.execute("SELECT * FROM api_tokens WHERE id = ?", (cur.lastrowid,)).fetchone()
+            return self._token_public(row), raw
 
     def revoke_token(self, user_id: int, token_id: int) -> dict | None:
         """Revoke one of `user_id`'s tokens; None when it is not theirs."""
@@ -764,8 +755,8 @@ class Identity:
         if row is None:
             return None
         if row["revoked_at"] is None:
-            conn.execute("UPDATE api_tokens SET revoked_at = ? WHERE id = ?", (_iso(_now()), token_id))
-            conn.commit()
+            with self._db.write() as w:
+                w.execute("UPDATE api_tokens SET revoked_at = ? WHERE id = ?", (_iso(_now()), token_id))
             row = conn.execute("SELECT * FROM api_tokens WHERE id = ?", (token_id,)).fetchone()
         return self._token_public(row)
 
@@ -788,8 +779,8 @@ class Identity:
             return None
         last = _parse(row["last_used_at"])
         if last is None or now - last > TOUCH_INTERVAL:
-            conn.execute("UPDATE api_tokens SET last_used_at = ? WHERE id = ?", (_iso(now), row["tid"]))
-            conn.commit()
+            with self._db.write() as w:
+                w.execute("UPDATE api_tokens SET last_used_at = ? WHERE id = ?", (_iso(now), row["tid"]))
         return Principal(user=_row_to_user(row), via="token", token_id=row["tid"], token_hint=row["hint"],
                          token_name=row["tname"])
 

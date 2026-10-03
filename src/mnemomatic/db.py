@@ -5,6 +5,7 @@ import sqlite3
 import struct
 import threading
 from collections import defaultdict
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -394,6 +395,93 @@ class Database:
             conn.enable_load_extension(False)
             self._local.conn = conn
         return conn
+
+    @contextmanager
+    def write(self):
+        """One write transaction on this thread's connection.
+
+        BEGIN IMMEDIATE takes SQLite's write lock before the first statement,
+        so a read-then-write (does this title exist? then insert or update)
+        sees no other writer in between: two concurrent stores of one title
+        become an insert and an update, not a UNIQUE failure. Commits on
+        success and rolls back on any error, so a failed write never leaves
+        its transaction open, holding the lock, on a pooled worker thread.
+
+        Nested use joins the outer transaction (store_knowledge calls
+        _store_item and both commit together, once) inside a savepoint, so a
+        nested write that fails is undone on its own even if the caller
+        catches the error and carries on.
+        """
+        conn = self._get_conn()
+        if getattr(self._local, "snapshot", False):
+            raise RuntimeError("write() inside a read snapshot")
+        depth = getattr(self._local, "write_depth", 0)
+        if depth:
+            savepoint = f"nested_write_{depth}"
+            conn.execute(f"SAVEPOINT {savepoint}")
+            self._local.write_depth = depth + 1
+            try:
+                yield conn
+            except BaseException:
+                conn.execute(f"ROLLBACK TO {savepoint}")
+                conn.execute(f"RELEASE {savepoint}")
+                raise
+            else:
+                conn.execute(f"RELEASE {savepoint}")
+            finally:
+                self._local.write_depth = depth
+            return
+        if conn.in_transaction:
+            # Every write goes through here, so this is a statement that
+            # bypassed it and never finished; its state is unknown.
+            logger.warning("Discarding a write transaction left open on this thread")
+            conn.rollback()
+        conn.execute("BEGIN IMMEDIATE")
+        self._local.write_depth = 1
+        try:
+            yield conn
+        except BaseException:
+            conn.rollback()
+            raise
+        else:
+            conn.commit()
+        finally:
+            self._local.write_depth = 0
+
+    @contextmanager
+    def snapshot(self):
+        """Read the database as of one moment, for readers that issue many
+        queries and must not see a write land halfway (an export listing
+        namespaces, then reading each). In WAL mode the first read pins the
+        snapshot and writers carry on undisturbed. Read-only: write() inside
+        raises. Nested or inside a write, it is a no-op — that transaction
+        already is a consistent view.
+        """
+        conn = self._get_conn()
+        if getattr(self._local, "snapshot", False) or getattr(self._local, "write_depth", 0):
+            yield
+            return
+        if conn.in_transaction:
+            logger.warning("Discarding a write transaction left open on this thread")
+            conn.rollback()
+        conn.execute("BEGIN")
+        self._local.snapshot = True
+        try:
+            yield
+        finally:
+            self._local.snapshot = False
+            conn.rollback()                 # nothing was written; just end the read
+
+    def discard_open_transaction(self) -> bool:
+        """Roll back whatever transaction this thread's connection still has
+        open. The worker-thread wrapper calls it after each tool, so even a
+        write path that forgot write() cannot keep the lock past its call.
+        True when there was one."""
+        conn = getattr(self._local, "conn", None)
+        if conn is None or not conn.in_transaction:
+            return False
+        conn.rollback()
+        return True
 
     def _init_schema(self):
         conn = self._get_conn()
@@ -897,12 +985,11 @@ class Database:
         return row["value"] if row else None
 
     def set_setting(self, key: str, value: str | None) -> None:
-        conn = self._get_conn()
-        if value is None:
-            conn.execute("DELETE FROM settings WHERE key = ?", (key,))
-        else:
-            conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
-        conn.commit()
+        with self.write() as conn:
+            if value is None:
+                conn.execute("DELETE FROM settings WHERE key = ?", (key,))
+            else:
+                conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
 
     def rebuild_vec_tables(self) -> None:
         """Drop and recreate all vec0 tables empty, at the configured dimension.
@@ -957,15 +1044,14 @@ class Database:
         Used by the reindex flow. Returns False when the item doesn't exist.
         """
         table = _spec(item_type).table
-        conn = self._get_conn()
-        row = conn.execute(
-            f"SELECT rowid, namespace FROM {table} WHERE id = ?", (item_id,)
-        ).fetchone()
-        if row is None:
-            return False
-        self._upsert_vec(conn, f"vec_{table}", row["rowid"], embedding, row["namespace"])
-        conn.commit()
-        return True
+        with self.write() as conn:
+            row = conn.execute(
+                f"SELECT rowid, namespace FROM {table} WHERE id = ?", (item_id,)
+            ).fetchone()
+            if row is None:
+                return False
+            self._upsert_vec(conn, f"vec_{table}", row["rowid"], embedding, row["namespace"])
+            return True
 
     # ── Usage tracking & revisions ──
 
@@ -978,20 +1064,19 @@ class Database:
         """
         if not refs:
             return
-        conn = self._get_conn()
-        now = datetime.now(timezone.utc).isoformat()
-        by_table: dict[str, set[str]] = {}
-        for item_type, item_id in refs:
-            spec = _SPEC_BY_ITEM_TYPE.get(item_type)
-            if spec:
-                by_table.setdefault(spec.table, set()).add(item_id)
-        for table, ids in by_table.items():
-            conn.execute(
-                f"UPDATE {table} SET retrieval_count = retrieval_count + 1, last_accessed = ? "
-                f"WHERE id IN ({','.join('?' * len(ids))})",
-                (now, *ids),
-            )
-        conn.commit()
+        with self.write() as conn:
+            now = datetime.now(timezone.utc).isoformat()
+            by_table: dict[str, set[str]] = {}
+            for item_type, item_id in refs:
+                spec = _SPEC_BY_ITEM_TYPE.get(item_type)
+                if spec:
+                    by_table.setdefault(spec.table, set()).add(item_id)
+            for table, ids in by_table.items():
+                conn.execute(
+                    f"UPDATE {table} SET retrieval_count = retrieval_count + 1, last_accessed = ? "
+                    f"WHERE id IN ({','.join('?' * len(ids))})",
+                    (now, *ids),
+                )
 
     def _capture_revision(self, conn: sqlite3.Connection, table: str, row: dict, op: str) -> None:
         """Save a row's prior state into revisions and prune per-item history. Does not commit.
@@ -1093,27 +1178,26 @@ class Database:
         forever) — accountability wants age, not a per-item count like
         revisions. The prune is an indexed range delete, cheap on every append.
         """
-        conn = self._get_conn()
-        now = datetime.now(timezone.utc)
-        # Several of these come straight from request headers or bodies;
-        # capping them keeps one request from adding megabytes to a log that
-        # is kept for years.
-        item_id, namespace, title, actor, client, ip = (
-            _clip(v) for v in (item_id, namespace, title, actor, client, ip)
-        )
-        detail_json = json.dumps(detail) if detail else None
-        if detail_json and len(detail_json) > AUDIT_MAX_DETAIL:
-            detail_json = json.dumps({"truncated": True, "op_detail": detail_json[:AUDIT_MAX_DETAIL]})
-        conn.execute(
-            "INSERT INTO audit_log (ts, op, item_type, item_id, namespace, title, "
-            "actor, client, ip, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (now.isoformat(), op, item_type, item_id, namespace,
-             title, actor, client, ip, detail_json),
-        )
-        if AUDIT_KEEP_DAYS > 0:
-            cutoff = (now - timedelta(days=AUDIT_KEEP_DAYS)).isoformat()
-            conn.execute("DELETE FROM audit_log WHERE ts < ?", (cutoff,))
-        conn.commit()
+        with self.write() as conn:
+            now = datetime.now(timezone.utc)
+            # Several of these come straight from request headers or bodies;
+            # capping them keeps one request from adding megabytes to a log that
+            # is kept for years.
+            item_id, namespace, title, actor, client, ip = (
+                _clip(v) for v in (item_id, namespace, title, actor, client, ip)
+            )
+            detail_json = json.dumps(detail) if detail else None
+            if detail_json and len(detail_json) > AUDIT_MAX_DETAIL:
+                detail_json = json.dumps({"truncated": True, "op_detail": detail_json[:AUDIT_MAX_DETAIL]})
+            conn.execute(
+                "INSERT INTO audit_log (ts, op, item_type, item_id, namespace, title, "
+                "actor, client, ip, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (now.isoformat(), op, item_type, item_id, namespace,
+                 title, actor, client, ip, detail_json),
+            )
+            if AUDIT_KEEP_DAYS > 0:
+                cutoff = (now - timedelta(days=AUDIT_KEEP_DAYS)).isoformat()
+                conn.execute("DELETE FROM audit_log WHERE ts < ?", (cutoff,))
 
     @staticmethod
     def _audit_where(item_type, item_id, namespace, op, actor, content_only) -> tuple[str, list]:
@@ -1219,40 +1303,38 @@ class Database:
         rows replaced — even when chunks is None, which clears stale chunks on
         an update.
         """
-        conn = self._get_conn()
-        key = _SPECS[table].title_field
-        columns = _SPECS[table].columns
-        existing = conn.execute(
-            f"SELECT rowid, * FROM {table} WHERE namespace = ? AND {key} = ?{_current_filter(table)}",
-            (item.namespace, getattr(item, key)),
-        ).fetchone()
+        with self.write() as conn:
+            key = _SPECS[table].title_field
+            columns = _SPECS[table].columns
+            existing = conn.execute(
+                f"SELECT rowid, * FROM {table} WHERE namespace = ? AND {key} = ?{_current_filter(table)}",
+                (item.namespace, getattr(item, key)),
+            ).fetchone()
 
-        if existing:
-            self._capture_revision(conn, table, existing, "update")
-            stored = item.model_copy(update={
-                "id": existing["id"],
-                "created_at": datetime.fromisoformat(existing["created_at"]),
-                "updated_at": datetime.now(timezone.utc),
-            })
-            update_cols = [c for c in columns if c not in ("id", "namespace", key, "created_at")]
-            conn.execute(
-                f"UPDATE {table} SET {', '.join(f'{c} = ?' for c in update_cols)} WHERE id = ?",
-                (*_item_column_values(stored, update_cols), existing["id"]),
-            )
+            if existing:
+                self._capture_revision(conn, table, existing, "update")
+                stored = item.model_copy(update={
+                    "id": existing["id"],
+                    "created_at": datetime.fromisoformat(existing["created_at"]),
+                    "updated_at": datetime.now(timezone.utc),
+                })
+                update_cols = [c for c in columns if c not in ("id", "namespace", key, "created_at")]
+                conn.execute(
+                    f"UPDATE {table} SET {', '.join(f'{c} = ?' for c in update_cols)} WHERE id = ?",
+                    (*_item_column_values(stored, update_cols), existing["id"]),
+                )
+                if embedding is not None:
+                    self._upsert_vec(conn, f"vec_{table}", existing["rowid"], embedding, item.namespace)
+                if table == "documents":
+                    self._replace_document_chunks(conn, existing["id"], chunks, namespace=item.namespace)
+                return stored, False
+
+            rowid = _insert_row(conn, table, item)
             if embedding is not None:
-                self._upsert_vec(conn, f"vec_{table}", existing["rowid"], embedding, item.namespace)
+                _insert_vec(conn, f"vec_{table}", rowid, item.namespace, embedding)
             if table == "documents":
-                self._replace_document_chunks(conn, existing["id"], chunks, namespace=item.namespace)
-            conn.commit()
-            return stored, False
-
-        rowid = _insert_row(conn, table, item)
-        if embedding is not None:
-            _insert_vec(conn, f"vec_{table}", rowid, item.namespace, embedding)
-        if table == "documents":
-            self._replace_document_chunks(conn, item.id, chunks, namespace=item.namespace)
-        conn.commit()
-        return item, True
+                self._replace_document_chunks(conn, item.id, chunks, namespace=item.namespace)
+            return item, True
 
     def get_item(self, item_type: str, item_id: str):
         spec = _spec(item_type)
@@ -1263,16 +1345,15 @@ class Database:
 
     def delete_item(self, item_type: str, item_id: str) -> bool:
         table = _spec(item_type).table
-        conn = self._get_conn()
-        row = conn.execute(
-            f"DELETE FROM {table} WHERE id = ? RETURNING rowid, *", (item_id,)
-        ).fetchone()
-        if not row:
-            return False
-        self._capture_revision(conn, table, row, "delete")
-        conn.execute(f"DELETE FROM vec_{table} WHERE rowid = ?", (row["rowid"],))
-        conn.commit()
-        return True
+        with self.write() as conn:
+            row = conn.execute(
+                f"DELETE FROM {table} WHERE id = ? RETURNING rowid, *", (item_id,)
+            ).fetchone()
+            if not row:
+                return False
+            self._capture_revision(conn, table, row, "delete")
+            conn.execute(f"DELETE FROM vec_{table} WHERE rowid = ?", (row["rowid"],))
+            return True
 
     def _upsert_vec(self, conn: sqlite3.Connection, vec_table: str, rowid: int, embedding: list[float], namespace: str) -> None:
         """Write an embedding for rowid, inserting the vec row if it doesn't exist yet.
@@ -1303,29 +1384,28 @@ class Database:
         invalid = set(fields) - _SPECS[table].update_fields
         if invalid:
             raise ValueError(f"Invalid {table} fields: {invalid}")
-        conn = self._get_conn()
-        prior = conn.execute(f"SELECT * FROM {table} WHERE id = ?", (item_id,)).fetchone()
-        if prior is None:
-            return None
-        self._capture_revision(conn, table, prior, "update")
-        fields["updated_at"] = datetime.now(timezone.utc).isoformat()
-        set_clauses = []
-        values = []
-        for key, value in fields.items():
-            if key in ("tags", "metadata"):
-                value = json.dumps(value)
-            set_clauses.append(f"{key} = ?")
-            values.append(value)
-        values.append(item_id)
-        row = conn.execute(
-            f"UPDATE {table} SET {', '.join(set_clauses)} WHERE id = ? RETURNING rowid, *", values
-        ).fetchone()
-        if not row:
-            return None
-        if embedding is not None:
-            self._upsert_vec(conn, f"vec_{table}", row["rowid"], embedding, row["namespace"])
-        conn.commit()
-        return _row_to_model(_SPECS[table].model, row)
+        with self.write() as conn:
+            prior = conn.execute(f"SELECT * FROM {table} WHERE id = ?", (item_id,)).fetchone()
+            if prior is None:
+                return None
+            self._capture_revision(conn, table, prior, "update")
+            fields["updated_at"] = datetime.now(timezone.utc).isoformat()
+            set_clauses = []
+            values = []
+            for key, value in fields.items():
+                if key in ("tags", "metadata"):
+                    value = json.dumps(value)
+                set_clauses.append(f"{key} = ?")
+                values.append(value)
+            values.append(item_id)
+            row = conn.execute(
+                f"UPDATE {table} SET {', '.join(set_clauses)} WHERE id = ? RETURNING rowid, *", values
+            ).fetchone()
+            if not row:
+                return None
+            if embedding is not None:
+                self._upsert_vec(conn, f"vec_{table}", row["rowid"], embedding, row["namespace"])
+            return _row_to_model(_SPECS[table].model, row)
 
     # ── Documents CRUD ──
 
@@ -1346,9 +1426,8 @@ class Database:
 
     def replace_document_chunks(self, doc_id: str, chunks: list[tuple[str, list[float]]] | None) -> None:
         """Replace all chunks for a document. Deletes existing chunks, then inserts new ones if provided."""
-        conn = self._get_conn()
-        self._replace_document_chunks(conn, doc_id, chunks)
-        conn.commit()
+        with self.write() as conn:
+            self._replace_document_chunks(conn, doc_id, chunks)
 
     # ── Knowledge CRUD ──
 
@@ -1362,17 +1441,17 @@ class Database:
         (valid_until, superseded_by) and kept as history, and the new fact is
         inserted as its successor.
         """
-        conn = self._get_conn()
-        existing = conn.execute(
-            "SELECT rowid, * FROM knowledge WHERE namespace = ? AND subject = ? "
-            "AND valid_until IS NULL",
-            (k.namespace, k.subject),
-        ).fetchone()
-        if existing is None or existing["fact"] == k.fact:
-            stored, created = self._store_item("knowledge", k, embedding)
-            return stored, created, None
-        successor = self._supersede(conn, existing, k, embedding)
-        return successor, True, existing["id"]
+        with self.write() as conn:
+            existing = conn.execute(
+                "SELECT rowid, * FROM knowledge WHERE namespace = ? AND subject = ? "
+                "AND valid_until IS NULL",
+                (k.namespace, k.subject),
+            ).fetchone()
+            if existing is None or existing["fact"] == k.fact:
+                stored, created = self._store_item("knowledge", k, embedding)
+                return stored, created, None
+            successor = self._supersede(conn, existing, k, embedding)
+            return successor, True, existing["id"]
 
     def supersede_knowledge(self, k_id: str, successor: Knowledge,
                             embedding: list[float] | None) -> Knowledge | None:
@@ -1383,17 +1462,18 @@ class Database:
         immutable) and sqlite3.IntegrityError when the successor's subject
         collides with a different current fact.
         """
-        conn = self._get_conn()
-        old = conn.execute("SELECT rowid, * FROM knowledge WHERE id = ?", (k_id,)).fetchone()
-        if old is None:
-            return None
-        if old["valid_until"] is not None:
-            raise ValueError(f"knowledge {k_id} is already superseded — history is immutable")
-        return self._supersede(conn, old, successor, embedding)
+        with self.write() as conn:
+            old = conn.execute("SELECT rowid, * FROM knowledge WHERE id = ?", (k_id,)).fetchone()
+            if old is None:
+                return None
+            if old["valid_until"] is not None:
+                raise ValueError(f"knowledge {k_id} is already superseded — history is immutable")
+            return self._supersede(conn, old, successor, embedding)
 
     def _supersede(self, conn: sqlite3.Connection, old_row: dict, new_item: Knowledge,
                    embedding: list[float] | None) -> Knowledge:
-        """Close old_row and insert new_item as the current fact. Commits.
+        """Close old_row and insert new_item as the current fact. Runs inside
+        the caller's write() transaction.
 
         The old row keeps its content and usage counters — supersession *is*
         the history, so no revision is captured. Its vector is dropped: only
@@ -1404,21 +1484,16 @@ class Database:
             "created_at": now, "updated_at": now,
             "valid_until": None, "superseded_by": None,
         })
-        try:
-            conn.execute(
-                "UPDATE knowledge SET valid_until = ?, superseded_by = ? WHERE id = ?",
-                (now.isoformat(), stored.id, old_row["id"]),
-            )
-            conn.execute("DELETE FROM vec_knowledge WHERE rowid = ?", (old_row["rowid"],))
-            rowid = _insert_row(conn, "knowledge", stored)
-            if embedding is not None:
-                _insert_vec(conn, "vec_knowledge", rowid, stored.namespace, embedding)
-            conn.commit()
-        except Exception:
-            # A subject conflict on the successor insert must not leave the
-            # old row closed in the open transaction.
-            conn.rollback()
-            raise
+        # A subject conflict on the successor insert raises, and write()
+        # rolls back the whole transaction, so the old row is not left closed.
+        conn.execute(
+            "UPDATE knowledge SET valid_until = ?, superseded_by = ? WHERE id = ?",
+            (now.isoformat(), stored.id, old_row["id"]),
+        )
+        conn.execute("DELETE FROM vec_knowledge WHERE rowid = ?", (old_row["rowid"],))
+        rowid = _insert_row(conn, "knowledge", stored)
+        if embedding is not None:
+            _insert_vec(conn, "vec_knowledge", rowid, stored.namespace, embedding)
         return stored
 
     def knowledge_history(self, namespace: str, subject: str) -> list[Knowledge]:
@@ -1463,28 +1538,27 @@ class Database:
     # ── Tags ──
 
     def update_tags(self, item_id: str, item_type: str, add_tags: list[str] | None = None, remove_tags: list[str] | None = None) -> list[str]:
-        conn = self._get_conn()
-        table = _spec(item_type).table
-        row = conn.execute(f"SELECT * FROM {table} WHERE id = ?", (item_id,)).fetchone()
-        if not row:
-            raise ValueError(f"{item_type} {item_id} not found")
-        if row.get("valid_until") is not None:
-            raise ValueError(f"knowledge {item_id} is superseded history and cannot be retagged")
-        if add_tags:
-            validate_tag_list(add_tags)
-        tags = set(_safe_json_loads(row["tags"], [], f"tags row {row.get('id','?')}"))
-        if add_tags:
-            tags.update(add_tags)
-        if remove_tags:
-            tags -= set(remove_tags)
-        tag_list = validate_tag_list(sorted(tags))
-        self._capture_revision(conn, table, row, "update")
-        conn.execute(
-            f"UPDATE {table} SET tags = ?, updated_at = ? WHERE id = ?",
-            (json.dumps(tag_list), datetime.now(timezone.utc).isoformat(), item_id),
-        )
-        conn.commit()
-        return tag_list
+        with self.write() as conn:
+            table = _spec(item_type).table
+            row = conn.execute(f"SELECT * FROM {table} WHERE id = ?", (item_id,)).fetchone()
+            if not row:
+                raise ValueError(f"{item_type} {item_id} not found")
+            if row.get("valid_until") is not None:
+                raise ValueError(f"knowledge {item_id} is superseded history and cannot be retagged")
+            if add_tags:
+                validate_tag_list(add_tags)
+            tags = set(_safe_json_loads(row["tags"], [], f"tags row {row.get('id','?')}"))
+            if add_tags:
+                tags.update(add_tags)
+            if remove_tags:
+                tags -= set(remove_tags)
+            tag_list = validate_tag_list(sorted(tags))
+            self._capture_revision(conn, table, row, "update")
+            conn.execute(
+                f"UPDATE {table} SET tags = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(tag_list), datetime.now(timezone.utc).isoformat(), item_id),
+            )
+            return tag_list
 
     # ── Search ──
 
@@ -1549,16 +1623,15 @@ class Database:
         validate_namespace(new)
         if old == new:
             raise ValueError("old and new namespace are identical — nothing to rename")
-        conn = self._get_conn()
-        counts = {}
-        replaced = {}
-        # vec0 forbids UPDATE on partition key columns, so the moved rows'
-        # vectors are captured up front and rewritten under the new namespace.
-        vec_rows = {
-            name: conn.execute(f"{source_sql} WHERE t.namespace = ?", (old,)).fetchall()
-            for name, source_sql in self._VEC_MIGRATION_SOURCES.items()
-        }
-        try:
+        with self.write() as conn:
+            counts = {}
+            replaced = {}
+            # vec0 forbids UPDATE on partition key columns, so the moved rows'
+            # vectors are captured up front and rewritten under the new namespace.
+            vec_rows = {
+                name: conn.execute(f"{source_sql} WHERE t.namespace = ?", (old,)).fetchall()
+                for name, source_sql in self._VEC_MIGRATION_SOURCES.items()
+            }
             for table in _TABLES:
                 key = _SPECS[table].title_field
                 # The moved item wins a collision: drop the target's row (and
@@ -1586,30 +1659,25 @@ class Database:
                         f"INSERT INTO {name} (rowid, namespace, embedding) VALUES (?, ?, ?)",
                         (row["rowid"], new, row["embedding"]),
                     )
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        return counts, replaced
+            return counts, replaced
 
     def delete_namespace(self, namespace: str) -> dict[str, int]:
-        conn = self._get_conn()
-        counts = {}
-        for table in _TABLES:
-            rows = conn.execute(
-                f"DELETE FROM {table} WHERE namespace = ? RETURNING rowid, *", (namespace,)
-            ).fetchall()
-            for row in rows:
-                self._capture_revision(conn, table, row, "delete")
-            counts[table] = len(rows)
-            if rows:
-                rowids = [r["rowid"] for r in rows]
-                conn.execute(
-                    f"DELETE FROM vec_{table} WHERE rowid IN ({','.join('?' * len(rowids))})",
-                    rowids,
-                )
-        conn.commit()
-        return counts
+        with self.write() as conn:
+            counts = {}
+            for table in _TABLES:
+                rows = conn.execute(
+                    f"DELETE FROM {table} WHERE namespace = ? RETURNING rowid, *", (namespace,)
+                ).fetchall()
+                for row in rows:
+                    self._capture_revision(conn, table, row, "delete")
+                counts[table] = len(rows)
+                if rows:
+                    rowids = [r["rowid"] for r in rows]
+                    conn.execute(
+                        f"DELETE FROM vec_{table} WHERE rowid IN ({','.join('?' * len(rowids))})",
+                        rowids,
+                    )
+            return counts
 
     def list_namespaces(self) -> list[str]:
         # Superseded-only namespaces don't count: _current_filter hides history.
