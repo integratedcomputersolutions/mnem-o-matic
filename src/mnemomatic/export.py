@@ -105,8 +105,16 @@ def build_export_zip(db, namespace: str | None = None, *,
     """Build the archive for one namespace (or all) and suggest a filename.
 
     Returns (zip bytes, filename). Type folders without items are omitted;
-    a namespace with no items simply contributes nothing.
+    a namespace with no items simply contributes nothing. Every read comes
+    from one snapshot: exports run on a worker thread alongside writes, and
+    a rename landing between two namespaces' reads would otherwise list an
+    item twice, or not at all.
     """
+    with db.snapshot():
+        return _build_export_zip(db, namespace, server_version=server_version)
+
+
+def _build_export_zip(db, namespace: str | None, *, server_version: str) -> tuple[bytes, str]:
     now = datetime.now(timezone.utc)
     namespaces = [namespace] if namespace else db.list_namespaces()
 

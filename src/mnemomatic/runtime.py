@@ -53,9 +53,20 @@ mcp = FastMCP(
 # Contextvars (the audit log's request meta) follow the call to the thread.
 
 def _offloaded(fn):
+    def call(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            # Worker threads are pooled and each keeps its SQLite connection,
+            # so a transaction left open here would hold the write lock for
+            # whatever runs on this thread next. Database.write() should make
+            # this a no-op; if it ever is not, say so and let go of the lock.
+            if db is not None and db.discard_open_transaction():
+                logger.error("%s left a database transaction open; rolled back", fn.__name__)
+
     @functools.wraps(fn)
     async def run(*args, **kwargs):
-        return await anyio.to_thread.run_sync(functools.partial(fn, *args, **kwargs))
+        return await anyio.to_thread.run_sync(functools.partial(call, *args, **kwargs))
     return run
 
 
