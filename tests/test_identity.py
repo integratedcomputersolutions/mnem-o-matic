@@ -599,7 +599,7 @@ class TestFirstRun(unittest.TestCase):
         self.assertTrue(fr.check(code))
         self.assertTrue(fr.check(code.lower()))
         self.assertTrue(fr.check(f" {code} "))
-        self.assertFalse(fr.check(code[:-1] + "Z"))
+        self.assertFalse(fr.check(code[:-1] + ("Y" if code[-1] == "Z" else "Z")))   # always a different code
         fr.clear()
         self.assertFalse(fr.check(code))
 
