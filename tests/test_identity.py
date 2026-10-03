@@ -344,6 +344,17 @@ class TestSessions(IdentityCase):
         self._age("last_seen_at", timedelta(hours=5))
         self.assertEqual(self.ident.prune_sessions(), 2)
 
+    def test_new_session_sweeps_dead_ones(self):
+        # Browsers that never come back must not leave rows forever.
+        user = self.admin()
+        for _ in range(3):
+            self.ident.create_session(user.id)
+        self._age("last_seen_at", timedelta(hours=5))
+        live = self.ident.create_session(user.id)
+        rows = self.db.connection().execute("SELECT COUNT(*) AS n FROM sessions").fetchone()["n"]
+        self.assertEqual(rows, 1)
+        self.assertIsNotNone(self.ident.resolve_session(live))
+
 
 class TestTokens(IdentityCase):
     def test_create_resolve_revoke(self):

@@ -639,7 +639,13 @@ class Identity:
     # ── sessions ──
 
     def create_session(self, user_id: int) -> str:
-        """Start a session; returns the raw cookie value (stored only hashed)."""
+        """Start a session; returns the raw cookie value (stored only hashed).
+
+        Dead sessions go first. resolve_session only deletes one when its
+        cookie comes back, so browsers that never return would otherwise
+        leave their rows behind forever; a sign-in is a natural moment to
+        sweep, and the table then never holds more than the live sessions."""
+        self.prune_sessions()
         raw = secrets.token_urlsafe(32)
         now = _now()
         conn = self._conn()

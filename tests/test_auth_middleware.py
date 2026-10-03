@@ -199,6 +199,28 @@ class TestSession(AuthCase):
         self.assertEqual(session_cookie_name("https"), "__Host-mnm_session")
         self.assertEqual(session_cookie_name("http"), "mnm_session")
 
+    def test_malformed_neighbour_cookie_does_not_hide_ours(self):
+        # SimpleCookie gave up on the whole header over any of these.
+        raw = self.fx.session_for(self.fx.user)
+        for junk in ('prefs={"theme": "dark"}', 'a="unterminated', "bad name=1", "flag"):
+            with self.subTest(junk=junk):
+                header = {"Cookie": f"{junk}; {COOKIE_NAME}={raw}"}
+                self.assertEqual(self.client.get("/api/things", headers=header).status_code, 200)
+
+    def test_two_session_cookies_count_as_none(self):
+        # One of them was planted (sibling subdomain, other path) and there
+        # is no telling which, so neither is trusted.
+        real, other = self.fx.session_for(self.fx.user), self.fx.session_for(self.fx.admin)
+        for header in (f"{COOKIE_NAME}={real}; {COOKIE_NAME}={other}",
+                       f"{COOKIE_NAME}={real}; {COOKIE_NAME}={real}"):
+            with self.subTest(header=header[:40]):
+                self.assertEqual(self.client.get("/api/things", headers={"Cookie": header}).status_code, 401)
+
+    def test_cookie_split_across_headers(self):
+        raw = self.fx.session_for(self.fx.user)
+        headers = [("cookie", "theme=dark"), ("cookie", f"{COOKIE_NAME}={raw}")]
+        self.assertEqual(self.client.get("/api/things", headers=headers).status_code, 200)
+
     def test_forced_password_change_gate(self):
         user, temp = self.fx.identity.create_user("newbie")
         cookies = {COOKIE_NAME: self.fx.session_for(user)}

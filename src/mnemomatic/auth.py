@@ -23,7 +23,6 @@ Response object built around a request that never reached the app.
 
 import json
 import logging
-from http.cookies import CookieError, SimpleCookie
 
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -83,17 +82,25 @@ async def _send_json(send: Send, status: int, body: dict, headers: dict[str, str
     await send({"type": "http.response.body", "body": payload})
 
 
-def _cookie_value(headers: dict[str, str], name: str) -> str:
-    raw = headers.get("cookie")
-    if not raw:
-        return ""
-    jar = SimpleCookie()
-    try:
-        jar.load(raw)
-    except CookieError:
-        return ""
-    morsel = jar.get(name)
-    return morsel.value if morsel else ""
+def _cookie_value(scope: Scope, name: str) -> str:
+    """The value of cookie `name`, or "" when it is absent or sent twice.
+
+    Parsed leniently, one `name=value` pair at a time, so a malformed cookie
+    from some other app on the host (a space, a stray quote, JSON) cannot
+    hide ours — the stdlib's SimpleCookie gives up on the whole header.
+    Every Cookie header counts (HTTP/2 clients may split them). Two values
+    for the name mean one was planted, from a sibling subdomain or another
+    path, and there is no telling which: treat it as no session at all.
+    """
+    values = []
+    for key, raw in scope.get("headers", []):
+        if key.lower() != b"cookie":
+            continue
+        for pair in raw.decode("latin-1").split(";"):
+            k, sep, v = pair.partition("=")
+            if sep and k.strip() == name:
+                values.append(v.strip())
+    return values[0] if len(values) == 1 else ""
 
 
 class AuthMiddleware:
@@ -126,7 +133,7 @@ class AuthMiddleware:
             # A public /api route (the session probe) still likes to know who
             # is asking; a bad or absent cookie simply means "nobody".
             if path.startswith("/api"):
-                principal = self._from_cookie(scope, headers)
+                principal = self._from_cookie(scope)
         elif kind == "bearer":
             principal, refusal = self._from_bearer(headers, ip, method, path)
             if refusal:
@@ -139,7 +146,7 @@ class AuthMiddleware:
                     await _send_json(send, *refusal)
                     return
             else:
-                principal = self._from_cookie(scope, headers)
+                principal = self._from_cookie(scope)
                 if principal is None:
                     await _send_json(send, 401, {
                         "error": "unauthenticated",
@@ -153,7 +160,7 @@ class AuthMiddleware:
                     await _send_json(send, *_PASSWORD_CHANGE_REQUIRED)
                     return
         else:  # session
-            principal = self._from_cookie(scope, headers)
+            principal = self._from_cookie(scope)
             if principal is None:
                 logger.debug("Unauthenticated %s %s from %s", method, path, ip)
                 await _send_json(send, 401, {"error": "unauthenticated", "details": "Sign in first."})
@@ -167,8 +174,8 @@ class AuthMiddleware:
 
     # ── resolvers ──
 
-    def _from_cookie(self, scope: Scope, headers: dict[str, str]) -> Principal | None:
-        raw = _cookie_value(headers, session_cookie_name(scope.get("scheme", "http")))
+    def _from_cookie(self, scope: Scope) -> Principal | None:
+        raw = _cookie_value(scope, session_cookie_name(scope.get("scheme", "http")))
         return self._identity().resolve_session(raw) if raw else None
 
     def _from_bearer(self, headers: dict[str, str], ip: str, method: str, path: str):
