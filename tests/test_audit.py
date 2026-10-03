@@ -125,6 +125,26 @@ class ToolTestCase(unittest.TestCase):
         with patch.object(tools_history, "request_meta", return_value={"user": "root", "is_admin": True}):
             self.assertEqual([e["op"] for e in tools_history.list_audit()["events"]], ["store", "auth.login"])
 
+    def test_viewer_sees_ip_and_client_only_on_own_rows(self):
+        self.db.append_audit("store", item_type="note", item_id="a", actor="alice", ip="10.0.0.1", client="curl/8")
+        self.db.append_audit("store", item_type="note", item_id="b", actor="bob", ip="10.0.0.2", client="claude-code")
+        rows = {e["actor"]: e for e in self.db.list_audit(viewer="bob")}
+        self.assertEqual((rows["alice"]["ip"], rows["alice"]["client"]), (None, None))
+        self.assertEqual((rows["bob"]["ip"], rows["bob"]["client"]), ("10.0.0.2", "claude-code"))
+        self.assertEqual(rows["alice"]["item_id"], "a")                  # who did what stays visible
+        full = {e["actor"]: e for e in self.db.list_audit()}
+        self.assertEqual(full["alice"]["ip"], "10.0.0.1")
+
+    def test_mcp_list_audit_hides_other_peoples_ip_from_non_admins(self):
+        self.db.append_audit("store", item_type="note", item_id="a", actor="alice", ip="10.0.0.1", client="curl/8")
+        self.db.append_audit("export", actor="carol", ip="10.0.0.3", client="firefox")
+        with patch.object(tools_history, "request_meta", return_value={"user": "bob", "is_admin": False}):
+            events = tools_history.list_audit()["events"]
+        self.assertEqual({(e["ip"], e["client"]) for e in events}, {(None, None)})
+        with patch.object(tools_history, "request_meta", return_value={"user": "root", "is_admin": True}):
+            events = tools_history.list_audit()["events"]
+        self.assertEqual({e["ip"] for e in events}, {"10.0.0.1", "10.0.0.3"})
+
 
 class TestToolCoverage(ToolTestCase):
     def test_full_write_lifecycle_is_audited(self):

@@ -113,7 +113,8 @@ def list_audit(
     user behind the token), client (user-agent), ip, and op-specific detail
     (including `label`, the client's self-declared X-Mnemomatic-Actor header,
     and `token` when the request came through one). Administrators also see
-    identity events (sign-ins, users, tokens, HTTPS).
+    identity events (sign-ins, users, tokens, HTTPS); everyone else sees
+    client and ip only on their own events (null on other people's).
 
     Args:
         item_type: Filter by type — "document", "knowledge", or "note" (optional).
@@ -125,9 +126,11 @@ def list_audit(
     if item_type is not None and item_type not in _SPEC_BY_ITEM_TYPE:
         return {"error": "Invalid item_type", "details": f"Must be one of: {', '.join(sorted(_SPEC_BY_ITEM_TYPE))}"}
     limit = max(1, min(int(limit), config.MAX_LIST_LIMIT))
+    meta = request_meta()
+    admin = bool(meta.get("is_admin"))
     events = runtime._db().list_audit(item_type=item_type, item_id=item_id,
-                                      namespace=namespace, op=op, limit=limit,
-                                      content_only=not request_meta().get("is_admin"))
+                                      namespace=namespace, op=op, limit=limit, content_only=not admin,
+                                      viewer=None if admin else meta.get("user") or "")
     return {"events": events, "limit": limit}
 
 
