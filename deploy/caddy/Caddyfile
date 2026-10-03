@@ -9,14 +9,27 @@
     auto_https off
 }
 
-# Plain HTTP redirects to HTTPS, with one exception: liveness probes.
-# Container healthchecks, load balancers, and uptime monitors frequently
-# cannot follow a 301 or trust a private CA, and /health is unauthenticated
-# by design and returns nothing but {"status": "ok"} — so it is served
-# directly here rather than bounced to TLS.
+# Plain HTTP serves liveness probes and sends browsers to HTTPS. Container
+# healthchecks, load balancers, and uptime monitors frequently cannot follow
+# a 301 or trust a private CA, and /health is unauthenticated by design and
+# returns nothing but {"status": "ok"} — so it is served directly here.
+#
+# Paths that carry credentials (a bearer token, a session cookie) are
+# refused, never redirected: by the time a redirect is sent the credential
+# has already crossed the network in cleartext, and a client that silently
+# follows it keeps working, so nobody notices it is misconfigured. This is
+# the same 403 the server's own plain port answers once HTTPS is enforced,
+# so the CLI reports it the same way.
 :80 {
     handle /health {
         reverse_proxy mnemomatic:8000
+    }
+
+    @credentialed path /api /api/* /mcp /mcp/* /export /export/*
+    handle @credentialed {
+        header Content-Type application/json
+        header Cache-Control no-store
+        respond `{"error": "https_required", "details": "Plain HTTP is closed; use HTTPS.", "https_url": "https://{host}"}` 403
     }
 
     handle {
@@ -30,7 +43,7 @@
 
     # A second ceiling on top of the app's own 4 MB limit, so an oversized
     # upload is refused whichever layer notices it first. The :80 block needs
-    # none — it only serves /health and redirects.
+    # none — it only serves /health, refuses, and redirects.
     request_body {
         max_size 4MB
     }
