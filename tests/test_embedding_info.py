@@ -103,6 +103,16 @@ class TestBackendDetail(_InfoTest):
         self.assertIn("wire_api", info)
         self.assertNotIn("max_tokens", info)
 
+    def test_endpoint_credentials_are_never_reported(self):
+        # Any signed-in user reads this through embedding_info and /api/settings.
+        url = "https://user:hunter2@api.example.com:8443/v1/embeddings?key=sk-secret#frag"
+        with patch.object(config, "EMBED_URL", url):
+            info, settings = self.info(), tools_admin._settings_info()
+        for shown in (info["endpoint"], settings["endpoint_url"]):
+            self.assertEqual(shown, "https://api.example.com:8443/v1/embeddings?…")
+            for secret in ("user", "hunter2", "sk-secret", "frag"):
+                self.assertNotIn(secret, shown)
+
     def test_known_model_carries_a_card_link(self):
         with patch.object(config, "embed_identity", return_value=GEMMA):
             self.assertIn("huggingface.co", self.info()["model_url"])
