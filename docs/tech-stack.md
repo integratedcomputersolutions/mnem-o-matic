@@ -51,7 +51,7 @@ There is no shared secret anywhere in the system. People have passwords, agents 
 - **Passwords** are hashed with `hashlib.scrypt` from the standard library (n = 2¹⁵, r = 8, p = 3 — about 32 MiB and 100 ms per hash) in a self-describing PHC-style string, so the parameters can be raised later and old hashes are upgraded on the next successful sign-in. A sign-in always performs exactly one verification — against a dummy hash when the username is unknown — so timing does not reveal valid names.
 - **Sessions and API tokens** are random 256-bit values stored only as SHA-256 hashes; a copy of the database cannot be replayed against the server. Sessions ride in an `HttpOnly`, `SameSite=Strict` cookie; tokens in the `Authorization` header. One pure-ASGI middleware decides, per path, which credential applies (`/mcp`: token; `/api`: session; `/export`: either) and leaves the resolved principal in the request scope for the audit log.
 - **CSRF** is handled without per-form tokens: state-changing API requests must carry an `Origin` matching the `Host`, and the strict cookie never accompanies a cross-site request in the first place.
-- **Brute force** is throttled in memory: per account and per address for passwords, per address for tokens.
+- **Brute force** is throttled in memory: per account and per address for passwords, per address for tokens and the first-run setup code. An "address" is an IPv4 address or an IPv6 /64, since one IPv6 host can pick a new address from its /64 for every request.
 
 The choice of the standard library over bcrypt or argon2 was deliberate — one less compiled dependency in a distroless image, and scrypt at these parameters is in the same class.
 

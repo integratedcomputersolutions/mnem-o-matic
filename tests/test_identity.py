@@ -26,7 +26,7 @@ from mnemomatic.identity import (
     needs_rehash,
     verify_password,
 )
-from mnemomatic.throttle import FailureThrottle
+from mnemomatic.throttle import FailureThrottle, client_key
 
 
 def _fast_scrypt():
@@ -463,6 +463,39 @@ class TestLoginThrottle(unittest.TestCase):
         self.assertEqual(t.retry_after("alice", "ip"), 0)
 
 
+class TestClientKey(unittest.TestCase):
+    def test_ipv4_is_per_address(self):
+        self.assertEqual(client_key("10.0.0.1"), "10.0.0.1")
+
+    def test_ipv6_groups_by_64(self):
+        self.assertEqual(client_key("2001:db8:1:2:aaaa::1"), "2001:db8:1:2::/64")
+        self.assertEqual(client_key("2001:DB8:1:2:ffff:ffff:ffff:ffff"), "2001:db8:1:2::/64")
+        self.assertNotEqual(client_key("2001:db8:1:3::1"), client_key("2001:db8:1:2::1"))
+
+    def test_ipv4_mapped_is_ipv4(self):
+        self.assertEqual(client_key("::ffff:10.0.0.1"), "10.0.0.1")
+
+    def test_unparsable_is_its_own_bucket(self):
+        self.assertEqual(client_key("unknown"), "unknown")
+        self.assertEqual(client_key("testclient"), "testclient")
+
+
+class TestLoginThrottleIPv6(unittest.TestCase):
+    def test_rotating_within_a_64_does_not_reset_the_limit(self):
+        t = LoginThrottle()
+        for i in range(5):
+            t.record_failure("alice", f"2001:db8:0:1::{i + 1:x}")
+        self.assertGreater(t.reserve("alice", "2001:db8:0:1::ffff"), 0)
+        self.assertEqual(t.reserve("alice", "2001:db8:0:2::1"), 0)         # another /64 is not affected
+        t.release("alice", "2001:db8:0:2::1")
+
+    def test_per_ip_window_spans_the_64(self):
+        t = LoginThrottle()
+        for i in range(20):
+            t.record_failure(f"user{i}", f"2001:db8::{i + 1:x}")
+        self.assertGreater(t.retry_after("fresh", "2001:db8::abcd"), 0)
+
+
 class TestThrottleReservation(unittest.TestCase):
     def test_in_flight_attempts_count_against_the_limit(self):
         t = FailureThrottle(max_failures=5, window=900.0, lockout=900.0)
@@ -554,6 +587,11 @@ class TestKnownDevice(IdentityCase):
 
 
 class TestFirstRun(unittest.TestCase):
+    def test_non_ascii_candidate_is_just_wrong(self):
+        fr = FirstRun()
+        fr.issue()
+        self.assertFalse(fr.check("ÅÅÅÅ-ÅÅÅÅ-ÅÅÅÅ"))
+
     def test_issue_check_clear(self):
         fr = FirstRun()
         self.assertFalse(fr.check("ABCD-EFGH-JKMN"))

@@ -17,11 +17,32 @@ otherwise every request in a concurrent burst passes the check before the
 first failure is counted.
 """
 
+import ipaddress
 import threading
 import time
 
 # Prune bookkeeping for idle clients once the table grows past this.
 _MAX_TRACKED_CLIENTS = 1024
+
+
+def client_key(ip: str) -> str:
+    """The throttle bucket for a client address.
+
+    An IPv6 host is usually handed a whole /64 and can pick a fresh address
+    from it for every request, so per-address limits would reset on each
+    one: IPv6 addresses share their /64's bucket. IPv4 (and IPv4-mapped IPv6)
+    stays per address. Anything unparsable ("unknown", a test client name)
+    is its own bucket.
+    """
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return ip
+    if addr.version == 6:
+        if addr.ipv4_mapped:
+            return str(addr.ipv4_mapped)
+        return str(ipaddress.IPv6Network((addr, 64), strict=False))
+    return str(addr)
 
 
 class FailureThrottle:

@@ -144,6 +144,16 @@ class TestThrottling(AuthCase):
         self.assertEqual(resp.json()["error"], "throttled")
         self.assertIn("Retry-After", resp.headers)
 
+    def test_bad_tokens_from_one_ipv6_64_share_a_bucket(self):
+        app = self.client.app
+        for i in range(5):
+            c = TestClient(app, client=(f"2001:db8:0:7::{i + 1:x}", 50000))
+            self.assertEqual(c.get("/mcp", headers=self.bearer("mnm_wrong")).status_code, 403)
+        fresh = TestClient(app, client=("2001:db8:0:7::beef", 50000))
+        self.assertEqual(fresh.get("/mcp", headers=self.bearer(self.fx.admin_token)).status_code, 429)
+        other = TestClient(app, client=("2001:db8:0:8::1", 50000))
+        self.assertEqual(other.get("/mcp", headers=self.bearer(self.fx.admin_token)).status_code, 200)
+
     def test_success_clears_failures(self):
         for _ in range(4):
             self.client.get("/mcp", headers=self.bearer("mnm_wrong"))

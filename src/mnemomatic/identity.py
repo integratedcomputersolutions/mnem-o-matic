@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from mnemomatic.audit import write_event
-from mnemomatic.throttle import FailureThrottle
+from mnemomatic.throttle import FailureThrottle, client_key
 
 logger = logging.getLogger("mnemomatic")
 
@@ -273,6 +273,9 @@ class LoginThrottle:
       a successful sign-in) skip this one, so a distributed attack cannot
       lock the owner out either.
 
+    An "address" is an IPv4 address or an IPv6 /64 (see throttle.client_key),
+    so rotating through one IPv6 allocation does not buy fresh allowances.
+
     Usernames that cannot exist share a single bucket, so junk names neither
     grow the tables nor get a fresh allowance each.
     """
@@ -287,7 +290,7 @@ class LoginThrottle:
         return username if USERNAME_RE.match(username) else "\0invalid"
 
     def _buckets(self, username: str, ip: str, known_device: bool):
-        account = self._account(username)
+        account, ip = self._account(username), client_key(ip)
         buckets = [(self._by_account_ip, f"{account}\0{ip}"), (self._by_ip, ip)]
         if not known_device:
             buckets.append((self._by_account, account))
@@ -317,13 +320,13 @@ class LoginThrottle:
             t.release(key)
 
     def record_failure(self, username: str, ip: str) -> None:
-        account = self._account(username)
+        account, ip = self._account(username), client_key(ip)
         self._by_account_ip.record_failure(f"{account}\0{ip}")
         self._by_ip.record_failure(ip)
         self._by_account.record_failure(account)
 
     def record_success(self, username: str, ip: str) -> None:
-        account = self._account(username)
+        account, ip = self._account(username), client_key(ip)
         self._by_account_ip.record_success(f"{account}\0{ip}")
         self._by_ip.record_success(ip)
         self._by_account.record_success(account)
@@ -349,7 +352,9 @@ class FirstRun:
         if not self.code:
             return False
         normalized = candidate.strip().upper().replace(" ", "")
-        return hmac.compare_digest(normalized, self.code)
+        # Bytes: compare_digest refuses non-ASCII str, which would be a 500
+        # (and an attempt the first-run throttle never counts).
+        return hmac.compare_digest(normalized.encode(), self.code.encode())
 
     def clear(self) -> None:
         self.code = None
