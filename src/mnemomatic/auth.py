@@ -49,6 +49,11 @@ PASSWORD_GATE_EXEMPT = frozenset({"/api/password", "/api/logout", "/api/session"
 
 _BEARER_FORMAT = "Required format: 'Authorization: Bearer <token>'"
 
+_PASSWORD_CHANGE_REQUIRED = (403, {
+    "error": "password_change_required",
+    "details": "Choose a new password before doing anything else.",
+})
+
 
 def classify(method: str, path: str) -> str:
     """Which credential a path takes: public, bearer, session, or any."""
@@ -141,6 +146,12 @@ class AuthMiddleware:
                         "details": "Sign in, or send 'Authorization: Bearer <token>'.",
                     })
                     return
+                # A browser still on an admin-issued temporary password gets
+                # nothing until it picks its own, the whole-store download
+                # included. Tokens are the owner's and outlive a reset.
+                if principal.user.must_change_password:
+                    await _send_json(send, *_PASSWORD_CHANGE_REQUIRED)
+                    return
         else:  # session
             principal = self._from_cookie(scope, headers)
             if principal is None:
@@ -148,10 +159,7 @@ class AuthMiddleware:
                 await _send_json(send, 401, {"error": "unauthenticated", "details": "Sign in first."})
                 return
             if principal.user.must_change_password and path not in PASSWORD_GATE_EXEMPT:
-                await _send_json(send, 403, {
-                    "error": "password_change_required",
-                    "details": "Choose a new password before doing anything else.",
-                })
+                await _send_json(send, *_PASSWORD_CHANGE_REQUIRED)
                 return
 
         scope.setdefault("state", {})["principal"] = principal

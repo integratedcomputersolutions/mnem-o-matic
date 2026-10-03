@@ -227,6 +227,22 @@ class TestExportTakesEither(AuthCase):
         self.assertEqual(resp.status_code, 401)
         self.assertEqual(resp.json()["error"], "unauthenticated")
 
+    def test_temporary_password_session_cannot_export(self):
+        user, temp = self.fx.identity.create_user("newbie")
+        cookies = {COOKIE_NAME: self.fx.session_for(user)}
+        resp = self.client.get("/export", cookies=cookies)
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(resp.json()["error"], "password_change_required")
+        self.fx.identity.change_password(user.id, temp, "a proper password now", keep_session=cookies[COOKIE_NAME])
+        self.assertEqual(self.client.get("/export", cookies=cookies).status_code, 200)
+
+    def test_token_still_exports_after_a_reset(self):
+        # A reset forces the browser through a password change, but the
+        # owner's tokens keep working (agents should not silently break).
+        self.fx.identity.reset_password(self.fx.user.id, acting_user_id=self.fx.admin.id)
+        body = self.client.get("/export", headers=self.bearer(self.fx.user_token)).json()
+        self.assertEqual((body["user"], body["via"]), ("alice", "token"))
+
     def test_bad_token_beats_good_cookie(self):
         # A presented Authorization header is judged on its own merits.
         resp = self.client.get("/export", headers=self.bearer("mnm_bad"), cookies=self.cookie(self.fx.admin))
