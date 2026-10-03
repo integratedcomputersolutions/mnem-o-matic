@@ -486,6 +486,15 @@ class TestStoreViews(ApiCase):
         self.assertEqual([r["id"] for r in body["results"]], [self.doc.id])
         self.assertEqual(self.fx.db.get_document(self.doc.id).retrieval_count, 0)
 
+    def test_audit_hides_other_peoples_ip_from_non_admins(self):
+        self.fx.db.append_audit("store", item_type="note", item_id="a", actor="admin", ip="10.0.0.1", client="curl/8")
+        self.fx.db.append_audit("store", item_type="note", item_id="b", actor="alice", ip="10.0.0.2", client="firefox")
+        rows = {e["actor"]: e for e in self.client.get("/api/audit?op=store", cookies=self.user()).json()["events"]}
+        self.assertEqual((rows["admin"]["ip"], rows["admin"]["client"]), (None, None))
+        self.assertEqual((rows["alice"]["ip"], rows["alice"]["client"]), ("10.0.0.2", "firefox"))
+        rows = {e["actor"]: e for e in self.client.get("/api/audit?op=store", cookies=self.admin()).json()["events"]}
+        self.assertEqual(rows["alice"]["ip"], "10.0.0.2")
+
     def test_audit_listing(self):
         self.post("/api/login", {"username": "admin", "password": IdentityFixture.ADMIN_PASSWORD})
         # Only the login's audit row is wanted; its cookie would arrive next to

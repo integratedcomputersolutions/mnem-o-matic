@@ -490,10 +490,12 @@ def build_api_routes(*, identity, db_getter, settings_info, first_run: FirstRun,
         limit = _int_param(request, "limit", 50, 1, config.MAX_LIST_LIMIT)
         offset = _int_param(request, "offset", 0, 0, 10_000_000)
         filters = {k: (q.get(k) or None) for k in ("item_type", "item_id", "namespace", "op", "actor")}
-        filters["content_only"] = not _principal(request).user.is_admin
+        user = _principal(request).user
+        filters["content_only"] = not user.is_admin
         db = db_getter()
         try:
-            events = db.list_audit(**filters, limit=limit, offset=offset)
+            events = db.list_audit(**filters, limit=limit, offset=offset,
+                                   viewer=None if user.is_admin else user.username)
             total = db.count_audit(**filters)
         except ValueError as e:
             raise ApiError("invalid_filter", 400, str(e))

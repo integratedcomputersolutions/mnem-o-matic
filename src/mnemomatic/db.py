@@ -1132,12 +1132,16 @@ class Database:
     def list_audit(self, item_type: str | None = None, item_id: str | None = None,
                    namespace: str | None = None, op: str | None = None,
                    actor: str | None = None, limit: int = 50, offset: int = 0,
-                   content_only: bool = False) -> list[dict]:
+                   content_only: bool = False, viewer: str | None = None) -> list[dict]:
         """Audit events, newest first, with optional filters. detail is parsed JSON.
 
         content_only drops identity events (sign-ins, users, tokens, HTTPS):
         what non-admins see, since those rows carry other people's addresses
-        and failed sign-in names."""
+        and failed sign-in names.
+
+        viewer, when given, is the username a non-admin is reading as: the
+        rows they did not make come back without ip and client, so the trail
+        still says who did what, but not from where or on what device."""
         where, params = self._audit_where(item_type, item_id, namespace, op, actor, content_only)
         rows = self._get_conn().execute(
             f"SELECT * FROM audit_log{where} ORDER BY id DESC LIMIT ? OFFSET ?",
@@ -1146,6 +1150,8 @@ class Database:
         for row in rows:
             if row["detail"]:
                 row["detail"] = _safe_json_loads(row["detail"], None, f"audit {row['id']}")
+            if viewer is not None and row["actor"] != viewer:
+                row["ip"] = row["client"] = None
         return rows
 
     def count_audit(self, item_type: str | None = None, item_id: str | None = None,
