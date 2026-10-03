@@ -146,7 +146,8 @@ Check its SHA-256 fingerprint before trusting it:<code class=fp>{fp}</code>
 <h2>Firefox</h2><p>Firefox keeps its own store: Settings → Privacy &amp; Security → Certificates → View Certificates → Authorities → Import.</p>
 <h2>Tools that ignore the system store</h2>
 <pre>export NODE_EXTRA_CA_CERTS=$PWD/mnemomatic-ca.crt     # Claude Code, Claude Desktop, Cursor, other Node apps
-export SSL_CERT_FILE=$PWD/mnemomatic-ca.crt           # Python, including mnemomatic-cli (or --ca-cert)
+export MNEMOMATIC_CA_CERT=$PWD/mnemomatic-ca.crt      # mnemomatic-cli (adds to the system store)
+export SSL_CERT_FILE=$PWD/mnemomatic-ca.crt           # other Python tools (replaces the system store)
 export REQUESTS_CA_BUNDLE=$PWD/mnemomatic-ca.crt      # Python requests
 curl --cacert mnemomatic-ca.crt {url}/health</pre></div>
 <div class=card><b>3. Switch your clients</b><br>Point them at <code>{url}/mcp</code>. Tokens are unchanged; only the URL moves.</div>
