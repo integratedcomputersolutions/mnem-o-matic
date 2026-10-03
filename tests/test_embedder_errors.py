@@ -30,7 +30,7 @@ class TestHttpEmbedderErrors(unittest.TestCase):
 
     def test_http_embedder_network_unreachable(self):
         """Network error (URLError) should be caught and re-raised as RuntimeError."""
-        with patch("urllib.request.urlopen") as mock_urlopen:
+        with patch("mnemomatic.embeddings._opener.open") as mock_urlopen:
             mock_urlopen.side_effect = urllib.error.URLError("Connection refused")
 
             with self.assertRaises(RuntimeError) as cm:
@@ -41,7 +41,7 @@ class TestHttpEmbedderErrors(unittest.TestCase):
 
     def test_http_embedder_timeout(self):
         """Socket timeout should be caught and re-raised as RuntimeError."""
-        with patch("urllib.request.urlopen") as mock_urlopen:
+        with patch("mnemomatic.embeddings._opener.open") as mock_urlopen:
             mock_urlopen.side_effect = socket.timeout()
 
             with self.assertRaises(RuntimeError) as cm:
@@ -51,7 +51,7 @@ class TestHttpEmbedderErrors(unittest.TestCase):
 
     def test_http_embedder_http_error(self):
         """HTTP error (e.g. 500) should be caught and re-raised as RuntimeError."""
-        with patch("urllib.request.urlopen") as mock_urlopen:
+        with patch("mnemomatic.embeddings._opener.open") as mock_urlopen:
             http_error = urllib.error.HTTPError(
                 url="http://localhost:11434/api/embeddings",
                 code=500,
@@ -68,7 +68,7 @@ class TestHttpEmbedderErrors(unittest.TestCase):
 
     def test_http_embedder_invalid_json(self):
         """Invalid JSON in response should be caught and re-raised as RuntimeError."""
-        with patch("urllib.request.urlopen") as mock_urlopen:
+        with patch("mnemomatic.embeddings._opener.open") as mock_urlopen:
             mock_resp = MagicMock()
             mock_resp.read.return_value = b"not valid json"
             mock_resp.__enter__.return_value = mock_resp
@@ -82,7 +82,7 @@ class TestHttpEmbedderErrors(unittest.TestCase):
 
     def test_http_embedder_missing_embedding_field(self):
         """Missing 'embedding' field in response should raise RuntimeError."""
-        with patch("urllib.request.urlopen") as mock_urlopen:
+        with patch("mnemomatic.embeddings._opener.open") as mock_urlopen:
             mock_resp = MagicMock()
             mock_resp.read.return_value = json.dumps({"result": "something"}).encode()
             mock_resp.__enter__.return_value = mock_resp
@@ -96,7 +96,7 @@ class TestHttpEmbedderErrors(unittest.TestCase):
 
     def test_http_embedder_embedding_not_list(self):
         """Embedding field that is not a list should raise RuntimeError."""
-        with patch("urllib.request.urlopen") as mock_urlopen:
+        with patch("mnemomatic.embeddings._opener.open") as mock_urlopen:
             mock_resp = MagicMock()
             mock_resp.read.return_value = json.dumps({"embedding": "not a list"}).encode()
             mock_resp.__enter__.return_value = mock_resp
@@ -110,7 +110,7 @@ class TestHttpEmbedderErrors(unittest.TestCase):
 
     def test_http_embedder_success(self):
         """Successful embedding request should return the (normalized) vector."""
-        with patch("urllib.request.urlopen") as mock_urlopen:
+        with patch("mnemomatic.embeddings._opener.open") as mock_urlopen:
             embedding = [0.6, 0.8]  # already unit length → passes through unchanged
             mock_resp = MagicMock()
             mock_resp.read.return_value = json.dumps({"embedding": embedding}).encode()
@@ -123,7 +123,7 @@ class TestHttpEmbedderErrors(unittest.TestCase):
 
     def test_http_embedder_normalizes_unnormalized_vectors(self):
         """External models may return non-unit vectors; scoring assumes unit."""
-        with patch("urllib.request.urlopen") as mock_urlopen:
+        with patch("mnemomatic.embeddings._opener.open") as mock_urlopen:
             mock_resp = MagicMock()
             mock_resp.read.return_value = json.dumps({"embedding": [3.0, 4.0]}).encode()
             mock_resp.__enter__.return_value = mock_resp
@@ -136,7 +136,7 @@ class TestHttpEmbedderErrors(unittest.TestCase):
 
     def test_http_embedder_zero_vector_rejected(self):
         """A zero vector is a broken embedding and must not be stored."""
-        with patch("urllib.request.urlopen") as mock_urlopen:
+        with patch("mnemomatic.embeddings._opener.open") as mock_urlopen:
             mock_resp = MagicMock()
             mock_resp.read.return_value = json.dumps({"embedding": [0.0, 0.0]}).encode()
             mock_resp.__enter__.return_value = mock_resp
@@ -149,7 +149,7 @@ class TestHttpEmbedderErrors(unittest.TestCase):
 
     def test_http_embedder_non_numeric_vector_rejected(self):
         """Non-numeric elements previously slipped through to the DB layer."""
-        with patch("urllib.request.urlopen") as mock_urlopen:
+        with patch("mnemomatic.embeddings._opener.open") as mock_urlopen:
             mock_resp = MagicMock()
             mock_resp.read.return_value = json.dumps({"embedding": ["a", "b"]}).encode()
             mock_resp.__enter__.return_value = mock_resp
@@ -169,7 +169,7 @@ class TestHttpEmbedderErrors(unittest.TestCase):
 
     def test_http_embedder_caching(self):
         """Same text should be cached (second call shouldn't hit network)."""
-        with patch("urllib.request.urlopen") as mock_urlopen:
+        with patch("mnemomatic.embeddings._opener.open") as mock_urlopen:
             embedding = [0.6, 0.8]
             mock_resp = MagicMock()
             mock_resp.read.return_value = json.dumps({"embedding": embedding}).encode()
@@ -274,7 +274,7 @@ class TestHttpEmbedderBatch(unittest.TestCase):
 
     def test_batch_preserves_order(self):
         texts = ["a", "bb", "ccc", "dddd"]
-        with patch("urllib.request.urlopen", side_effect=_mock_embedding_response):
+        with patch("mnemomatic.embeddings._opener.open", side_effect=_mock_embedding_response):
             results = self.embedder.embed_batch(texts)
         # Each embedding encodes its prompt's length as [len, 0.5]; the vectors
         # are normalized on return, but the component ratio (2·len) survives.
@@ -286,7 +286,7 @@ class TestHttpEmbedderBatch(unittest.TestCase):
                 raise urllib.error.URLError("boom")
             return _mock_embedding_response(req)
 
-        with patch("urllib.request.urlopen", side_effect=flaky):
+        with patch("mnemomatic.embeddings._opener.open", side_effect=flaky):
             results = self.embedder.embed_batch(["ok", "bad", "fine"])
         self.assertIsNotNone(results[0])
         self.assertIsNone(results[1])
@@ -297,7 +297,7 @@ class TestHttpEmbedderBatch(unittest.TestCase):
 
     def test_batch_uses_embed_cache(self):
         # Duplicate texts hit the lru_cache; the network sees each text once.
-        with patch("urllib.request.urlopen", side_effect=_mock_embedding_response) as mock_urlopen:
+        with patch("mnemomatic.embeddings._opener.open", side_effect=_mock_embedding_response) as mock_urlopen:
             self.embedder.embed_batch(["same", "same", "same"])
         self.assertEqual(mock_urlopen.call_count, 1)
 
@@ -309,7 +309,7 @@ class TestHttpEmbedderBatch(unittest.TestCase):
             return _mock_embedding_response(req)
 
         texts = [f"text {i}" for i in range(8)]
-        with patch("urllib.request.urlopen", side_effect=slow):
+        with patch("mnemomatic.embeddings._opener.open", side_effect=slow):
             start = time.perf_counter()
             results = self.embedder.embed_batch(texts)
             elapsed = time.perf_counter() - start
@@ -335,14 +335,14 @@ class TestOpenAIWireFormat(unittest.TestCase):
         self.assertEqual(self.embedder.mode, "external HTTP (openai)")
 
     def test_request_body_uses_input_field(self):
-        with patch("urllib.request.urlopen") as mock_urlopen:
+        with patch("mnemomatic.embeddings._opener.open") as mock_urlopen:
             mock_urlopen.return_value = self._respond({"data": [{"embedding": [0.6, 0.8]}]})
             self.embedder.embed("hello")
         sent = json.loads(mock_urlopen.call_args[0][0].data)
         self.assertEqual(sent, {"model": "embeddinggemma", "input": "hello"})
 
     def test_response_parsed_and_normalized(self):
-        with patch("urllib.request.urlopen") as mock_urlopen:
+        with patch("mnemomatic.embeddings._opener.open") as mock_urlopen:
             mock_urlopen.return_value = self._respond(
                 {"object": "list", "data": [{"object": "embedding", "index": 0, "embedding": [3.0, 4.0]}]}
             )
@@ -351,14 +351,14 @@ class TestOpenAIWireFormat(unittest.TestCase):
         self.assertAlmostEqual(result[1], 0.8, places=9)
 
     def test_missing_data_field_raises(self):
-        with patch("urllib.request.urlopen") as mock_urlopen:
+        with patch("mnemomatic.embeddings._opener.open") as mock_urlopen:
             mock_urlopen.return_value = self._respond({"embedding": [0.6, 0.8]})  # ollama shape
             with self.assertRaises(RuntimeError) as cm:
                 self.embedder.embed("hello")
         self.assertIn("data[0].embedding", str(cm.exception))
 
     def test_empty_data_list_raises(self):
-        with patch("urllib.request.urlopen") as mock_urlopen:
+        with patch("mnemomatic.embeddings._opener.open") as mock_urlopen:
             mock_urlopen.return_value = self._respond({"data": []})
             with self.assertRaises(RuntimeError) as cm:
                 self.embedder.embed("hello")

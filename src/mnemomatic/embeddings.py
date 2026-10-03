@@ -5,6 +5,7 @@ import math
 import os
 import socket
 import urllib.error
+import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
@@ -37,6 +38,34 @@ EMBED_CONCURRENCY = int(os.environ.get("MNEMOMATIC_EMBED_CONCURRENCY", "8"))
 # Wire format of the embedding endpoint: "openai" (llama.cpp, vLLM, LM Studio,
 # Ollama's /v1/embeddings, hosted APIs) or "ollama" (native /api/embeddings).
 EMBED_API = os.environ.get("MNEMOMATIC_EMBED_API", "openai").strip().lower()
+# Sent as "Authorization: Bearer <key>" to the embedding endpoint, so a hosted
+# API's key need not live in MNEMOMATIC_EMBED_URL, which users can see.
+EMBED_API_KEY = os.environ.get("MNEMOMATIC_EMBED_API_KEY", "").strip()
+
+
+def redact_url(url: str) -> str:
+    """The endpoint URL fit to show: no user:password@ and no query string or
+    fragment, which is where hosted APIs' keys end up when there is no other
+    place to put them."""
+    parts = urllib.parse.urlsplit(url)
+    netloc = parts.hostname or ""
+    if ":" in netloc:
+        netloc = f"[{netloc}]"          # IPv6 literal
+    if parts.port:
+        netloc += f":{parts.port}"
+    redacted = urllib.parse.urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+    return redacted + ("?…" if parts.query else "")
+
+
+class _NoRedirects(urllib.request.HTTPRedirectHandler):
+    """An embedding API has no reason to redirect, and urllib would carry the
+    Authorization header (the API key) to wherever it points."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_opener = urllib.request.build_opener(_NoRedirects())
 
 
 def _l2_normalize(vec: list[float]) -> list[float]:
@@ -163,7 +192,7 @@ class HttpEmbedder:
       Ollama's native /api/embeddings endpoint.
     """
 
-    def __init__(self, url: str, model: str = "", api: str | None = None):
+    def __init__(self, url: str, model: str = "", api: str | None = None, api_key: str | None = None):
         if not url:
             raise ValueError("MNEMOMATIC_EMBED_URL must be set and non-empty")
         self.api = (api or EMBED_API)
@@ -172,6 +201,9 @@ class HttpEmbedder:
                 f"MNEMOMATIC_EMBED_API must be 'openai' or 'ollama', got {self.api!r}"
             )
         self.url = url
+        # What logs, errors, and the settings page show instead of `url`.
+        self.display_url = redact_url(url)
+        self.api_key = EMBED_API_KEY if api_key is None else api_key
         self.model = model
         self.embed = functools.lru_cache(maxsize=256)(self._embed)
 
@@ -181,12 +213,12 @@ class HttpEmbedder:
             logger.warning(
                 "MNEMOMATIC_EMBED_API=openai but the URL looks like Ollama's native "
                 "endpoint (%s). Set MNEMOMATIC_EMBED_API=ollama, or point the URL at "
-                "the OpenAI-compatible /v1/embeddings.", url,
+                "the OpenAI-compatible /v1/embeddings.", self.display_url,
             )
         elif self.api == "ollama" and "/v1/embeddings" in url:
             logger.warning(
                 "MNEMOMATIC_EMBED_API=ollama but the URL looks OpenAI-compatible (%s). "
-                "Set MNEMOMATIC_EMBED_API=openai, or point the URL at /api/embeddings.", url,
+                "Set MNEMOMATIC_EMBED_API=openai, or point the URL at /api/embeddings.", self.display_url,
             )
 
     @property
@@ -229,38 +261,38 @@ class HttpEmbedder:
         else:
             body = {"model": self.model, "prompt": text}
         payload = json.dumps(body).encode()
-        req = urllib.request.Request(
-            self.url,
-            data=payload,
-            headers={"Content-Type": "application/json"},
-        )
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        req = urllib.request.Request(self.url, data=payload, headers=headers)
 
         # Failures raise without logging here: the caller (runtime._safe_embed,
         # embed_batch) logs the RuntimeError, so its text carries every detail.
         try:
-            with urllib.request.urlopen(req, timeout=EMBED_TIMEOUT) as resp:
+            with _opener.open(req, timeout=EMBED_TIMEOUT) as resp:
                 response_data = resp.read()
         except urllib.error.HTTPError as e:
             raise RuntimeError(
-                f"Embedding service returned HTTP {e.code} at {self.url}"
+                f"Embedding service returned HTTP {e.code} at {self.display_url}"
             )
         except urllib.error.URLError as e:
             raise RuntimeError(
-                f"Cannot reach embedding service at {self.url}: {e.reason}"
+                f"Cannot reach embedding service at {self.display_url}: {e.reason}"
             )
         except socket.timeout:
             raise RuntimeError(
-                f"Embedding service at {self.url} did not respond within {EMBED_TIMEOUT}s"
+                f"Embedding service at {self.display_url} did not respond within {EMBED_TIMEOUT}s"
             )
         except Exception as e:
-            raise RuntimeError(f"Failed to contact embedding service: {type(e).__name__}: {e}")
+            # Exception text (an InvalidURL, say) can quote the raw URL.
+            raise RuntimeError(f"Failed to contact embedding service at {self.display_url}: {type(e).__name__}")
 
         # Parse response
         try:
             data = json.loads(response_data)
         except json.JSONDecodeError as e:
             raise RuntimeError(
-                f"Embedding service at {self.url} returned invalid JSON: {e} "
+                f"Embedding service at {self.display_url} returned invalid JSON: {e} "
                 f"(first 200 bytes: {response_data[:200]!r})"
             )
 

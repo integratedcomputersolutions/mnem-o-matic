@@ -277,7 +277,7 @@ services:
       - MNEMOMATIC_EMBED_DIM=768
 ```
 
-Any OpenAI-compatible embedding endpoint works the same way — Ollama's `/v1/embeddings` (shown above), llama.cpp's `llama-server --embeddings`, vLLM, or LM Studio. For Ollama's native `/api/embeddings` endpoint, add `MNEMOMATIC_EMBED_API=ollama`.
+Any OpenAI-compatible embedding endpoint works the same way — Ollama's `/v1/embeddings` (shown above), llama.cpp's `llama-server --embeddings`, vLLM, or LM Studio. For Ollama's native `/api/embeddings` endpoint, add `MNEMOMATIC_EMBED_API=ollama`. A hosted API that needs a key takes it in `MNEMOMATIC_EMBED_API_KEY` (sent as a bearer token), never in the URL.
 
 ### Available image tags
 
@@ -454,7 +454,8 @@ Environment variables (set in `docker-compose.yml` or passed to Docker):
 | `MNEMOMATIC_REVISIONS_KEEP` | `10`                        | Prior versions retained per item (captured on update/delete) for the `restore` tool. `0` disables revision capture. |
 | `MNEMOMATIC_SIMILAR_THRESHOLD` | `0.8`                    | Cosine similarity at which stored items count as near-duplicates (`similar` field on store responses, `consolidation_report` clustering). `0` disables the store-time check. |
 | `MNEMOMATIC_AUDIT_KEEP_DAYS` | `730`                      | Audit-log retention in days; older events are pruned as new ones are appended. `0` keeps the trail forever. |
-| `MNEMOMATIC_EMBED_URL`      | *(unset)*                   | External embedding endpoint (takes priority over the built-in model) |
+| `MNEMOMATIC_EMBED_URL`      | *(unset)*                   | External embedding endpoint (takes priority over the built-in model). Shown to every signed-in user on the settings page with any `user:password@` and query string removed — put API keys in `MNEMOMATIC_EMBED_API_KEY`, not here. |
+| `MNEMOMATIC_EMBED_API_KEY`  | *(unset)*                   | Sent to the external embedder as `Authorization: Bearer <key>` (hosted OpenAI-compatible APIs). Never shown in the UI or logs. Redirects from the endpoint are not followed, so the key cannot be carried to another host. |
 | `MNEMOMATIC_EMBED_API`      | `openai`                    | Endpoint wire format: `openai` (llama.cpp, vLLM, LM Studio, Ollama `/v1/embeddings`) or `ollama` (native `/api/embeddings`) |
 | `MNEMOMATIC_EMBED_MODEL`    | *(empty)*                   | Model name passed to the external embedder               |
 | `MNEMOMATIC_EMBED_CONCURRENCY` | `8`                      | Parallel requests to the external embedder when embedding chunked documents |

@@ -102,7 +102,7 @@ def _settings_info() -> dict:
     running Database actually used (tests patch it there).
     """
     from mnemomatic import db as db_module
-    from mnemomatic.embeddings import EMBED_API, MODEL_MAX_TOKENS
+    from mnemomatic.embeddings import EMBED_API, MODEL_MAX_TOKENS, redact_url
 
     embedder = runtime._embedder()
     model_name = config.embed_identity()["embed_model"] or None
@@ -121,7 +121,8 @@ def _settings_info() -> dict:
         "chunk_overlap": CHUNK_OVERLAP,
     }
     if config.EMBED_URL:
-        info["endpoint_url"] = config.EMBED_URL
+        # Every signed-in user sees this; credentials stay with the operator.
+        info["endpoint_url"] = redact_url(config.EMBED_URL)
         info["wire_api"] = EMBED_API
     else:
         info["max_tokens"] = MODEL_MAX_TOKENS
