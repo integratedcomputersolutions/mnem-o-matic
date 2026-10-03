@@ -13,7 +13,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from mnemomatic_cli._mcp_client import MCPClient, _describe_http_error
+from mnemomatic_cli._mcp_client import MCPClient, _describe_http_error, _open
 
 _DEFAULT_URL = "http://localhost:8000"
 _DEFAULT_MODE = "hybrid"
@@ -219,7 +219,7 @@ def _cmd_export(args, server_url: str, token: str, ssl_context=None) -> None:
     if token:
         req.add_header("Authorization", f"Bearer {token}")
     try:
-        with urllib.request.urlopen(req, timeout=300, context=ssl_context) as resp:
+        with _open(req, timeout=300, ssl_context=ssl_context) as resp:
             data = resp.read()
             disposition = resp.headers.get("Content-Disposition", "")
     except urllib.error.HTTPError as exc:

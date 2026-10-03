@@ -19,6 +19,34 @@ _HEADERS = {
 }
 
 
+def _origin(url: str) -> tuple[str, str, int | None]:
+    parts = urllib.parse.urlsplit(url)
+    scheme = parts.scheme.lower()
+    return scheme, (parts.hostname or "").lower(), parts.port or {"http": 80, "https": 443}.get(scheme)
+
+
+class _SameOriginRedirects(urllib.request.HTTPRedirectHandler):
+    """Follow a redirect only within the origin the request went to.
+
+    urllib's own handler copies every header but Content-* to wherever the
+    server points, whatever the host or scheme, so a proxy or a mistyped URL
+    answering 30x would receive the bearer token. Returning None makes
+    urllib raise the HTTPError instead; _describe_http_error says where the
+    server tried to send us."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if _origin(newurl) != _origin(req.full_url):
+            return None
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _open(req: urllib.request.Request, *, timeout: float, ssl_context=None):
+    """urlopen for requests that carry the token: same-origin redirects only."""
+    opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ssl_context),
+                                         _SameOriginRedirects())
+    return opener.open(req, timeout=timeout)
+
+
 def _describe_http_error(exc: urllib.error.HTTPError) -> str:
     """One line a person can act on. The server's JSON error carries a code
     and a sentence of details (and, when plain HTTP is closed, the HTTPS URL
@@ -29,6 +57,10 @@ def _describe_http_error(exc: urllib.error.HTTPError) -> str:
     except Exception:
         pass
     code, details = body.get("error"), body.get("details")
+    if 300 <= exc.code < 400 and exc.headers.get("Location"):
+        target = urllib.parse.urljoin(exc.url, exc.headers["Location"])
+        return (f"Server redirected to {target} — not following it with your token. "
+                f"If that address is right, use it as the server URL")
     if code == "https_required":
         return f"Plain HTTP is closed on this server — use {body.get('https_url') or 'the HTTPS URL'} instead"
     if exc.code in (401, 403):
@@ -61,7 +93,7 @@ class MCPClient:
         data = json.dumps(payload).encode()
         req = urllib.request.Request(self.base_url, data=data, headers=headers)
         try:
-            resp = urllib.request.urlopen(req, timeout=30, context=self._ssl_context)
+            resp = _open(req, timeout=30, ssl_context=self._ssl_context)
         except urllib.error.HTTPError as exc:
             raise RuntimeError(_describe_http_error(exc)) from exc
         except OSError as exc:
