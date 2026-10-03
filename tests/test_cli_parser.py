@@ -248,5 +248,48 @@ class TestExport(_CLITestCase):
                          ("ns", "out/", "http://h:1", "t", None))
 
 
+
+class TestServerUrlScheme(_CLITestCase):
+    def test_non_http_schemes_refused_for_every_command(self):
+        # export went straight to urlopen, which reads file:// and fetches ftp://.
+        for argv in (("export", "-o", "-"), ("search", "x")):
+            for url in ("file:///etc/passwd", "ftp://host/x"):
+                with self.subTest(argv=argv[0], url=url), \
+                        mock.patch.object(cli, "_err", side_effect=SystemExit) as err, \
+                        mock.patch.object(cli, "_cmd_export") as export:
+                    with self.assertRaises(SystemExit):
+                        self.run_cli("--server-url", url, *argv)
+                    self.assertIn("Unsupported URL scheme", err.call_args.args[0])
+                    export.assert_not_called()
+                    cli.MCPClient.assert_not_called()
+
+
+class TestCaCert(unittest.TestCase):
+    def test_adds_to_the_system_store_rather_than_replacing_it(self):
+        # create_default_context(cafile=...) skips the system store entirely.
+        real = cli.ssl.create_default_context
+        calls = []
+
+        def spy(*a, **kw):
+            calls.append(kw)
+            return real(*a, **kw)
+
+        with mock.patch.object(cli.ssl, "create_default_context", side_effect=spy), \
+                mock.patch.object(cli.ssl.SSLContext, "load_verify_locations") as load:
+            ctx = cli._ssl_context("/path/to/ca.crt")
+        self.assertEqual(calls, [{}])                       # system store loaded
+        load.assert_called_once_with(cafile="/path/to/ca.crt")
+        self.assertIsInstance(ctx, cli.ssl.SSLContext)
+
+    def test_unreadable_ca_is_reported(self):
+        with mock.patch.object(cli, "_err", side_effect=SystemExit) as err:
+            with self.assertRaises(SystemExit):
+                cli._ssl_context("/nonexistent/ca.crt")
+        self.assertIn("cannot load CA certificate /nonexistent/ca.crt", err.call_args.args[0])
+
+    def test_no_ca_means_default_context(self):
+        self.assertIsNone(cli._ssl_context(None))
+
+
 if __name__ == "__main__":
     unittest.main()

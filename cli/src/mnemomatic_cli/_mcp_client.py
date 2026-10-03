@@ -19,6 +19,14 @@ _HEADERS = {
 }
 
 
+def _check_scheme(url: str) -> None:
+    """Only http and https: urllib would otherwise happily read file:// or
+    fetch ftp:// with the token in hand."""
+    scheme = urllib.parse.urlparse(url).scheme
+    if scheme not in ("http", "https"):
+        raise ValueError(f"Unsupported URL scheme {scheme!r} — use http or https")
+
+
 def _origin(url: str) -> tuple[str, str, int | None]:
     parts = urllib.parse.urlsplit(url)
     scheme = parts.scheme.lower()
@@ -74,9 +82,7 @@ class MCPClient:
 
     def __init__(self, base_url: str = "http://localhost:8000/mcp", api_key: str = "",
                  ssl_context=None):
-        scheme = urllib.parse.urlparse(base_url).scheme
-        if scheme not in ("http", "https"):
-            raise ValueError(f"Unsupported URL scheme {scheme!r} — use http or https")
+        _check_scheme(base_url)
         self.base_url = base_url
         self.api_key = api_key
         self._ssl_context = ssl_context
