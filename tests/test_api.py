@@ -61,6 +61,16 @@ class ApiCase(unittest.TestCase):
     def events(self, op):
         return self.fx.db.list_audit(op=op)
 
+    def burst(self, path, body, n, cookies=None):
+        """Send `n` identical POSTs concurrently; returns the status codes."""
+        async def go():
+            transport = httpx.ASGITransport(app=self.client.app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://testserver",
+                                         headers=self.ORIGIN, cookies=cookies) as c:
+                resps = await asyncio.gather(*(c.post(path, json=body) for _ in range(n)))
+            return [r.status_code for r in resps]
+        return asyncio.run(go())
+
 
 class TestConventions(ApiCase):
     def test_no_store_and_security_headers(self):
@@ -200,16 +210,6 @@ class TestSessionAndLogin(ApiCase):
         resp = self.post("/api/login", {"username": "alice", "password": IdentityFixture.USER_PASSWORD})
         self.assertEqual(resp.status_code, 200)
 
-    def burst(self, path, body, n, cookies=None):
-        """Send `n` identical POSTs concurrently; returns the status codes."""
-        async def go():
-            transport = httpx.ASGITransport(app=self.client.app)
-            async with httpx.AsyncClient(transport=transport, base_url="http://testserver",
-                                         headers=self.ORIGIN, cookies=cookies) as c:
-                resps = await asyncio.gather(*(c.post(path, json=body) for _ in range(n)))
-            return [r.status_code for r in resps]
-        return asyncio.run(go())
-
     def test_login_throttle_holds_under_concurrency(self):
         codes = self.burst("/api/login", {"username": "admin", "password": "nope"}, 60)
         self.assertEqual(codes.count(401), 5)
@@ -313,6 +313,43 @@ class TestFirstRun(ApiCase):
         for _ in range(10):
             self.post("/api/first-run", body)
         self.assertEqual(len(self.events("auth.first_run_failed")), 5)
+
+    def test_concurrent_first_runs_create_exactly_one_admin(self):
+        # The setup code stays valid until the first request finishes, so a
+        # burst used to pass the empty-table check together and make several.
+        self._empty()
+        code = self.first_run.issue()
+        async def go():
+            transport = httpx.ASGITransport(app=self.client.app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://testserver",
+                                         headers=self.ORIGIN) as c:
+                return await asyncio.gather(*(c.post("/api/first-run", json={
+                    "setup_code": code, "username": "matt", "password": "a long enough password"})
+                    for _ in range(8)))
+        resps = asyncio.run(go())
+        self.assertEqual(sorted(r.status_code for r in resps), [201] + [409] * 7)
+        # "already set up", not a confusing "user matt already exists".
+        self.assertEqual({r.json()["error"] for r in resps if r.status_code == 409}, {"already_set_up"})
+        self.assertEqual(self.fx.identity.count_users(), 1)
+        self.assertEqual(len(self.events("admin.created")), 1)
+
+    def test_concurrent_first_runs_with_different_names(self):
+        # Different usernames dodge the UNIQUE constraint; only the
+        # in-transaction emptiness check stops a second admin.
+        self._empty()
+        code = self.first_run.issue()
+
+        async def go():
+            transport = httpx.ASGITransport(app=self.client.app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://testserver",
+                                         headers=self.ORIGIN) as c:
+                return await asyncio.gather(*(c.post("/api/first-run", json={
+                    "setup_code": code, "username": f"admin{i}", "password": "a long enough password"})
+                    for i in range(8)))
+        resps = asyncio.run(go())
+        self.assertEqual(sorted(r.status_code for r in resps), [201] + [409] * 7)
+        self.assertEqual({r.json()["error"] for r in resps if r.status_code == 409}, {"already_set_up"})
+        self.assertEqual(self.fx.identity.count_users(), 1)
 
     def test_non_ascii_code_is_refused_not_a_500(self):
         self._empty()

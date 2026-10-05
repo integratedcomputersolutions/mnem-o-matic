@@ -406,10 +406,15 @@ class Identity:
         return [{**_row_to_user(r).public(), "token_count": r["token_count"]} for r in rows]
 
     def create_user(self, username: str, *, role: str = "user", display_name: str = "",
-                    password: str | None = None) -> tuple[User, str | None]:
+                    password: str | None = None, only_if_no_users: bool = False) -> tuple[User, str | None]:
         """Create a user. With a password given, it is set outright; without
         one, a temporary password is generated and returned, and the user must
         choose a new one within TEMP_PASSWORD_TTL on their first login.
+
+        only_if_no_users makes this the first user or nothing: the table is
+        checked empty inside the same write transaction as the insert, so of
+        several concurrent first-run requests exactly one gets through and
+        the rest get already_set_up (409).
 
         Returns (user, temporary_password_or_None).
         """
@@ -426,6 +431,8 @@ class Identity:
         password_hash = hash_password(secret)          # ~100 ms: not while holding the write lock
         try:
             with self._db.write() as conn:
+                if only_if_no_users and conn.execute("SELECT 1 FROM users LIMIT 1").fetchone():
+                    raise IdentityError("already_set_up", 409, "A user already exists; sign in instead.")
                 cur = conn.execute(
                     "INSERT INTO users (username, display_name, role, password_hash, "
                     "must_change_password, temp_password_expires_at, active, created_at) "
