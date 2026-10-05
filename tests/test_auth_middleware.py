@@ -10,10 +10,9 @@ import unittest
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Route
-from starlette.testclient import TestClient
 
 from mnemomatic.auth import COOKIE_NAME, SECURE_COOKIE_NAME, AuthMiddleware, classify, session_cookie_name
-from tests._support import IdentityFixture
+from tests._support import CookieClient, IdentityFixture
 
 
 async def _ok(request):
@@ -67,7 +66,7 @@ class AuthCase(unittest.TestCase):
     def setUp(self):
         self.fx = IdentityFixture()
         self.addCleanup(self.fx.close)
-        self.client = TestClient(AuthMiddleware(_app(), identity=lambda: self.fx.identity))
+        self.client = CookieClient(AuthMiddleware(_app(), identity=lambda: self.fx.identity))
 
     def bearer(self, token):
         return {"Authorization": f"Bearer {token}"}
@@ -147,11 +146,11 @@ class TestThrottling(AuthCase):
     def test_bad_tokens_from_one_ipv6_64_share_a_bucket(self):
         app = self.client.app
         for i in range(5):
-            c = TestClient(app, client=(f"2001:db8:0:7::{i + 1:x}", 50000))
+            c = CookieClient(app, client=(f"2001:db8:0:7::{i + 1:x}", 50000))
             self.assertEqual(c.get("/mcp", headers=self.bearer("mnm_wrong")).status_code, 403)
-        fresh = TestClient(app, client=("2001:db8:0:7::beef", 50000))
+        fresh = CookieClient(app, client=("2001:db8:0:7::beef", 50000))
         self.assertEqual(fresh.get("/mcp", headers=self.bearer(self.fx.admin_token)).status_code, 429)
-        other = TestClient(app, client=("2001:db8:0:8::1", 50000))
+        other = CookieClient(app, client=("2001:db8:0:8::1", 50000))
         self.assertEqual(other.get("/mcp", headers=self.bearer(self.fx.admin_token)).status_code, 200)
 
     def test_success_clears_failures(self):
@@ -191,7 +190,7 @@ class TestSession(AuthCase):
     def test_each_scheme_reads_only_its_own_cookie(self):
         # A value sniffed from the plain-HTTP cookie must not work on HTTPS
         # under either name, and the __Host- cookie means nothing over HTTP.
-        https = TestClient(self.client.app, base_url="https://testserver")
+        https = CookieClient(self.client.app, base_url="https://testserver")
         raw = self.fx.session_for(self.fx.user)
         self.assertEqual(https.get("/api/things", cookies={SECURE_COOKIE_NAME: raw}).status_code, 200)
         self.assertEqual(https.get("/api/things", cookies={COOKIE_NAME: raw}).status_code, 401)

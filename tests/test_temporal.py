@@ -1,4 +1,4 @@
-"""Tests for Phase B: temporal facts (supersede instead of overwrite).
+"""Tests for temporal facts (supersede instead of overwrite).
 
 Covers the v3 migration (validity columns, partial unique index), the three
 store outcomes (insert / same-fact refresh / supersede), the server update
@@ -9,27 +9,20 @@ fact_history tool, namespace rename/delete interplay, and restore guards.
 
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 import mnemomatic.db as db_module
 from mnemomatic.db import EMBEDDING_DIM, Database
 from mnemomatic.models import Knowledge
-from mnemomatic import runtime
 from mnemomatic import tools_content
 from mnemomatic import tools_history
+from tests._support import MemDbCase, ToolCase
 
 
 def _emb(seed: float) -> list[float]:
     return [seed] + [0.0] * (EMBEDDING_DIM - 1)
 
 
-class DbTestCase(unittest.TestCase):
-    def setUp(self):
-        self.db = Database(":memory:")
-
-    def tearDown(self):
-        self.db.close()
-
+class DbTestCase(MemDbCase):
     def _store(self, fact, subject="topic", namespace="proj", embedding=None, **kw):
         return self.db.store_knowledge(
             Knowledge(namespace=namespace, subject=subject, fact=fact, **kw), embedding)
@@ -183,20 +176,8 @@ class TestRenameNamespace(DbTestCase):
         self.assertEqual(self.db.get_knowledge(target_current.id).fact, "tgt-current")
 
 
-class ToolTestCase(DbTestCase):
-    def setUp(self):
-        super().setUp()
-        self._patches = [
-            patch.object(runtime, "_db", return_value=self.db),
-            patch.object(runtime, "_embedder", return_value=None),
-        ]
-        for p in self._patches:
-            p.start()
-
-    def tearDown(self):
-        for p in self._patches:
-            p.stop()
-        super().tearDown()
+class ToolTestCase(ToolCase, DbTestCase):
+    pass
 
 
 class TestUpdateTool(ToolTestCase):

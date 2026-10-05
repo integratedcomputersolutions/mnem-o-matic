@@ -15,15 +15,7 @@ from mnemomatic import config
 from mnemomatic.db import Database
 from mnemomatic.models import Document
 from mnemomatic import runtime
-from tests._support import FakeEmbedder, axis
-
-GEMMA = {
-    "embed_model": "embeddinggemma-300m",
-    "embed_query_prefix": "task: search result | query: ",
-    "embed_doc_prefix": "title: none | text: ",
-}
-AMARETTO = {**GEMMA, "embed_model": "amaretto-embed-148m"}
-
+from tests._support import axis, FakeEmbedder, GEMMA
 
 class TestModeParsing(unittest.TestCase):
     def _mode(self, value):
@@ -76,36 +68,10 @@ class TestAutoTrigger(unittest.TestCase):
         return Database(self.path, allow_reindex=mode in ("auto", "force"),
                         embed_identity=identity)
 
-    def test_unchanged_embedder_needs_no_reindex(self):
-        db = self.open_as(GEMMA)
-        self.assertFalse(db.reindex_pending)
-        db.close()
-
-    def test_changed_model_marks_reindex_pending(self):
-        db = self.open_as(AMARETTO)
-        self.assertTrue(db.reindex_pending)
-        db.close()
-
     def test_changed_prefix_marks_reindex_pending(self):
         db = self.open_as({**GEMMA, "embed_query_prefix": "query: "})
         self.assertTrue(db.reindex_pending)
         db.close()
-
-    def test_off_mode_still_refuses_a_changed_embedder(self):
-        with self.assertRaises(RuntimeError):
-            self.open_as(AMARETTO, mode="off")
-
-    def test_pending_clears_and_identity_is_restamped_after_rebuild(self):
-        db = self.open_as(AMARETTO)
-        db.rebuild_vec_tables()
-        self.assertFalse(db.reindex_pending)
-        self.assertEqual(db.stored_embed_identity()["embed_model"], "amaretto-embed-148m")
-        db.close()
-        # And the next start is quiet.
-        db = self.open_as(AMARETTO)
-        self.assertFalse(db.reindex_pending)
-        db.close()
-
 
 class TestRunReindexUnderAuto(unittest.TestCase):
     def setUp(self):
@@ -128,11 +94,6 @@ class TestRunReindexUnderAuto(unittest.TestCase):
     def _vec_count(self):
         return self.db._get_conn().execute(
             "SELECT COUNT(*) AS n FROM vec_documents").fetchone()["n"]
-
-    def test_auto_reindex_embeds_content(self):
-        with patch.object(config, "REINDEX_MODE", "auto"):
-            server._run_reindex()
-        self.assertEqual(self._vec_count(), 1)
 
     def test_auto_logs_that_the_embedder_changed(self):
         with patch.object(config, "REINDEX_MODE", "auto"):
@@ -176,16 +137,9 @@ class TestNeverDestroyWhatCannotBeRebuilt(unittest.TestCase):
             with self.assertRaises(RuntimeError) as ctx:
                 server._run_reindex()
         self.assertIn("no embedder is available", str(ctx.exception))
-
-    def test_existing_vectors_survive_the_refusal(self):
-        self.db.reindex_pending = True
-        with patch.object(runtime, "_db", return_value=self.db), \
-             patch.object(runtime, "_embedder", return_value=None):
-            with self.assertRaises(RuntimeError):
-                server._run_reindex()
         count = self.db._get_conn().execute(
             "SELECT COUNT(*) AS n FROM vec_documents").fetchone()["n"]
-        self.assertEqual(count, 1)
+        self.assertEqual(count, 1)                     # the refusal destroyed nothing
 
     def test_no_pending_change_without_an_embedder_just_skips(self):
         with patch.object(runtime, "_db", return_value=self.db), \

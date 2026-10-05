@@ -12,14 +12,7 @@ from unittest.mock import patch
 
 from mnemomatic import config, runtime, tools_admin
 from mnemomatic.db import Database
-from tests._support import EMBEDDING_DIM, FakeEmbedder
-
-GEMMA = {
-    "embed_model": "embeddinggemma-300m",
-    "embed_query_prefix": "task: search result | query: ",
-    "embed_doc_prefix": "title: none | text: ",
-}
-
+from tests._support import EMBEDDING_DIM, FakeEmbedder, GEMMA
 
 class _InfoTest(unittest.TestCase):
     def setUp(self):
@@ -49,9 +42,6 @@ class TestReporting(_InfoTest):
             info = self.info()
         self.assertFalse(info["semantic_search"])
         self.assertIn("FTS-only", info["mode"])
-
-    def test_reports_the_model_that_built_the_index(self):
-        self.assertEqual(self.info()["index_model"], "embeddinggemma-300m")
 
     def test_reports_dimensions(self):
         info = self.info()

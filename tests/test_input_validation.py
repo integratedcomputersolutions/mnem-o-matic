@@ -1,6 +1,5 @@
 """Tests for input validation and bounds checking.
 
-This tests CRITICAL #2: Input Validation Missing
 - Empty/whitespace-only strings
 - String length limits
 - Confidence bounds (0.0-1.0)
@@ -215,16 +214,6 @@ class TestDocumentValidation(unittest.TestCase):
             )
         self.assertIn("metadata", str(cm.exception))
 
-    def test_document_valid_metadata(self):
-        """Valid metadata should be accepted."""
-        doc = Document(
-            namespace="test",
-            title="Test",
-            content="Content",
-            metadata={"author": "alice", "version": "1.0", "category": "tutorial"}
-        )
-        self.assertEqual(len(doc.metadata), 3)
-
     def test_document_metadata_nested_value_too_long(self):
         """The size limit applies to non-string values via their serialized form."""
         with self.assertRaises(ValidationError) as cm:
@@ -268,17 +257,6 @@ class TestDocumentValidation(unittest.TestCase):
                 metadata={"k" * 201: "value"}
             )
         self.assertIn("metadata", str(cm.exception))
-
-    def test_document_metadata_small_nested_values_ok(self):
-        """Reasonably-sized nested structures remain valid."""
-        doc = Document(
-            namespace="test",
-            title="Test",
-            content="Content",
-            metadata={"list": [1, 2, 3], "dict": {"a": {"b": "c"}}, "num": 42}
-        )
-        self.assertEqual(len(doc.metadata), 3)
-
 
 class TestKnowledgeValidation(unittest.TestCase):
     """Test Knowledge input validation."""
@@ -499,6 +477,7 @@ class TestValidationEdgeCases(unittest.TestCase):
             "null": None,
             "list": [1, 2, 3],
             "dict": {"nested": "value"},
+            "deep": {"a": {"b": "c"}},
         }
         doc = Document(namespace="test", title="Test", content="Content", metadata=metadata)
         self.assertEqual(doc.metadata, metadata)

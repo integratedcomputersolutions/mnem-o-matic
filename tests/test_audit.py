@@ -13,11 +13,11 @@ from unittest.mock import patch
 
 from mnemomatic.audit import RequestMetaMiddleware, request_meta
 from mnemomatic.db import SCHEMA_VERSION, Database
-from mnemomatic import runtime
 from mnemomatic import tools_admin
 from mnemomatic import tools_content
 from mnemomatic import tools_history
 from mnemomatic import tools_search
+from tests._support import ToolCase
 
 
 class TestMigrationV4(unittest.TestCase):
@@ -91,24 +91,12 @@ class TestDbAudit(unittest.TestCase):
             self.db.list_audit(item_type="bogus")
 
 
-class ToolTestCase(unittest.TestCase):
-    def setUp(self):
-        self.db = Database(":memory:")
-        self._patches = [
-            patch.object(runtime, "_db", return_value=self.db),
-            patch.object(runtime, "_embedder", return_value=None),
-        ]
-        for p in self._patches:
-            p.start()
-
-    def tearDown(self):
-        for p in self._patches:
-            p.stop()
-        self.db.close()
-
+class ToolTestCase(ToolCase):
     def _ops(self, **filters):
         return [e["op"] for e in self.db.list_audit(**filters)]
 
+
+class TestAuditListing(ToolTestCase):
     def test_oversized_fields_are_clipped(self):
         self.db.append_audit("auth.login_failed", item_type="user", item_id="u" * 100_000,
                              client="ua" * 100_000, detail={"label": "x" * 100_000})
@@ -159,6 +147,7 @@ class TestToolCoverage(ToolTestCase):
         self.assertEqual([e["op"] for e in events],
                          ["restore", "delete", "tag", "update", "store"])
         delete_event = events[1]
+        self.assertEqual((delete_event["item_type"], delete_event["item_id"]), ("note", note["id"]))
         self.assertEqual(delete_event["namespace"], "proj")  # captured pre-delete
         self.assertEqual(delete_event["title"], "n")
         self.assertEqual(events[0]["detail"]["recreated"], True)

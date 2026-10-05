@@ -7,15 +7,21 @@ work — `python -m pytest` and `python -m unittest tests/test_db.py`:
 """
 
 import math
+import random
+import threading
+import unittest
+from http.server import ThreadingHTTPServer
+from unittest.mock import patch
 
-from mnemomatic import server as runtime
+from starlette.testclient import TestClient
 
-# The module owning the runtime singletons tests patch (`_db`, `_embedder`,
-# `_safe_embed`). Patch through this alias rather than importing
-# mnemomatic.server directly: when those singletons move to their own module,
-# the patch target changes here once instead of at every call site.
+from mnemomatic import identity as identity_module
+from mnemomatic import runtime
+from mnemomatic.db import Database
+
 __all__ = [
-    "EMBEDDING_DIM", "FakeEmbedder", "IdentityFixture", "axis", "mix", "tilted_axis", "runtime",
+    "AMARETTO", "CookieClient", "EMBEDDING_DIM", "FakeEmbedder", "GEMMA", "IdentityFixture", "MemDbCase", "SPA_HTML",
+    "ToolCase", "axis", "fast_scrypt", "mix", "random_unit_vector", "serve", "tilted_axis",
 ]
 
 # The dimension the suite embeds at. Matches the default the server falls back
@@ -47,6 +53,77 @@ def tilted_axis(i: int, wobble: float = 0.0, dim: int = EMBEDDING_DIM) -> list[f
         vec[1] += wobble
     norm = math.sqrt(sum(x * x for x in vec))
     return [x / norm for x in vec]
+
+
+def random_unit_vector(text: str, dim: int = EMBEDDING_DIM) -> list[float]:
+    """A deterministic dense unit vector seeded by the text — unlike axis(),
+    every component is non-zero, as with a real model."""
+    rng = random.Random(hash(text) & 0xFFFFFFFF)
+    vec = [rng.gauss(0, 1) for _ in range(dim)]
+    norm = math.sqrt(sum(x * x for x in vec))
+    return [x / norm for x in vec]
+
+
+# Two embedder identities of equal dimension: the swap the dimension check
+# cannot see, which the recorded model name exists to catch.
+GEMMA = {
+    "embed_model": "embeddinggemma-300m",
+    "embed_query_prefix": "task: search result | query: ",
+    "embed_doc_prefix": "title: none | text: ",
+}
+AMARETTO = {**GEMMA, "embed_model": "amaretto-embed-148m"}
+
+# A stand-in for the built web UI's index.html.
+SPA_HTML = "<!doctype html><html><head><title>Mnem-O-matic</title></head><body><div id=app></div></body></html>"
+
+
+def fast_scrypt():
+    """Patch the scrypt work factor down so the suite does not spend seconds hashing."""
+    return patch.multiple(identity_module, SCRYPT_LOG_N=10, SCRYPT_P=1)
+
+
+def serve(test: unittest.TestCase, handler_cls) -> ThreadingHTTPServer:
+    """A local HTTP server on a free port, on a thread, stopped when `test` ends."""
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    test.addCleanup(server.server_close)
+    test.addCleanup(server.shutdown)
+    return server
+
+
+class CookieClient(TestClient):
+    """A TestClient whose per-request `cookies=` go out as an explicit Cookie
+    header. Starlette deprecates per-request cookies; and with an explicit
+    header httpx leaves the client's cookie jar out, so the request carries
+    exactly the cookies under test — not those of an earlier sign-in."""
+
+    def request(self, method, url, *args, cookies=None, headers=None, **kwargs):
+        if cookies:
+            headers = dict(headers or {})
+            headers["Cookie"] = "; ".join(f"{name}={value}" for name, value in dict(cookies).items())
+        return super().request(method, url, *args, headers=headers, **kwargs)
+
+
+class MemDbCase(unittest.TestCase):
+    """A fresh in-memory Database per test, as self.db."""
+
+    def setUp(self):
+        self.db = Database(":memory:")
+        self.addCleanup(self.db.close)
+
+
+class ToolCase(MemDbCase):
+    """Tool functions run against self.db: runtime._db and runtime._embedder
+    are patched for the test. FTS-only unless a subclass sets `embedder`."""
+
+    embedder = None
+
+    def setUp(self):
+        super().setUp()
+        for target, value in (("_db", self.db), ("_embedder", self.embedder)):
+            patcher = patch.object(runtime, target, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
 
 class FakeEmbedder:
@@ -86,13 +163,10 @@ class IdentityFixture:
     def __init__(self):
         import tempfile
         from pathlib import Path
-        from unittest.mock import patch
 
-        from mnemomatic import identity as identity_module
-        from mnemomatic.db import Database
         from mnemomatic.identity import Identity
 
-        self._patch = patch.multiple(identity_module, SCRYPT_LOG_N=10, SCRYPT_P=1)
+        self._patch = fast_scrypt()
         self._patch.start()
         tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         tmp.close()

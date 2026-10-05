@@ -7,17 +7,11 @@ carried to another host.
 """
 
 import json
-import threading
 import unittest
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 
 from mnemomatic.embeddings import HttpEmbedder, redact_url
-
-
-def _serve(handler_cls):
-    server = ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    return server
+from tests._support import serve
 
 
 class _Endpoint(BaseHTTPRequestHandler):
@@ -73,9 +67,7 @@ class TestHttpEmbedderCredentials(unittest.TestCase):
 
         self.Endpoint, self.Elsewhere = Endpoint, Elsewhere
         for cls in (Endpoint, Elsewhere):
-            server = _serve(cls)
-            self.addCleanup(server.server_close)
-            self.addCleanup(server.shutdown)
+            server = serve(self, cls)
             cls.url = f"http://127.0.0.1:{server.server_port}"
 
     def test_api_key_sent_as_bearer_header(self):

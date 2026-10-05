@@ -17,3 +17,9 @@ _ROOT = Path(__file__).resolve().parent.parent
 for _path in (_ROOT / "src", _ROOT / "cli" / "src"):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
+
+# Importing the tool modules is what registers them with the one FastMCP
+# instance, in import order. Load the server first, so the published order is
+# server.py's (test_tool_registration pins it) whichever test module happens
+# to import a tool module first.
+import mnemomatic.server  # noqa: E402,F401

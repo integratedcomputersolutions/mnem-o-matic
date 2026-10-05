@@ -77,14 +77,12 @@ class TestMigrationV5(unittest.TestCase):
         self.assertEqual(events[0]["item_type"], "schema")
         self.assertEqual(events[0]["detail"], {"from": 4, "to": SCHEMA_VERSION})
 
+        # Version 6's column arrives on the same upgrade.
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(users)")}
+        self.assertIn("credential_version", cols)
+
         # No users yet: that is the first-run state the server bootstraps from.
         self.assertEqual(conn.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"], 0)
-        db.close()
-
-    def test_upgrade_adds_credential_version(self):
-        db = Database(str(self.path))
-        cols = {r["name"] for r in db.connection().execute("PRAGMA table_info(users)")}
-        self.assertIn("credential_version", cols)
         db.close()
 
     def test_v5_database_gains_credential_version(self):

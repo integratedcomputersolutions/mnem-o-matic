@@ -10,20 +10,14 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
-from mnemomatic.db import CHUNK_THRESHOLD, Database
+from mnemomatic.db import CHUNK_THRESHOLD
 from mnemomatic.models import Document, Knowledge, Note
 from mnemomatic import runtime
 from mnemomatic import tools_search
-from tests._support import axis, mix
+from tests._support import axis, MemDbCase, mix, ToolCase
 
 
-class DbTestCase(unittest.TestCase):
-    def setUp(self):
-        self.db = Database(":memory:")
-
-    def tearDown(self):
-        self.db.close()
-
+class DbTestCase(MemDbCase):
     def _age(self, table, item_id, days):
         """Backdate an item's updated_at so recency filters have something to bite on."""
         ts = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
@@ -146,20 +140,8 @@ class TestItemEmbedding(DbTestCase):
         self.assertAlmostEqual(sum(v * v for v in emb) ** 0.5, 1.0, places=5)
 
 
-class ToolTestCase(DbTestCase):
-    def setUp(self):
-        super().setUp()
-        self._patches = [
-            patch.object(runtime, "_db", return_value=self.db),
-            patch.object(runtime, "_embedder", return_value=object()),
-        ]
-        for p in self._patches:
-            p.start()
-
-    def tearDown(self):
-        for p in self._patches:
-            p.stop()
-        super().tearDown()
+class ToolTestCase(ToolCase, DbTestCase):
+    embedder = object()            # present, so semantic modes are attempted
 
 
 class TestRelatedTool(ToolTestCase):

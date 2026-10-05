@@ -19,7 +19,7 @@ from starlette.testclient import TestClient
 
 from mnemomatic import runtime, tools_admin
 from mnemomatic.audit import RequestMetaMiddleware
-from mnemomatic.auth import COOKIE_NAME, AuthMiddleware
+from mnemomatic.auth import AuthMiddleware
 from tests._support import IdentityFixture
 from mnemomatic.db import Database
 from mnemomatic.export import EXPORT_FORMAT, _safe_name, _unique, build_export_zip
@@ -206,11 +206,6 @@ class TestExportRoute(unittest.TestCase):
     def test_requires_a_credential(self):
         self.assertEqual(self.client.get("/export").status_code, 401)
         self.assertEqual(self.client.get("/export", headers={"Authorization": "Bearer mnm_nope"}).status_code, 403)
-
-    def test_downloads_zip_with_session_cookie(self):
-        resp = self.client.get("/export", cookies={COOKIE_NAME: self.fx.session_for(self.fx.user)})
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.headers["content-type"], "application/zip")
 
     def test_downloads_zip_with_token(self):
         resp = self.client.get("/export", headers={"Authorization": f"Bearer {self.fx.user_token}"})

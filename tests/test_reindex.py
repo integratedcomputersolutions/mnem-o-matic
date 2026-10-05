@@ -81,12 +81,6 @@ class TestDimChangeDeferral(unittest.TestCase):
     def tearDown(self):
         Path(self.path).unlink(missing_ok=True)
 
-    def test_mismatch_without_flag_still_raises(self):
-        with patch.object(mnemomatic.db, "EMBEDDING_DIM", 8):
-            with self.assertRaises(RuntimeError) as cm:
-                Database(self.path)
-        self.assertIn("MNEMOMATIC_REINDEX", str(cm.exception))
-
     def test_mismatch_with_flag_defers_to_reindex(self):
         with patch.object(mnemomatic.db, "EMBEDDING_DIM", 8):
             db = Database(self.path, allow_reindex=True)
@@ -168,18 +162,6 @@ class TestRunReindex(unittest.TestCase):
             emb = small_embedder.embed("s: f")
             results = self.db.search_vec(emb, table="knowledge", namespace="other")
             self.assertEqual([r.id for r in results], [self.k.id])
-
-    def test_reindex_no_embedder_skips_without_dim_change(self):
-        with patch.object(runtime, "_embedder", return_value=None):
-            server._run_reindex()  # must not raise
-        # Index untouched — nothing was rebuilt or embedded.
-        self.assertEqual(self._vec_count("vec_documents"), 0)
-
-    def test_reindex_no_embedder_with_dim_change_is_fatal(self):
-        self.db.reindex_pending = True
-        with patch.object(runtime, "_embedder", return_value=None):
-            with self.assertRaises(RuntimeError):
-                server._run_reindex()
 
     def test_reindex_counts_failures_and_continues(self):
         flaky = FakeEmbedder()

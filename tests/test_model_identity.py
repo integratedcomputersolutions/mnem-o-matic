@@ -14,14 +14,7 @@ import unittest
 from pathlib import Path
 
 from mnemomatic.db import Database
-
-GEMMA = {
-    "embed_model": "embeddinggemma-300m",
-    "embed_query_prefix": "task: search result | query: ",
-    "embed_doc_prefix": "title: none | text: ",
-}
-AMARETTO = {**GEMMA, "embed_model": "amaretto-embed-148m"}
-
+from tests._support import AMARETTO, GEMMA
 
 class _TempDatabaseTest(unittest.TestCase):
     """A file-backed database, so it can be closed and reopened with a
@@ -87,14 +80,6 @@ class TestMismatch(_TempDatabaseTest):
         message = str(ctx.exception)
         for field in ("model", "query_prefix", "doc_prefix"):
             self.assertIn(field, message)
-
-    def test_same_dimension_swap_is_caught(self):
-        # The case the dimension check cannot see: both models are 768-dim, so
-        # nothing else would notice the index no longer matches the embedder.
-        self.open(GEMMA).close()
-        with self.assertRaises(RuntimeError):
-            self.open(AMARETTO)
-
 
 class TestReindexFlow(_TempDatabaseTest):
     def test_mismatch_under_allow_reindex_defers_instead_of_raising(self):

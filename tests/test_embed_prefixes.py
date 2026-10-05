@@ -11,7 +11,6 @@ this test environment — and for external endpoints, defaults are empty.
 import unittest
 from unittest.mock import MagicMock, patch
 
-import mnemomatic.server  # noqa: F401 — registers the full tool surface
 from mnemomatic import config
 from mnemomatic import runtime
 from mnemomatic import tools_content

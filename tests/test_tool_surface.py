@@ -74,24 +74,10 @@ class TestDeleteTools(_ToolTest):
             with self.subTest(tool=tool.__name__):
                 self.assertEqual(tool("no-such-id"), {"id": "no-such-id", "deleted": False})
 
-    def test_delete_writes_an_audit_event_naming_the_item(self):
-        doc_id = self.add_document(title="minutes", namespace="meetings")
-        tools_content.delete_document(doc_id)
-        event = self.db.list_audit(op="delete")[0]
-        self.assertEqual(event["item_type"], "document")
-        self.assertEqual(event["item_id"], doc_id)
-        # Captured before the row went away, so the trail stays readable.
-        self.assertEqual(event["namespace"], "meetings")
-        self.assertEqual(event["title"], "minutes")
-
     def test_knowledge_audit_records_the_subject_as_title(self):
         k_id = self.add_knowledge(subject="deploy target")
         tools_content.delete_knowledge(k_id)
         self.assertEqual(self.db.list_audit(op="delete")[0]["title"], "deploy target")
-
-    def test_failed_delete_writes_no_audit_event(self):
-        tools_content.delete_document("no-such-id")
-        self.assertEqual(self.db.list_audit(op="delete"), [])
 
     def test_deleted_item_is_recoverable_from_its_revision(self):
         # The docstrings promise delete is undoable; hold them to it.

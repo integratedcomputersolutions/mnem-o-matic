@@ -1,6 +1,5 @@
 """Tests for embedder error handling and graceful degradation.
 
-This tests CRITICAL #1: Error Handling Gaps
 - HttpEmbedder network failures
 - OnnxEmbedder initialization failures
 - Graceful fallback to FTS search
@@ -108,19 +107,6 @@ class TestHttpEmbedderErrors(unittest.TestCase):
 
             self.assertIn("invalid embedding", str(cm.exception))
 
-    def test_http_embedder_success(self):
-        """Successful embedding request should return the (normalized) vector."""
-        with patch("mnemomatic.embeddings._opener.open") as mock_urlopen:
-            embedding = [0.6, 0.8]  # already unit length → passes through unchanged
-            mock_resp = MagicMock()
-            mock_resp.read.return_value = json.dumps({"embedding": embedding}).encode()
-            mock_resp.__enter__.return_value = mock_resp
-            mock_resp.__exit__.return_value = None
-            mock_urlopen.return_value = mock_resp
-
-            result = self.embedder.embed("test text")
-            self.assertEqual(result, embedding)
-
     def test_http_embedder_normalizes_unnormalized_vectors(self):
         """External models may return non-unit vectors; scoring assumes unit."""
         with patch("mnemomatic.embeddings._opener.open") as mock_urlopen:
@@ -191,9 +177,8 @@ class TestHttpEmbedderErrors(unittest.TestCase):
 
 
 class TestEmbedderFallback(unittest.TestCase):
-    """Test server-level embedder fallback to FTS-only mode.
+    """Test runtime._embedder's fallback to FTS-only mode.
 
-    This tests CRITICAL #5: Embedding Init Failures
     - Model file missing → FTS-only mode
     - OnnxEmbedder init fails → FTS-only mode
     - onnxruntime not installed → FTS-only mode

@@ -20,7 +20,7 @@ from mnemomatic import runtime, tools_content
 from mnemomatic.db import Database
 from mnemomatic.identity import MAX_ACTIVE_TOKENS, Identity, IdentityError
 from mnemomatic.models import Knowledge, Note
-from tests.test_identity import _fast_scrypt
+from tests._support import fast_scrypt
 
 
 def _race(n, fn):
@@ -181,7 +181,7 @@ class TestContentWrites(_FileDb):
 class TestIdentityWrites(_FileDb):
     def setUp(self):
         super().setUp()
-        p = _fast_scrypt()
+        p = fast_scrypt()
         p.start()
         self.addCleanup(p.stop)
         self.ident = Identity(self.db)

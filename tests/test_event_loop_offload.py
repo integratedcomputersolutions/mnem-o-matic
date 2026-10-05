@@ -15,7 +15,6 @@ from unittest.mock import MagicMock, patch
 
 from starlette.applications import Starlette
 from starlette.routing import Route
-from starlette.testclient import TestClient
 
 import mnemomatic.server as server
 from mnemomatic import runtime, tools_admin, tools_search
@@ -23,7 +22,7 @@ from mnemomatic.api import build_api_routes
 from mnemomatic.auth import COOKIE_NAME, AuthMiddleware
 from mnemomatic.identity import FirstRun
 from mnemomatic.models import Note
-from tests._support import IdentityFixture
+from tests._support import CookieClient, IdentityFixture
 
 
 def _on_event_loop() -> bool:
@@ -95,7 +94,7 @@ class TestHttpRoutes(unittest.TestCase):
 
         mount = build_api_routes(identity=lambda: self.fx.identity, db_getter=lambda: self.fx.db,
                                  settings_info=dict, first_run=FirstRun(), https=None)
-        client = TestClient(AuthMiddleware(Starlette(routes=[mount]), identity=lambda: self.fx.identity))
+        client = CookieClient(AuthMiddleware(Starlette(routes=[mount]), identity=lambda: self.fx.identity))
         cookies = {COOKIE_NAME: self.fx.session_for(self.fx.user)}
         note, _ = self.fx.db.store_note(Note(namespace="proj", title="t", content="c"), embedding=None)
         with patch.object(tools_search, "_search", fake_search), \
@@ -114,7 +113,7 @@ class TestHttpRoutes(unittest.TestCase):
         db = MagicMock()
         db.list_namespaces.side_effect = lambda: seen.append(_on_event_loop()) or ["proj"]
         app = Starlette(routes=[Route("/export", tools_admin._export_route, methods=["GET"])])
-        client = TestClient(AuthMiddleware(app, identity=lambda: self.fx.identity))
+        client = CookieClient(AuthMiddleware(app, identity=lambda: self.fx.identity))
         with patch.object(tools_admin, "_make_export", fake_export), \
                 patch.object(tools_admin, "_audit"), patch.object(runtime, "_db", return_value=db):
             resp = client.get("/export?namespace=proj", headers={"Authorization": f"Bearer {self.fx.user_token}"})
