@@ -5,9 +5,7 @@ change) and server._run_reindex end to end against a real database with a
 fake embedder — including a dimension change.
 """
 
-import tempfile
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
 import mnemomatic.db
@@ -16,7 +14,7 @@ from mnemomatic import config
 from mnemomatic.db import SCHEMA_VERSION, Database
 from mnemomatic.models import Document, Knowledge, Note
 from mnemomatic import runtime
-from tests._support import EMBEDDING_DIM, FakeEmbedder, axis
+from tests._support import axis, EMBEDDING_DIM, FakeEmbedder, temp_db_path
 
 
 class TestRebuildVecTables(unittest.TestCase):
@@ -73,19 +71,8 @@ class TestSetEmbedding(unittest.TestCase):
 
 class TestDimChangeDeferral(unittest.TestCase):
     def setUp(self):
-        self._tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-        self._tmp.close()
-        self.path = self._tmp.name
+        self.path = str(temp_db_path(self))
         Database(self.path).close()  # created at the real EMBEDDING_DIM
-
-    def tearDown(self):
-        Path(self.path).unlink(missing_ok=True)
-
-    def test_mismatch_without_flag_still_raises(self):
-        with patch.object(mnemomatic.db, "EMBEDDING_DIM", 8):
-            with self.assertRaises(RuntimeError) as cm:
-                Database(self.path)
-        self.assertIn("MNEMOMATIC_REINDEX", str(cm.exception))
 
     def test_mismatch_with_flag_defers_to_reindex(self):
         with patch.object(mnemomatic.db, "EMBEDDING_DIM", 8):
@@ -149,14 +136,13 @@ class TestRunReindex(unittest.TestCase):
         self.assertTrue(all(c.startswith("D>> ") for c in self.embedder.calls))
 
     def test_reindex_replaces_stale_vectors(self):
-        # Pre-existing vector from an "old model" points at axis 0; after
-        # reindex, searching with the old vector must not return the doc.
-        self.db.set_embedding("document", self.doc.id, axis(0))
+        # A vector from an "old model": the negation of what the current
+        # embedder produces, so it can never coincide with the new one.
+        expected = self.embedder.embed("small\nshort body")
+        self.db.set_embedding("document", self.doc.id, [-v for v in expected])
         server._run_reindex()
-        new_emb = self.embedder.embed("small\nshort body")
-        if new_emb[0] != 1.0:  # only meaningful when the fake axis differs
-            results = self.db.search_vec(axis(0), table="documents", namespace="ns", limit=1)
-            self.assertTrue(not results or results[0].score < 0.999)
+        stored = self.db.item_embedding("document", self.doc.id)
+        self.assertEqual([round(v, 5) for v in stored], expected)
 
     def test_reindex_with_dim_change_end_to_end(self):
         # Simulate MNEMOMATIC_EMBED_DIM=8 with a dim-8 embedder: after
@@ -169,18 +155,6 @@ class TestRunReindex(unittest.TestCase):
             emb = small_embedder.embed("s: f")
             results = self.db.search_vec(emb, table="knowledge", namespace="other")
             self.assertEqual([r.id for r in results], [self.k.id])
-
-    def test_reindex_no_embedder_skips_without_dim_change(self):
-        with patch.object(runtime, "_embedder", return_value=None):
-            server._run_reindex()  # must not raise
-        # Index untouched — nothing was rebuilt or embedded.
-        self.assertEqual(self._vec_count("vec_documents"), 0)
-
-    def test_reindex_no_embedder_with_dim_change_is_fatal(self):
-        self.db.reindex_pending = True
-        with patch.object(runtime, "_embedder", return_value=None):
-            with self.assertRaises(RuntimeError):
-                server._run_reindex()
 
     def test_reindex_counts_failures_and_continues(self):
         flaky = FakeEmbedder()

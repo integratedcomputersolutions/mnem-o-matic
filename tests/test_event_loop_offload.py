@@ -15,7 +15,6 @@ from unittest.mock import MagicMock, patch
 
 from starlette.applications import Starlette
 from starlette.routing import Route
-from starlette.testclient import TestClient
 
 import mnemomatic.server as server
 from mnemomatic import runtime, tools_admin, tools_search
@@ -23,7 +22,7 @@ from mnemomatic.api import build_api_routes
 from mnemomatic.auth import COOKIE_NAME, AuthMiddleware
 from mnemomatic.identity import FirstRun
 from mnemomatic.models import Note
-from tests._support import IdentityFixture
+from tests._support import CookieClient, IdentityFixture
 
 
 def _on_event_loop() -> bool:
@@ -35,21 +34,21 @@ def _on_event_loop() -> bool:
 
 
 class TestMcpRegistration(unittest.TestCase):
+    # Through FastMCP's public listings: anything published that runtime.tool
+    # or runtime.resource did not register came from a bare @mcp.tool or
+    # @mcp.resource, and would run on the event loop.
+
     def test_every_tool_is_offloaded(self):
-        tools = server.mcp._tool_manager.list_tools()
-        self.assertTrue(tools)
-        for t in tools:
-            with self.subTest(tool=t.name):
-                self.assertTrue(t.is_async)
-                self.assertTrue(hasattr(t.fn, "__wrapped__"), "registered with @mcp.tool, not runtime.tool")
+        published = {t.name for t in asyncio.run(server.mcp.list_tools())}
+        self.assertTrue(published)
+        self.assertEqual(published - runtime.OFFLOADED_TOOLS, set(), "registered with @mcp.tool, not runtime.tool")
 
     def test_every_resource_is_offloaded(self):
-        manager = server.mcp._resource_manager
-        resources = list(manager._resources.values()) + list(manager._templates.values())
-        self.assertTrue(resources)
-        for r in resources:
-            with self.subTest(resource=str(getattr(r, "uri", None) or r.uri_template)):
-                self.assertTrue(hasattr(r.fn, "__wrapped__"), "registered with @mcp.resource, not runtime.resource")
+        published = {str(r.uri) for r in asyncio.run(server.mcp.list_resources())}
+        published |= {t.uriTemplate for t in asyncio.run(server.mcp.list_resource_templates())}
+        self.assertTrue(published)
+        self.assertEqual(published - runtime.OFFLOADED_RESOURCES, set(),
+                         "registered with @mcp.resource, not runtime.resource")
 
     def test_tool_runs_on_a_worker_thread_and_keeps_context(self):
         var = ContextVar("probe", default=None)
@@ -95,7 +94,7 @@ class TestHttpRoutes(unittest.TestCase):
 
         mount = build_api_routes(identity=lambda: self.fx.identity, db_getter=lambda: self.fx.db,
                                  settings_info=dict, first_run=FirstRun(), https=None)
-        client = TestClient(AuthMiddleware(Starlette(routes=[mount]), identity=lambda: self.fx.identity))
+        client = CookieClient(AuthMiddleware(Starlette(routes=[mount]), identity=lambda: self.fx.identity))
         cookies = {COOKIE_NAME: self.fx.session_for(self.fx.user)}
         note, _ = self.fx.db.store_note(Note(namespace="proj", title="t", content="c"), embedding=None)
         with patch.object(tools_search, "_search", fake_search), \
@@ -114,7 +113,7 @@ class TestHttpRoutes(unittest.TestCase):
         db = MagicMock()
         db.list_namespaces.side_effect = lambda: seen.append(_on_event_loop()) or ["proj"]
         app = Starlette(routes=[Route("/export", tools_admin._export_route, methods=["GET"])])
-        client = TestClient(AuthMiddleware(app, identity=lambda: self.fx.identity))
+        client = CookieClient(AuthMiddleware(app, identity=lambda: self.fx.identity))
         with patch.object(tools_admin, "_make_export", fake_export), \
                 patch.object(tools_admin, "_audit"), patch.object(runtime, "_db", return_value=db):
             resp = client.get("/export?namespace=proj", headers={"Authorization": f"Bearer {self.fx.user_token}"})

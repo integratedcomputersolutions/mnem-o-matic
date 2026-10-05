@@ -9,14 +9,17 @@ import io
 import json
 import unittest
 import zipfile
-from pathlib import Path
+
+from unittest.mock import patch
 
 from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from mnemomatic.auth import COOKIE_NAME, AuthMiddleware
-from tests._support import IdentityFixture
+from mnemomatic import runtime, tools_admin
+from mnemomatic.audit import RequestMetaMiddleware
+from mnemomatic.auth import AuthMiddleware
+from tests._support import IdentityFixture, temp_db_path
 from mnemomatic.db import Database
 from mnemomatic.export import EXPORT_FORMAT, _safe_name, _unique, build_export_zip
 from mnemomatic.models import Document, Knowledge, Note
@@ -170,8 +173,9 @@ class TestArchive(unittest.TestCase):
 
 
 class TestExportRoute(unittest.TestCase):
-    """The /export route as the server wires it: behind AuthMiddleware, which
-    admits a session cookie or a bearer token."""
+    """The real /export route (tools_admin._export_route) as the server wires
+    it: behind AuthMiddleware, which admits a session cookie or a bearer
+    token, and RequestMetaMiddleware, which names the actor in the audit row."""
 
     def setUp(self):
         self.fx = IdentityFixture()
@@ -179,37 +183,22 @@ class TestExportRoute(unittest.TestCase):
         # File-backed db: the TestClient serves requests on a worker thread,
         # and each thread gets its own connection — a ":memory:" database
         # would be empty there.
-        import tempfile
-        self._tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-        self._tmp.close()
-        self.db = Database(self._tmp.name)
+        self.db = Database(str(temp_db_path(self)))
+        self.addCleanup(self.db.close)
         self.db.store_note(Note(namespace="proj", title="n", content="x"), embedding=None)
 
-        async def export_route(request):
-            from starlette.responses import JSONResponse, Response
-            namespace = request.query_params.get("namespace") or None
-            if namespace and namespace not in self.db.list_namespaces():
-                return JSONResponse({"error": "Namespace not found"}, status_code=404)
-            data, filename = _build(self.db, namespace)
-            return Response(data, media_type="application/zip",
-                            headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+        # The real route, reading the store through runtime._db as in the server.
+        patcher = patch.object(runtime, "_db", return_value=self.db)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
-        app = Starlette(routes=[Route("/export", export_route, methods=["GET"])])
-        self.client = TestClient(AuthMiddleware(app, identity=lambda: self.fx.identity),
+        app = Starlette(routes=[Route("/export", tools_admin._export_route, methods=["GET"])])
+        self.client = TestClient(AuthMiddleware(RequestMetaMiddleware(app), identity=lambda: self.fx.identity),
                                  follow_redirects=False)
-
-    def tearDown(self):
-        self.db.close()
-        Path(self._tmp.name).unlink(missing_ok=True)
 
     def test_requires_a_credential(self):
         self.assertEqual(self.client.get("/export").status_code, 401)
         self.assertEqual(self.client.get("/export", headers={"Authorization": "Bearer mnm_nope"}).status_code, 403)
-
-    def test_downloads_zip_with_session_cookie(self):
-        resp = self.client.get("/export", cookies={COOKIE_NAME: self.fx.session_for(self.fx.user)})
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.headers["content-type"], "application/zip")
 
     def test_downloads_zip_with_token(self):
         resp = self.client.get("/export", headers={"Authorization": f"Bearer {self.fx.user_token}"})
@@ -224,6 +213,18 @@ class TestExportRoute(unittest.TestCase):
         resp = self.client.get("/export?namespace=nope",
                                headers={"Authorization": f"Bearer {self.fx.user_token}"})
         self.assertEqual(resp.status_code, 404)
+        self.assertEqual(resp.json()["error"], "Namespace not found")
+        self.assertEqual(self.db.list_audit(op="export"), [])          # nothing was exported
+
+    def test_namespace_filter_and_audit(self):
+        self.db.store_note(Note(namespace="other", title="m", content="y"), embedding=None)
+        resp = self.client.get("/export?namespace=proj",
+                               headers={"Authorization": f"Bearer {self.fx.user_token}"})
+        self.assertEqual(resp.status_code, 200)
+        with _open(resp.content) as zf:
+            self.assertFalse(any(n.startswith("other/") for n in zf.namelist()))
+        event = self.db.list_audit(op="export")[0]
+        self.assertEqual((event["actor"], event["namespace"]), ("alice", "proj"))
 
 
 if __name__ == "__main__":

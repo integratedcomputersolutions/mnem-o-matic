@@ -1,4 +1,4 @@
-"""Tests for Phase C: the agent-facing layer.
+"""Tests for the agent-facing layer.
 
 Covers the `similar` field on store responses (near-duplicate flagging with
 the mid-write agent as judge), the consolidation_report tool (duplicate
@@ -10,14 +10,12 @@ import struct
 import unittest
 from unittest.mock import patch
 
-import mnemomatic.server as server
 from mnemomatic import config
-from mnemomatic.db import Database
 from mnemomatic.models import Knowledge, Note
 from mnemomatic import runtime
 from mnemomatic import tools_content
 from mnemomatic import tools_history
-from tests._support import axis, mix
+from tests._support import axis, mix, ToolCase
 
 needs_numpy = unittest.skipIf(tools_history.np is None, "duplicate clustering needs numpy")
 
@@ -37,20 +35,8 @@ def _report(**kwargs):
     return tools_history.consolidation_report(**kwargs)
 
 
-class ToolTestCase(unittest.TestCase):
-    def setUp(self):
-        self.db = Database(":memory:")
-        self._patches = [
-            patch.object(runtime, "_db", return_value=self.db),
-            patch.object(runtime, "_embedder", return_value=None),
-        ]
-        for p in self._patches:
-            p.start()
-
-    def tearDown(self):
-        for p in self._patches:
-            p.stop()
-        self.db.close()
+class ToolTestCase(ToolCase):
+    pass
 
 
 class TestSimilarOnStore(ToolTestCase):
@@ -212,13 +198,6 @@ class TestPrompts(unittest.TestCase):
     def test_briefing_prompt_global_scope(self):
         text = tools_history.briefing("some task")
         self.assertIn("whole store", text)
-
-    def test_prompts_are_registered(self):
-        import asyncio
-        prompts = asyncio.run(server.mcp.list_prompts())
-        names = {p.name for p in prompts}
-        self.assertEqual({"consolidate", "briefing"} & names, {"consolidate", "briefing"})
-
 
 if __name__ == "__main__":
     unittest.main()

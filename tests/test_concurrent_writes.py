@@ -9,18 +9,16 @@ leaving the transaction (and the lock) open on the thread.
 
 import logging
 import sqlite3
-import tempfile
 import threading
 import time
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
 from mnemomatic import runtime, tools_content
 from mnemomatic.db import Database
 from mnemomatic.identity import MAX_ACTIVE_TOKENS, Identity, IdentityError
 from mnemomatic.models import Knowledge, Note
-from tests.test_identity import _fast_scrypt
+from tests._support import fast_scrypt, temp_db_path
 
 
 def _race(n, fn):
@@ -45,15 +43,9 @@ def _race(n, fn):
 
 class _FileDb(unittest.TestCase):
     def setUp(self):
-        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-        tmp.close()
-        self.path = Path(tmp.name)
+        self.path = temp_db_path(self)
         self.db = Database(str(self.path))
-
-    def tearDown(self):
-        self.db.close()
-        for p in (self.path, Path(str(self.path) + "-wal"), Path(str(self.path) + "-shm")):
-            p.unlink(missing_ok=True)
+        self.addCleanup(self.db.close)
 
     def count(self, sql, *params):
         return self.db.connection().execute(sql, params).fetchone()["n"]
@@ -181,7 +173,7 @@ class TestContentWrites(_FileDb):
 class TestIdentityWrites(_FileDb):
     def setUp(self):
         super().setUp()
-        p = _fast_scrypt()
+        p = fast_scrypt()
         p.start()
         self.addCleanup(p.stop)
         self.ident = Identity(self.db)

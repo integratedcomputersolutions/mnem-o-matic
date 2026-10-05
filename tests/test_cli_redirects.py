@@ -6,22 +6,16 @@ redirects only within the origin the request was sent to. Two real local
 servers stand in for "the server" and "somewhere else".
 """
 
-import threading
 import types
 import unittest
 import urllib.error
 import urllib.request
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from unittest.mock import patch
 
 from mnemomatic_cli import cli
 from mnemomatic_cli._mcp_client import MCPClient, _describe_http_error, _open, _origin
-
-
-def _serve(handler_cls):
-    server = ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    return server
+from tests._support import serve
 
 
 class _Recorder(BaseHTTPRequestHandler):
@@ -44,9 +38,7 @@ class _Recorder(BaseHTTPRequestHandler):
 class TestRedirects(unittest.TestCase):
     def setUp(self):
         _Recorder.seen = []
-        self.other = _serve(_Recorder)
-        self.addCleanup(self.other.server_close)
-        self.addCleanup(self.other.shutdown)
+        self.other = serve(self, _Recorder)
         other_url = f"http://127.0.0.1:{self.other.server_port}"
 
         class Redirector(_Recorder):
@@ -68,9 +60,7 @@ class TestRedirects(unittest.TestCase):
             do_GET = do_POST = _handle
 
         self.Redirector = Redirector
-        self.server = _serve(Redirector)
-        self.addCleanup(self.server.server_close)
-        self.addCleanup(self.server.shutdown)
+        self.server = serve(self, Redirector)
         self.base = f"http://127.0.0.1:{self.server.server_port}"
 
     def _get(self, path):

@@ -1,9 +1,8 @@
 """Characterization tests for the search() tool's mode-dispatch.
 
-search() is the most-used tool but its dispatch matrix — the interaction of
-mode (hybrid/fulltext/semantic), embedder presence, and embedding success — had
-no unit coverage. These tests pin the current behavior exactly so the dispatch
-can be refactored safely.
+search() is the most-used tool; these tests pin its dispatch matrix — the
+interaction of mode (hybrid/fulltext/semantic), embedder presence, and
+embedding success — exactly.
 
 The matrix (7 cells):
   fulltext                       -> search_fts,    not degraded
@@ -149,7 +148,7 @@ class SearchDispatchTest(unittest.TestCase):
 
     def test_degraded_metadata(self):
         # Both degrade branches append this exact entry from one code path, so
-        # pinning it once (here) covers the metadata content for #5 and #7 too.
+        # pinning it once (here) covers the metadata content for both hybrid degrade cells.
         res = self._search(None, None, query="hello", mode="hybrid")
         self.assertEqual(
             res[-1],

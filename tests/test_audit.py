@@ -8,38 +8,32 @@ staying silent.
 """
 
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
 from mnemomatic.audit import RequestMetaMiddleware, request_meta
 from mnemomatic.db import SCHEMA_VERSION, Database
-from mnemomatic import runtime
 from mnemomatic import tools_admin
 from mnemomatic import tools_content
 from mnemomatic import tools_history
 from mnemomatic import tools_search
+from tests._support import temp_db_path, ToolCase
 
 
 class TestMigrationV4(unittest.TestCase):
     def test_v3_database_gains_audit_table(self):
-        import tempfile
-        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-        tmp.close()
-        try:
-            db = Database(tmp.name)
-            conn = db._get_conn()
-            conn.execute("DROP TABLE audit_log")
-            conn.execute("PRAGMA user_version = 3")
-            conn.commit()
-            db.close()
+        path = temp_db_path(self)
+        db = Database(str(path))
+        conn = db._get_conn()
+        conn.execute("DROP TABLE audit_log")
+        conn.execute("PRAGMA user_version = 3")
+        conn.commit()
+        db.close()
 
-            migrated = Database(tmp.name)
-            conn = migrated._get_conn()
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()["user_version"], SCHEMA_VERSION)
-            conn.execute("SELECT * FROM audit_log")  # table exists
-            migrated.close()
-        finally:
-            Path(tmp.name).unlink(missing_ok=True)
+        migrated = Database(str(path))
+        conn = migrated._get_conn()
+        self.assertEqual(conn.execute("PRAGMA user_version").fetchone()["user_version"], SCHEMA_VERSION)
+        conn.execute("SELECT * FROM audit_log")  # table exists
+        migrated.close()
 
 
 class TestDbAudit(unittest.TestCase):
@@ -91,24 +85,12 @@ class TestDbAudit(unittest.TestCase):
             self.db.list_audit(item_type="bogus")
 
 
-class ToolTestCase(unittest.TestCase):
-    def setUp(self):
-        self.db = Database(":memory:")
-        self._patches = [
-            patch.object(runtime, "_db", return_value=self.db),
-            patch.object(runtime, "_embedder", return_value=None),
-        ]
-        for p in self._patches:
-            p.start()
-
-    def tearDown(self):
-        for p in self._patches:
-            p.stop()
-        self.db.close()
-
+class ToolTestCase(ToolCase):
     def _ops(self, **filters):
         return [e["op"] for e in self.db.list_audit(**filters)]
 
+
+class TestAuditListing(ToolTestCase):
     def test_oversized_fields_are_clipped(self):
         self.db.append_audit("auth.login_failed", item_type="user", item_id="u" * 100_000,
                              client="ua" * 100_000, detail={"label": "x" * 100_000})
@@ -159,6 +141,7 @@ class TestToolCoverage(ToolTestCase):
         self.assertEqual([e["op"] for e in events],
                          ["restore", "delete", "tag", "update", "store"])
         delete_event = events[1]
+        self.assertEqual((delete_event["item_type"], delete_event["item_id"]), ("note", note["id"]))
         self.assertEqual(delete_event["namespace"], "proj")  # captured pre-delete
         self.assertEqual(delete_event["title"], "n")
         self.assertEqual(events[0]["detail"]["recreated"], True)

@@ -324,10 +324,13 @@ class TestSetupAndCaRoutes(TlsCase):
 
     def test_html_escapes_name(self):
         # Names are validated, but the page must not trust the record blindly.
-        self.state._save("<b>x</b>", False)
-        (self.dir).mkdir(exist_ok=True)
-        resp = self._client().get("/setup")
-        self.assertNotIn("<b>x</b>", resp.text)
+        # The status must have a fingerprint, or the page never shows the name.
+        from mnemomatic.spa import _setup_html
+        page = _setup_html({"state": "pending", "name": "<b>x</b>", "ca_fingerprint": "AB:CD",
+                            "https_url": "https://<i>y</i>:8443"})
+        self.assertIn("valid for <code>&lt;b&gt;x&lt;/b&gt;</code>", page)
+        self.assertNotIn("<b>x</b>", page)
+        self.assertNotIn("<i>y</i>", page)
 
 
 if __name__ == "__main__":

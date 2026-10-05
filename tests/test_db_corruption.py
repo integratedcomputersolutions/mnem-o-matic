@@ -1,29 +1,17 @@
 """Tests for JSON corruption graceful handling.
 
-This tests CRITICAL #4: JSON Corruption Risk
 - Database fields (tags, metadata) contain corrupted JSON
 - Tools gracefully handle corruption instead of crashing
 - Corrupted fields are logged as warnings
 - Operations continue with default values ([] for tags, {} for metadata)
 """
 
-import math
-import random
 import unittest
 from unittest.mock import patch
 
 from mnemomatic.db import Database
 from mnemomatic.models import Document, Knowledge, Note
-
-EMBEDDING_DIM = 384
-
-
-def _fake_embedding(text: str) -> list[float]:
-    """Deterministic fake embedding — seeded by text hash, L2-normalised."""
-    rng = random.Random(hash(text) & 0xFFFFFFFF)
-    vec = [rng.gauss(0, 1) for _ in range(EMBEDDING_DIM)]
-    norm = math.sqrt(sum(x * x for x in vec))
-    return [x / norm for x in vec]
+from tests._support import random_unit_vector
 
 
 class TestJSONCorruption(unittest.TestCase):
@@ -35,15 +23,15 @@ class TestJSONCorruption(unittest.TestCase):
 
         # Store test documents
         self.doc = Document(namespace="ns", title="TestDoc", content="Content", tags=["a", "b"])
-        self.doc_stored, _ = self.db.store_document(self.doc, _fake_embedding("TestDoc\nContent"))
+        self.doc_stored, _ = self.db.store_document(self.doc, random_unit_vector("TestDoc\nContent"))
 
         # Store test knowledge
         self.k = Knowledge(namespace="ns", subject="TestSubject", fact="TestFact", tags=["x"])
-        self.k_stored, _, _ = self.db.store_knowledge(self.k, _fake_embedding("TestSubject: TestFact"))
+        self.k_stored, _, _ = self.db.store_knowledge(self.k, random_unit_vector("TestSubject: TestFact"))
 
         # Store test note
         self.note = Note(namespace="ns", title="TestNote", content="NoteContent", tags=["note"])
-        self.note_stored, _ = self.db.store_note(self.note, _fake_embedding("TestNote\nNoteContent"))
+        self.note_stored, _ = self.db.store_note(self.note, random_unit_vector("TestNote\nNoteContent"))
 
     def tearDown(self):
         self.db.close()
@@ -114,7 +102,7 @@ class TestJSONCorruption(unittest.TestCase):
 
     def test_vec_search_with_corrupted_tags_still_returns_result(self):
         """Vector search with corrupted tags in result doesn't crash."""
-        emb = _fake_embedding("TestDoc\nContent")
+        emb = random_unit_vector("TestDoc\nContent")
         self._corrupt_field("documents", self.doc_stored.id, "tags", "not json")
         results = self.db.search_vec(emb, table="documents", namespace="ns")
         # Should still find the document

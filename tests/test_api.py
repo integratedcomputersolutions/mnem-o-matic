@@ -7,7 +7,6 @@ from unittest.mock import patch
 
 import httpx
 from starlette.applications import Starlette
-from starlette.testclient import TestClient
 
 from mnemomatic import config, runtime
 from mnemomatic.api import INSTANCE_ID, SecurityHeadersMiddleware, build_api_routes
@@ -15,7 +14,7 @@ from mnemomatic.audit import RequestMetaMiddleware
 from mnemomatic.auth import COOKIE_NAME, SECURE_COOKIE_NAME, AuthMiddleware
 from mnemomatic.identity import FirstRun
 from mnemomatic.models import Document, Note
-from tests._support import IdentityFixture
+from tests._support import CookieClient, IdentityFixture
 
 SETTINGS = {"version": "3.0.0-test", "mode": "FTS-only (no embedder)", "model": None}
 
@@ -34,7 +33,7 @@ class ApiCase(unittest.TestCase):
         app = AuthMiddleware(app, identity=lambda: self.fx.identity)
         app = SecurityHeadersMiddleware(app, pending_origin=lambda: self.pending["origin"],
                                         hsts=lambda: self.pending["hsts"])
-        self.client = TestClient(app, base_url="http://testserver")
+        self.client = CookieClient(app, base_url="http://testserver")
         # The tool modules reach the database through runtime._db.
         self._patches = [patch.object(runtime, "_db", return_value=self.fx.db),
                          patch.object(runtime, "_embedder", return_value=None)]
@@ -92,7 +91,7 @@ class TestConventions(ApiCase):
         self.assertIn("connect-src 'self' https://memory.example:8443;", csp)
 
     def test_hsts_only_when_enabled_and_only_over_https(self):
-        https = TestClient(self.client.app, base_url="https://testserver")
+        https = CookieClient(self.client.app, base_url="https://testserver")
         # Pending or non-443: never, even over HTTPS — HSTS binds to the host,
         # not the port, and would redirect browsers at the plain listener.
         self.assertNotIn("strict-transport-security", https.get("/api/session").headers)
@@ -171,7 +170,7 @@ class TestSessionAndLogin(ApiCase):
         self.assertEqual(self.events("auth.logout")[0]["actor"], "admin")
 
     def test_secure_cookie_over_https(self):
-        https = TestClient(self.client.app, base_url="https://testserver")
+        https = CookieClient(self.client.app, base_url="https://testserver")
         resp = https.post("/api/login", json={"username": "admin", "password": IdentityFixture.ADMIN_PASSWORD},
                           headers={"Origin": "https://testserver"})
         session = next(c for c in resp.headers.get_list("set-cookie") if c.startswith(f"{SECURE_COOKIE_NAME}="))
@@ -534,9 +533,6 @@ class TestStoreViews(ApiCase):
 
     def test_audit_listing(self):
         self.post("/api/login", {"username": "admin", "password": IdentityFixture.ADMIN_PASSWORD})
-        # Only the login's audit row is wanted; its cookie would arrive next to
-        # the explicit one below, and two session cookies count as none.
-        self.client.cookies.clear()
         body = self.client.get("/api/audit?op=auth.login", cookies=self.admin()).json()
         self.assertEqual(body["total"], 1)
         self.assertEqual(body["events"][0]["actor"], "admin")
@@ -620,7 +616,7 @@ class TestHttpsConfirm(ApiCase):
                                  settings_info=lambda: dict(SETTINGS), first_run=self.first_run,
                                  https=_PendingTls())
         app = AuthMiddleware(RequestMetaMiddleware(Starlette(routes=[mount])), identity=lambda: self.fx.identity)
-        self.client = TestClient(app, base_url="http://testserver")
+        self.client = CookieClient(app, base_url="http://testserver")
 
     def test_confirm_signs_everyone_out(self):
         # The confirming admin's cookie crossed plain HTTP, and so may every

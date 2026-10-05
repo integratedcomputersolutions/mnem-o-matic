@@ -10,20 +10,14 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
-from mnemomatic.db import CHUNK_THRESHOLD, Database
+from mnemomatic.db import CHUNK_THRESHOLD
 from mnemomatic.models import Document, Knowledge, Note
 from mnemomatic import runtime
 from mnemomatic import tools_search
-from tests._support import axis, mix
+from tests._support import axis, MemDbCase, mix, ToolCase
 
 
-class DbTestCase(unittest.TestCase):
-    def setUp(self):
-        self.db = Database(":memory:")
-
-    def tearDown(self):
-        self.db.close()
-
+class DbTestCase(MemDbCase):
     def _age(self, table, item_id, days):
         """Backdate an item's updated_at so recency filters have something to bite on."""
         ts = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
@@ -146,20 +140,8 @@ class TestItemEmbedding(DbTestCase):
         self.assertAlmostEqual(sum(v * v for v in emb) ** 0.5, 1.0, places=5)
 
 
-class ToolTestCase(DbTestCase):
-    def setUp(self):
-        super().setUp()
-        self._patches = [
-            patch.object(runtime, "_db", return_value=self.db),
-            patch.object(runtime, "_embedder", return_value=object()),
-        ]
-        for p in self._patches:
-            p.start()
-
-    def tearDown(self):
-        for p in self._patches:
-            p.stop()
-        super().tearDown()
+class ToolTestCase(ToolCase, DbTestCase):
+    embedder = object()            # present, so semantic modes are attempted
 
 
 class TestRelatedTool(ToolTestCase):
@@ -211,17 +193,21 @@ class TestRelatedTool(ToolTestCase):
 
 class TestSearchToolFilters(ToolTestCase):
     def test_filters_reach_the_db(self):
+        # Each filter must exclude something, or dropping it on the way to the
+        # db would go unnoticed: only "recent" carries the tag, only "old" is aged.
         recent, _ = self.db.store_note(
             Note(namespace="proj", title="recent", content="topic", tags=["keep"]), axis(0))
         old, _ = self.db.store_note(
-            Note(namespace="proj", title="old", content="topic", tags=["keep"]), axis(0))
+            Note(namespace="proj", title="old", content="topic", tags=["other"]), axis(0))
         self._age("notes", old.id, 90)
 
         with patch.object(runtime, "_safe_embed", return_value=axis(0)):
             tagged = tools_search.search("topic", tags=["keep"], mode="fulltext")
+            tagged_hybrid = tools_search.search("topic", tags=["keep"], mode="hybrid")
             cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).date().isoformat()
             fresh = tools_search.search("topic", updated_after=cutoff, mode="hybrid")
-        self.assertEqual({r["id"] for r in tagged}, {recent.id, old.id})
+        self.assertEqual([r["id"] for r in tagged], [recent.id])
+        self.assertEqual([r["id"] for r in tagged_hybrid], [recent.id])
         self.assertEqual([r["id"] for r in fresh], [recent.id])
 
     def test_invalid_updated_after_is_rejected(self):

@@ -6,7 +6,6 @@ credential. That exemption is the security-sensitive part: the response must
 stay minimal, and the data-bearing routes beside it must stay guarded.
 """
 
-import json
 import unittest
 
 from starlette.applications import Starlette
@@ -47,6 +46,9 @@ def _app():
 
 class TestReachability(unittest.TestCase):
     def test_health_needs_no_credentials(self):
+        # No _db patching anywhere: if the route touched the database it would
+        # try the real DB_PATH and fail. And the body is exactly this, so no
+        # version or configuration leaks.
         resp = _app().get("/health")
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json(), {"status": "ok"})
@@ -71,31 +73,6 @@ class TestExemptionIsNarrow(unittest.TestCase):
     def test_a_path_merely_containing_health_is_protected(self):
         self.assertEqual(_app().get("/api/healthy-looking").status_code, 401)
         self.assertEqual(_app().get("/mcp/healthy-looking").status_code, 401)
-
-
-class TestResponseLeaksNothing(unittest.TestCase):
-    """An unauthenticated caller learns only that something is listening."""
-
-    def test_body_carries_status_and_nothing_else(self):
-        body = _app().get("/health").json()
-        self.assertEqual(list(body), ["status"])
-
-    def test_no_version_or_configuration_disclosed(self):
-        raw = json.dumps(_app().get("/health").json()).lower()
-        for leak in ("version", "model", "embed", "auth", "path", "namespace"):
-            with self.subTest(leak=leak):
-                self.assertNotIn(leak, raw)
-
-
-class TestDoesNotTouchTheDatabase(unittest.TestCase):
-    """Probing must not depend on the database: polling it adds load, and a
-    momentary lock would turn into a flapping health state."""
-
-    def test_health_answers_with_no_database_configured(self):
-        # No _db patching anywhere — if the route touched the database it would
-        # try the real DB_PATH and fail.
-        resp = _app().get("/health")
-        self.assertEqual(resp.status_code, 200)
 
 
 if __name__ == "__main__":

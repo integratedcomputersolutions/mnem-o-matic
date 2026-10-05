@@ -1,4 +1,4 @@
-"""Tests for Phase A of the memory-foundations work: usage tracking and revisions.
+"""Tests for usage tracking and revisions.
 
 Covers the v1→v2 schema migration, record_access semantics (what counts and
 what doesn't), revision capture across every mutation path (update, delete,
@@ -7,24 +7,17 @@ pruning, and the list_revisions/restore tools end to end.
 """
 
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
 import mnemomatic.db as db_module
 from mnemomatic.db import Database
 from mnemomatic.models import Document, Knowledge, Note
-from mnemomatic import runtime
 from mnemomatic import tools_history
 from mnemomatic import tools_search
+from tests._support import MemDbCase, temp_db_path, ToolCase
 
 
-class DbTestCase(unittest.TestCase):
-    def setUp(self):
-        self.db = Database(":memory:")
-
-    def tearDown(self):
-        self.db.close()
-
+class DbTestCase(MemDbCase):
     def _note(self, title="n", content="body", namespace="proj") -> Note:
         stored, _ = self.db.store_note(
             Note(namespace=namespace, title=title, content=content), embedding=None)
@@ -33,33 +26,28 @@ class DbTestCase(unittest.TestCase):
 
 class TestMigration(unittest.TestCase):
     def test_v1_database_gains_columns_and_revisions_table(self):
-        import tempfile
-        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-        tmp.close()
-        try:
-            # Build a current database, then strip it back to version-1 shape.
-            db = Database(tmp.name)
-            db.store_note(Note(namespace="p", title="t", content="c"), embedding=None)
-            conn = db._get_conn()
-            conn.execute("DROP TABLE revisions")
-            for table in ("documents", "knowledge", "notes"):
-                conn.execute(f"ALTER TABLE {table} DROP COLUMN retrieval_count")
-                conn.execute(f"ALTER TABLE {table} DROP COLUMN last_accessed")
-            conn.execute("PRAGMA user_version = 1")
-            conn.commit()
-            db.close()
+        path = temp_db_path(self)
+        # Build a current database, then strip it back to version-1 shape.
+        db = Database(str(path))
+        db.store_note(Note(namespace="p", title="t", content="c"), embedding=None)
+        conn = db._get_conn()
+        conn.execute("DROP TABLE revisions")
+        for table in ("documents", "knowledge", "notes"):
+            conn.execute(f"ALTER TABLE {table} DROP COLUMN retrieval_count")
+            conn.execute(f"ALTER TABLE {table} DROP COLUMN last_accessed")
+        conn.execute("PRAGMA user_version = 1")
+        conn.commit()
+        db.close()
 
-            migrated = Database(tmp.name)
-            conn = migrated._get_conn()
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()["user_version"],
-                             db_module.SCHEMA_VERSION)
-            row = conn.execute("SELECT retrieval_count, last_accessed FROM notes").fetchone()
-            self.assertEqual(row["retrieval_count"], 0)
-            self.assertIsNone(row["last_accessed"])
-            conn.execute("SELECT * FROM revisions")  # table exists
-            migrated.close()
-        finally:
-            Path(tmp.name).unlink(missing_ok=True)
+        migrated = Database(str(path))
+        conn = migrated._get_conn()
+        self.assertEqual(conn.execute("PRAGMA user_version").fetchone()["user_version"],
+                         db_module.SCHEMA_VERSION)
+        row = conn.execute("SELECT retrieval_count, last_accessed FROM notes").fetchone()
+        self.assertEqual(row["retrieval_count"], 0)
+        self.assertIsNone(row["last_accessed"])
+        conn.execute("SELECT * FROM revisions")  # table exists
+        migrated.close()
 
 
 class TestRecordAccess(DbTestCase):
@@ -185,22 +173,8 @@ class TestListRevisionsFilters(DbTestCase):
             self.db.list_revisions(item_type="bogus")
 
 
-class ToolTestCase(DbTestCase):
+class ToolTestCase(ToolCase, DbTestCase):
     """Server tools against a real in-memory Database, FTS-only (no embedder)."""
-
-    def setUp(self):
-        super().setUp()
-        self._patches = [
-            patch.object(runtime, "_db", return_value=self.db),
-            patch.object(runtime, "_embedder", return_value=None),
-        ]
-        for p in self._patches:
-            p.start()
-
-    def tearDown(self):
-        for p in self._patches:
-            p.stop()
-        super().tearDown()
 
 
 class TestAccessRecordingTools(ToolTestCase):

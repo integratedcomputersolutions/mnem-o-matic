@@ -13,13 +13,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from starlette.testclient import TestClient
 
 from mnemomatic import runtime, server
 from mnemomatic.auth import COOKIE_NAME
-from tests._support import IdentityFixture
+from tests._support import CookieClient, IdentityFixture, SPA_HTML
 
-HTML = "<!doctype html><html><head><title>Mnem-O-matic</title></head><body><div id=app></div></body></html>"
 INIT = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
         "params": {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}}}
 MCP_HEADERS = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
@@ -33,7 +31,7 @@ class TestAssembledStack(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         app_dir = Path(tmp.name)
         (app_dir / "assets").mkdir()
-        (app_dir / "index.html").write_text(HTML)
+        (app_dir / "index.html").write_text(SPA_HTML)
         for target, value in (("_db", self.fx.db), ("_embedder", None)):
             p = patch.object(runtime, target, return_value=value)
             p.start()
@@ -42,7 +40,7 @@ class TestAssembledStack(unittest.TestCase):
         # once per instance. FastMCP builds it lazily, so dropping the cached
         # one gives each test a fresh manager (and a fresh lifespan).
         runtime.mcp._session_manager = None
-        self.client = TestClient(server.build_app(None, app_dir=app_dir), base_url="http://testserver")
+        self.client = CookieClient(server.build_app(None, app_dir=app_dir), base_url="http://testserver")
         self.client.__enter__()
         self.addCleanup(self.client.__exit__, None, None, None)
 

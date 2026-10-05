@@ -3,11 +3,11 @@ every existing row alone, stamp version 5, and say so in the audit log."""
 
 import json
 import sqlite3
-import tempfile
 import unittest
 from pathlib import Path
 
 from mnemomatic.db import SCHEMA_VERSION, Database
+from tests._support import temp_db_path
 
 
 def _build_v4_database(path: Path) -> None:
@@ -37,14 +37,8 @@ def _build_v4_database(path: Path) -> None:
 
 class TestMigrationV5(unittest.TestCase):
     def setUp(self):
-        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-        tmp.close()
-        self.path = Path(tmp.name)
+        self.path = temp_db_path(self)
         _build_v4_database(self.path)
-
-    def tearDown(self):
-        for p in (self.path, Path(str(self.path) + "-wal"), Path(str(self.path) + "-shm")):
-            p.unlink(missing_ok=True)
 
     def _tables(self, conn) -> set[str]:
         return {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
@@ -77,14 +71,12 @@ class TestMigrationV5(unittest.TestCase):
         self.assertEqual(events[0]["item_type"], "schema")
         self.assertEqual(events[0]["detail"], {"from": 4, "to": SCHEMA_VERSION})
 
+        # Version 6's column arrives on the same upgrade.
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(users)")}
+        self.assertIn("credential_version", cols)
+
         # No users yet: that is the first-run state the server bootstraps from.
         self.assertEqual(conn.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"], 0)
-        db.close()
-
-    def test_upgrade_adds_credential_version(self):
-        db = Database(str(self.path))
-        cols = {r["name"] for r in db.connection().execute("PRAGMA table_info(users)")}
-        self.assertIn("credential_version", cols)
         db.close()
 
     def test_v5_database_gains_credential_version(self):
@@ -111,16 +103,10 @@ class TestMigrationV5(unittest.TestCase):
         db.close()
 
     def test_fresh_database_records_no_migration(self):
-        fresh = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-        fresh.close()
-        try:
-            db = Database(fresh.name)
-            self.assertEqual(db.list_audit(op="schema.migrated"), [])
-            self.assertTrue({"users", "sessions", "api_tokens", "settings"} <= self._tables(db.connection()))
-            db.close()
-        finally:
-            for p in (Path(fresh.name), Path(fresh.name + "-wal"), Path(fresh.name + "-shm")):
-                p.unlink(missing_ok=True)
+        db = Database(str(temp_db_path(self)))
+        self.assertEqual(db.list_audit(op="schema.migrated"), [])
+        self.assertTrue({"users", "sessions", "api_tokens", "settings"} <= self._tables(db.connection()))
+        db.close()
 
     def test_settings_helpers(self):
         db = Database(str(self.path))

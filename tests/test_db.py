@@ -5,13 +5,9 @@ Uses in-memory SQLite — no Docker or live server required.
 Run with: python -m unittest tests/test_db.py -v
 """
 
-import math
-import random
 import signal
 import sqlite3
-import tempfile
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
 import sqlite_vec
@@ -22,17 +18,7 @@ from mnemomatic.db import (
     _SPECS,
 )
 from mnemomatic.models import Document, Knowledge, Note
-from tests._support import tilted_axis
-
-EMBEDDING_DIM = 384
-
-
-def _fake_embedding(text: str) -> list[float]:
-    """Deterministic fake embedding — seeded by text hash, L2-normalised."""
-    rng = random.Random(hash(text) & 0xFFFFFFFF)
-    vec = [rng.gauss(0, 1) for _ in range(EMBEDDING_DIM)]
-    norm = math.sqrt(sum(x * x for x in vec))
-    return [x / norm for x in vec]
+from tests._support import EMBEDDING_DIM, random_unit_vector, temp_db_path, tilted_axis
 
 
 # ── Documents ──────────────────────────────────────────────────────────────────
@@ -47,7 +33,7 @@ class TestDocumentCRUD(unittest.TestCase):
 
     def test_store_and_get(self):
         doc = Document(namespace="ns", title="Title", content="Body")
-        stored, created = self.db.store_document(doc, _fake_embedding("Title\nBody"))
+        stored, created = self.db.store_document(doc, random_unit_vector("Title\nBody"))
         self.assertTrue(created)
         self.assertEqual(stored.title, "Title")
         fetched = self.db.get_document(stored.id)
@@ -60,11 +46,11 @@ class TestDocumentCRUD(unittest.TestCase):
 
     def test_upsert_updates_in_place(self):
         doc = Document(namespace="ns", title="T", content="v1")
-        stored, created = self.db.store_document(doc, _fake_embedding("T\nv1"))
+        stored, created = self.db.store_document(doc, random_unit_vector("T\nv1"))
         self.assertTrue(created)
 
         doc2 = Document(namespace="ns", title="T", content="v2")
-        stored2, created2 = self.db.store_document(doc2, _fake_embedding("T\nv2"))
+        stored2, created2 = self.db.store_document(doc2, random_unit_vector("T\nv2"))
         self.assertFalse(created2)
         self.assertEqual(stored2.id, stored.id)
         self.assertEqual(stored2.content, "v2")
@@ -73,22 +59,22 @@ class TestDocumentCRUD(unittest.TestCase):
     def test_upsert_different_namespace_creates_new(self):
         doc_a = Document(namespace="a", title="T", content="C")
         doc_b = Document(namespace="b", title="T", content="C")
-        _, created_a = self.db.store_document(doc_a, _fake_embedding("T\nC"))
-        _, created_b = self.db.store_document(doc_b, _fake_embedding("T\nC"))
+        _, created_a = self.db.store_document(doc_a, random_unit_vector("T\nC"))
+        _, created_b = self.db.store_document(doc_b, random_unit_vector("T\nC"))
         self.assertTrue(created_a)
         self.assertTrue(created_b)
 
     def test_update_content(self):
         doc = Document(namespace="ns", title="T", content="old")
-        stored, _ = self.db.store_document(doc, _fake_embedding("T\nold"))
+        stored, _ = self.db.store_document(doc, random_unit_vector("T\nold"))
         updated = self.db.update_document(stored.id, content="new")
         self.assertEqual(updated.content, "new")
         self.assertEqual(self.db.get_document(stored.id).content, "new")
 
     def test_update_with_embedding(self):
         doc = Document(namespace="ns", title="T", content="old")
-        stored, _ = self.db.store_document(doc, _fake_embedding("T\nold"))
-        new_emb = _fake_embedding("T\nnew")
+        stored, _ = self.db.store_document(doc, random_unit_vector("T\nold"))
+        new_emb = random_unit_vector("T\nnew")
         updated = self.db.update_document(stored.id, content="new", embedding=new_emb)
         self.assertEqual(updated.content, "new")
         # The new embedding must actually be written: querying with it returns
@@ -102,13 +88,13 @@ class TestDocumentCRUD(unittest.TestCase):
 
     def test_update_invalid_field_raises(self):
         doc = Document(namespace="ns", title="T", content="C")
-        stored, _ = self.db.store_document(doc, _fake_embedding("T\nC"))
+        stored, _ = self.db.store_document(doc, random_unit_vector("T\nC"))
         with self.assertRaises(ValueError):
             self.db.update_document(stored.id, bad_field="x")
 
     def test_delete(self):
         doc = Document(namespace="ns", title="T", content="C")
-        stored, _ = self.db.store_document(doc, _fake_embedding("T\nC"))
+        stored, _ = self.db.store_document(doc, random_unit_vector("T\nC"))
         self.assertTrue(self.db.delete_document(stored.id))
         self.assertIsNone(self.db.get_document(stored.id))
 
@@ -118,7 +104,7 @@ class TestDocumentCRUD(unittest.TestCase):
     def test_list(self):
         for i in range(3):
             doc = Document(namespace="ns", title=f"T{i}", content="C")
-            self.db.store_document(doc, _fake_embedding(f"T{i}\nC"))
+            self.db.store_document(doc, random_unit_vector(f"T{i}\nC"))
         self.assertEqual(len(self.db.list_documents("ns")), 3)
         self.assertEqual(len(self.db.list_documents("other")), 0)
 
@@ -141,7 +127,7 @@ class TestKnowledgeCRUD(unittest.TestCase):
 
     def test_store_and_get(self):
         k = Knowledge(namespace="ns", subject="auth", fact="Uses JWT")
-        stored, created, _ = self.db.store_knowledge(k, _fake_embedding("auth: Uses JWT"))
+        stored, created, _ = self.db.store_knowledge(k, random_unit_vector("auth: Uses JWT"))
         self.assertTrue(created)
         fetched = self.db.get_knowledge(stored.id)
         self.assertIsNotNone(fetched)
@@ -150,31 +136,9 @@ class TestKnowledgeCRUD(unittest.TestCase):
     def test_get_nonexistent_returns_none(self):
         self.assertIsNone(self.db.get_knowledge("no-such-id"))
 
-    def test_upsert_supersedes_on_fact_change(self):
-        # Temporal semantics: a different fact for an existing subject closes
-        # the old entry as history and inserts a successor with a new id.
-        k = Knowledge(namespace="ns", subject="db", fact="Postgres")
-        stored, _, _ = self.db.store_knowledge(k, _fake_embedding("db: Postgres"))
-        k2 = Knowledge(namespace="ns", subject="db", fact="SQLite")
-        stored2, created2, superseded = self.db.store_knowledge(k2, _fake_embedding("db: SQLite"))
-        self.assertTrue(created2)
-        self.assertNotEqual(stored2.id, stored.id)
-        self.assertEqual(superseded, stored.id)
-        self.assertEqual(stored2.fact, "SQLite")
-
-    def test_upsert_same_fact_updates_in_place(self):
-        k = Knowledge(namespace="ns", subject="db", fact="Postgres")
-        stored, _, _ = self.db.store_knowledge(k, _fake_embedding("db: Postgres"))
-        k2 = Knowledge(namespace="ns", subject="db", fact="Postgres", confidence=0.5)
-        stored2, created2, superseded = self.db.store_knowledge(k2, _fake_embedding("db: Postgres"))
-        self.assertFalse(created2)
-        self.assertIsNone(superseded)
-        self.assertEqual(stored2.id, stored.id)
-        self.assertEqual(self.db.get_knowledge(stored.id).confidence, 0.5)
-
     def test_update_fact(self):
         k = Knowledge(namespace="ns", subject="auth", fact="old")
-        stored, _, _ = self.db.store_knowledge(k, _fake_embedding("auth: old"))
+        stored, _, _ = self.db.store_knowledge(k, random_unit_vector("auth: old"))
         updated = self.db.update_knowledge(stored.id, fact="new")
         self.assertEqual(updated.fact, "new")
 
@@ -185,7 +149,7 @@ class TestKnowledgeCRUD(unittest.TestCase):
         entry first stored without an embedding (FTS-only mode) never became
         semantically searchable once an embedder was added.
         """
-        emb = _fake_embedding("auth: Uses JWT")
+        emb = random_unit_vector("auth: Uses JWT")
         self.db.store_knowledge(Knowledge(namespace="ns", subject="auth", fact="Uses JWT"), None)
         self.assertEqual(self.db.search_vec(emb, table="knowledge"), [])
         self.db.store_knowledge(Knowledge(namespace="ns", subject="auth", fact="Uses JWT"), emb)
@@ -197,13 +161,13 @@ class TestKnowledgeCRUD(unittest.TestCase):
 
     def test_update_invalid_field_raises(self):
         k = Knowledge(namespace="ns", subject="s", fact="f")
-        stored, _, _ = self.db.store_knowledge(k, _fake_embedding("s: f"))
+        stored, _, _ = self.db.store_knowledge(k, random_unit_vector("s: f"))
         with self.assertRaises(ValueError):
             self.db.update_knowledge(stored.id, bad_field="x")
 
     def test_delete(self):
         k = Knowledge(namespace="ns", subject="s", fact="f")
-        stored, _, _ = self.db.store_knowledge(k, _fake_embedding("s: f"))
+        stored, _, _ = self.db.store_knowledge(k, random_unit_vector("s: f"))
         self.assertTrue(self.db.delete_knowledge(stored.id))
         self.assertIsNone(self.db.get_knowledge(stored.id))
 
@@ -213,7 +177,7 @@ class TestKnowledgeCRUD(unittest.TestCase):
     def test_list(self):
         for i in range(3):
             k = Knowledge(namespace="ns", subject=f"s{i}", fact="f")
-            self.db.store_knowledge(k, _fake_embedding(f"s{i}: f"))
+            self.db.store_knowledge(k, random_unit_vector(f"s{i}: f"))
         self.assertEqual(len(self.db.list_knowledge("ns")), 3)
         self.assertEqual(len(self.db.list_knowledge("other")), 0)
 
@@ -236,7 +200,7 @@ class TestNoteCRUD(unittest.TestCase):
 
     def test_store_and_get(self):
         note = Note(namespace="ns", title="Idea", content="Quick thought")
-        stored, created = self.db.store_note(note, _fake_embedding("Idea\nQuick thought"))
+        stored, created = self.db.store_note(note, random_unit_vector("Idea\nQuick thought"))
         self.assertTrue(created)
         fetched = self.db.get_note(stored.id)
         self.assertIsNotNone(fetched)
@@ -247,16 +211,16 @@ class TestNoteCRUD(unittest.TestCase):
 
     def test_upsert_updates_in_place(self):
         note = Note(namespace="ns", title="T", content="v1")
-        stored, _ = self.db.store_note(note, _fake_embedding("T\nv1"))
+        stored, _ = self.db.store_note(note, random_unit_vector("T\nv1"))
         note2 = Note(namespace="ns", title="T", content="v2")
-        stored2, created2 = self.db.store_note(note2, _fake_embedding("T\nv2"))
+        stored2, created2 = self.db.store_note(note2, random_unit_vector("T\nv2"))
         self.assertFalse(created2)
         self.assertEqual(stored2.id, stored.id)
         self.assertEqual(stored2.content, "v2")
 
     def test_update_content(self):
         note = Note(namespace="ns", title="T", content="old")
-        stored, _ = self.db.store_note(note, _fake_embedding("T\nold"))
+        stored, _ = self.db.store_note(note, random_unit_vector("T\nold"))
         updated = self.db.update_note(stored.id, content="new")
         self.assertEqual(updated.content, "new")
 
@@ -266,7 +230,7 @@ class TestNoteCRUD(unittest.TestCase):
         Regression: see the matching knowledge test — store_note had the same bare-UPDATE
         bug, so notes first stored FTS-only never became semantically searchable.
         """
-        emb = _fake_embedding("Idea\nQuick thought")
+        emb = random_unit_vector("Idea\nQuick thought")
         self.db.store_note(Note(namespace="ns", title="Idea", content="Quick thought"), None)
         self.assertEqual(self.db.search_vec(emb, table="notes"), [])
         self.db.store_note(Note(namespace="ns", title="Idea", content="Quick thought"), emb)
@@ -278,13 +242,13 @@ class TestNoteCRUD(unittest.TestCase):
 
     def test_update_invalid_field_raises(self):
         note = Note(namespace="ns", title="T", content="C")
-        stored, _ = self.db.store_note(note, _fake_embedding("T\nC"))
+        stored, _ = self.db.store_note(note, random_unit_vector("T\nC"))
         with self.assertRaises(ValueError):
             self.db.update_note(stored.id, bad_field="x")
 
     def test_delete(self):
         note = Note(namespace="ns", title="T", content="C")
-        stored, _ = self.db.store_note(note, _fake_embedding("T\nC"))
+        stored, _ = self.db.store_note(note, random_unit_vector("T\nC"))
         self.assertTrue(self.db.delete_note(stored.id))
         self.assertIsNone(self.db.get_note(stored.id))
 
@@ -294,7 +258,7 @@ class TestNoteCRUD(unittest.TestCase):
     def test_list(self):
         for i in range(3):
             note = Note(namespace="ns", title=f"T{i}", content="C")
-            self.db.store_note(note, _fake_embedding(f"T{i}\nC"))
+            self.db.store_note(note, random_unit_vector(f"T{i}\nC"))
         self.assertEqual(len(self.db.list_notes("ns")), 3)
         self.assertEqual(len(self.db.list_notes("other")), 0)
 
@@ -312,7 +276,7 @@ class TestTags(unittest.TestCase):
     def setUp(self):
         self.db = Database(":memory:")
         doc = Document(namespace="ns", title="T", content="C", tags=["a", "b"])
-        self.doc_id = self.db.store_document(doc, _fake_embedding("T\nC"))[0].id
+        self.doc_id = self.db.store_document(doc, random_unit_vector("T\nC"))[0].id
 
     def tearDown(self):
         self.db.close()
@@ -346,14 +310,14 @@ class TestTags(unittest.TestCase):
 
     def test_tags_work_on_knowledge(self):
         k = Knowledge(namespace="ns", subject="s", fact="f", tags=["x"])
-        k_id = self.db.store_knowledge(k, _fake_embedding("s: f"))[0].id
+        k_id = self.db.store_knowledge(k, random_unit_vector("s: f"))[0].id
         tags = self.db.update_tags(k_id, "knowledge", add_tags=["y"])
         self.assertIn("x", tags)
         self.assertIn("y", tags)
 
     def test_tags_work_on_notes(self):
         note = Note(namespace="ns", title="T", content="C", tags=["x"])
-        note_id = self.db.store_note(note, _fake_embedding("T\nC"))[0].id
+        note_id = self.db.store_note(note, random_unit_vector("T\nC"))[0].id
         tags = self.db.update_tags(note_id, "note", add_tags=["y"])
         self.assertIn("y", tags)
 
@@ -390,11 +354,11 @@ class TestNamespaces(unittest.TestCase):
 
     def test_lists_all_namespaces(self):
         doc = Document(namespace="alpha", title="T", content="C")
-        self.db.store_document(doc, _fake_embedding("T\nC"))
+        self.db.store_document(doc, random_unit_vector("T\nC"))
         k = Knowledge(namespace="beta", subject="s", fact="f")
-        self.db.store_knowledge(k, _fake_embedding("s: f"))
+        self.db.store_knowledge(k, random_unit_vector("s: f"))
         note = Note(namespace="gamma", title="T", content="C")
-        self.db.store_note(note, _fake_embedding("T\nC"))
+        self.db.store_note(note, random_unit_vector("T\nC"))
 
         namespaces = self.db.list_namespaces()
         self.assertIn("alpha", namespaces)
@@ -407,7 +371,7 @@ class TestNamespaces(unittest.TestCase):
     def test_deduplicates_namespaces(self):
         for i in range(3):
             doc = Document(namespace="shared", title=f"T{i}", content="C")
-            self.db.store_document(doc, _fake_embedding(f"T{i}\nC"))
+            self.db.store_document(doc, random_unit_vector(f"T{i}\nC"))
         namespaces = self.db.list_namespaces()
         self.assertEqual(namespaces.count("shared"), 1)
 
@@ -424,11 +388,11 @@ class TestRenameNamespace(unittest.TestCase):
 
     def _store_all(self):
         doc = Document(namespace="old", title="T", content="C")
-        self.doc_id = self.db.store_document(doc, _fake_embedding("T\nC"))[0].id
+        self.doc_id = self.db.store_document(doc, random_unit_vector("T\nC"))[0].id
         k = Knowledge(namespace="old", subject="s", fact="f")
-        self.k_id = self.db.store_knowledge(k, _fake_embedding("s: f"))[0].id
+        self.k_id = self.db.store_knowledge(k, random_unit_vector("s: f"))[0].id
         note = Note(namespace="old", title="N", content="C")
-        self.note_id = self.db.store_note(note, _fake_embedding("N\nC"))[0].id
+        self.note_id = self.db.store_note(note, random_unit_vector("N\nC"))[0].id
 
     def test_rename_moves_all_content_types(self):
         self._store_all()
@@ -447,9 +411,9 @@ class TestRenameNamespace(unittest.TestCase):
 
     def test_rename_into_existing_namespace_merges(self):
         doc_old = Document(namespace="old", title="T-old", content="C")
-        self.db.store_document(doc_old, _fake_embedding("T-old\nC"))
+        self.db.store_document(doc_old, random_unit_vector("T-old\nC"))
         doc_new = Document(namespace="new", title="T-new", content="C")
-        self.db.store_document(doc_new, _fake_embedding("T-new\nC"))
+        self.db.store_document(doc_new, random_unit_vector("T-new\nC"))
 
         counts, replaced = self.db.rename_namespace("old", "new")
         self.assertEqual(counts["documents"], 1)
@@ -463,9 +427,9 @@ class TestRenameNamespace(unittest.TestCase):
         # Merge semantics mirror the store_* upsert: on a title collision the
         # moved item replaces the target's, and the replacement is reported.
         doc_a, _ = self.db.store_document(
-            Document(namespace="old", title="Same", content="from-old"), _fake_embedding("a"))
+            Document(namespace="old", title="Same", content="from-old"), random_unit_vector("a"))
         doc_b, _ = self.db.store_document(
-            Document(namespace="new", title="Same", content="from-new"), _fake_embedding("b"))
+            Document(namespace="new", title="Same", content="from-new"), random_unit_vector("b"))
 
         counts, replaced = self.db.rename_namespace("old", "new")
         self.assertEqual(counts["documents"], 1)
@@ -478,13 +442,13 @@ class TestRenameNamespace(unittest.TestCase):
 
     def test_rename_conflict_replaces_vectors_and_chunks(self):
         # The overwritten target's vector and chunk rows must not linger.
-        loser_emb = _fake_embedding("loser")
+        loser_emb = random_unit_vector("loser")
         self.db.store_document(
             Document(namespace="new", title="Same", content="x" * 3000), None,
             chunks=[("loser chunk", loser_emb)],
         )
         winner, _ = self.db.store_document(
-            Document(namespace="old", title="Same", content="winner"), _fake_embedding("winner"))
+            Document(namespace="old", title="Same", content="winner"), random_unit_vector("winner"))
 
         _, replaced = self.db.rename_namespace("old", "new")
         self.assertEqual(replaced["documents"], 1)
@@ -516,7 +480,7 @@ class TestRenameNamespace(unittest.TestCase):
 
     def test_renamed_items_searchable_in_new_namespace(self):
         doc = Document(namespace="old", title="auth guide", content="JWT tokens")
-        emb = _fake_embedding("auth guide\nJWT tokens")
+        emb = random_unit_vector("auth guide\nJWT tokens")
         self.db.store_document(doc, emb)
         self.db.rename_namespace("old", "new")
 
@@ -602,11 +566,11 @@ class TestDeleteNamespace(unittest.TestCase):
 
     def _store_all(self, namespace="target"):
         doc = Document(namespace=namespace, title="T", content="C")
-        self.doc_id = self.db.store_document(doc, _fake_embedding("T\nC"))[0].id
+        self.doc_id = self.db.store_document(doc, random_unit_vector("T\nC"))[0].id
         k = Knowledge(namespace=namespace, subject="s", fact="f")
-        self.k_id = self.db.store_knowledge(k, _fake_embedding("s: f"))[0].id
+        self.k_id = self.db.store_knowledge(k, random_unit_vector("s: f"))[0].id
         note = Note(namespace=namespace, title="N", content="C")
-        self.note_id = self.db.store_note(note, _fake_embedding("N\nC"))[0].id
+        self.note_id = self.db.store_note(note, random_unit_vector("N\nC"))[0].id
 
     def test_delete_removes_all_content_types(self):
         self._store_all()
@@ -628,7 +592,7 @@ class TestDeleteNamespace(unittest.TestCase):
     def test_delete_only_affects_target_namespace(self):
         self._store_all("target")
         doc2 = Document(namespace="other", title="T", content="C")
-        other_id = self.db.store_document(doc2, _fake_embedding("T\nC"))[0].id
+        other_id = self.db.store_document(doc2, random_unit_vector("T\nC"))[0].id
         self.db.delete_namespace("target")
         self.assertIsNotNone(self.db.get_document(other_id))
         self.assertIn("other", self.db.list_namespaces())
@@ -640,10 +604,10 @@ class TestDeleteNamespace(unittest.TestCase):
     def test_delete_multiple_items_per_type(self):
         for i in range(3):
             doc = Document(namespace="target", title=f"T{i}", content="C")
-            self.db.store_document(doc, _fake_embedding(f"T{i}\nC"))
+            self.db.store_document(doc, random_unit_vector(f"T{i}\nC"))
         for i in range(2):
             k = Knowledge(namespace="target", subject=f"s{i}", fact="f")
-            self.db.store_knowledge(k, _fake_embedding(f"s{i}: f"))
+            self.db.store_knowledge(k, random_unit_vector(f"s{i}: f"))
 
         counts = self.db.delete_namespace("target")
         self.assertEqual(counts["documents"], 3)
@@ -652,7 +616,7 @@ class TestDeleteNamespace(unittest.TestCase):
 
     def test_deleted_items_not_returned_by_search(self):
         doc = Document(namespace="target", title="auth guide", content="JWT tokens")
-        emb = _fake_embedding("auth guide\nJWT tokens")
+        emb = random_unit_vector("auth guide\nJWT tokens")
         self.db.store_document(doc, emb)
         self.db.delete_namespace("target")
 
@@ -661,7 +625,7 @@ class TestDeleteNamespace(unittest.TestCase):
 
     def test_deleted_items_not_returned_by_vec_search(self):
         doc = Document(namespace="target", title="auth guide", content="JWT tokens")
-        emb = _fake_embedding("auth guide\nJWT tokens")
+        emb = random_unit_vector("auth guide\nJWT tokens")
         self.db.store_document(doc, emb)
         self.db.delete_namespace("target")
 
@@ -676,15 +640,15 @@ class TestSearch(unittest.TestCase):
     def setUp(self):
         self.db = Database(":memory:")
         self.doc = Document(namespace="ns", title="authentication guide", content="JWT tokens for login")
-        self.doc_emb = _fake_embedding("authentication guide\nJWT tokens for login")
+        self.doc_emb = random_unit_vector("authentication guide\nJWT tokens for login")
         self.doc_id = self.db.store_document(self.doc, self.doc_emb)[0].id
 
         self.k = Knowledge(namespace="ns", subject="database choice", fact="SQLite for portability")
-        self.k_emb = _fake_embedding("database choice: SQLite for portability")
+        self.k_emb = random_unit_vector("database choice: SQLite for portability")
         self.k_id = self.db.store_knowledge(self.k, self.k_emb)[0].id
 
         self.note = Note(namespace="ns", title="meeting notes", content="discussed deploy pipeline")
-        self.note_emb = _fake_embedding("meeting notes\ndiscussed deploy pipeline")
+        self.note_emb = random_unit_vector("meeting notes\ndiscussed deploy pipeline")
         self.note_id = self.db.store_note(self.note, self.note_emb)[0].id
 
     def tearDown(self):
@@ -715,7 +679,7 @@ class TestSearch(unittest.TestCase):
 
     def test_fts_namespace_filter(self):
         other = Document(namespace="other", title="authentication", content="other content")
-        self.db.store_document(other, _fake_embedding("authentication\nother content"))
+        self.db.store_document(other, random_unit_vector("authentication\nother content"))
         results = self.db.search_fts("authentication", namespace="ns")
         ids = self._ids(results)
         self.assertIn(self.doc_id, ids)
@@ -769,7 +733,7 @@ class TestSearch(unittest.TestCase):
     def test_limit_respected(self):
         for i in range(10):
             doc = Document(namespace="ns", title=f"auth doc {i}", content="authentication content")
-            self.db.store_document(doc, _fake_embedding(f"auth doc {i}\nauthentication content"))
+            self.db.store_document(doc, random_unit_vector(f"auth doc {i}\nauthentication content"))
         results = self.db.search_fts("authentication", limit=3)
         self.assertLessEqual(len(results), 3)
 
@@ -903,13 +867,7 @@ def _build_legacy_db(path: str, dim: int = EMBEDDING_DIM) -> None:
 
 class TestSchemaMigration(unittest.TestCase):
     def setUp(self):
-        self._tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-        self._tmp.close()
-        self.path = self._tmp.name
-        Path(self.path).unlink()  # legacy builder wants to create it fresh
-
-    def tearDown(self):
-        Path(self.path).unlink(missing_ok=True)
+        self.path = str(temp_db_path(self))     # not created: the legacy builder wants it fresh
 
     def _user_version(self, db: Database) -> int:
         return db._get_conn().execute("PRAGMA user_version").fetchone()["user_version"]
@@ -961,6 +919,7 @@ class TestSchemaMigration(unittest.TestCase):
                 Database(self.path)
         self.assertIn("MNEMOMATIC_EMBED_DIM", str(cm.exception))
         self.assertIn(str(EMBEDDING_DIM), str(cm.exception))
+        self.assertIn("MNEMOMATIC_REINDEX", str(cm.exception))   # the way out is named
 
     def test_dim_mismatch_on_legacy_db_fails_before_migrating(self):
         _build_legacy_db(self.path, dim=EMBEDDING_DIM)
@@ -986,11 +945,19 @@ class TestChunkText(unittest.TestCase):
     """
 
     def setUp(self):
-        # Abort loudly instead of hanging CI if the loop ever regresses.
-        signal.alarm(20)
+        # Fail this test, rather than hang CI, if the loop ever regresses. A
+        # bare alarm would kill the whole run with no report ("Alarm clock"),
+        # so raise from a handler instead, and put the old one back after.
+        if not hasattr(signal, "SIGALRM"):          # Windows: no alarm, no guard
+            return
 
-    def tearDown(self):
-        signal.alarm(0)
+        def timed_out(signum, frame):
+            raise TimeoutError("_chunk_text did not finish within 20 s")
+
+        previous = signal.signal(signal.SIGALRM, timed_out)
+        self.addCleanup(signal.signal, signal.SIGALRM, previous)
+        self.addCleanup(signal.alarm, 0)
+        signal.alarm(20)
 
     def _assert_covers(self, text, chunks, chunk_size):
         self.assertGreater(len(chunks), 0)

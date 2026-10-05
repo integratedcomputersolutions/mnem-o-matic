@@ -2,12 +2,10 @@
 sessions, API tokens, the login throttle, and first-run bootstrap."""
 
 import io
-import tempfile
 import time
 import unittest
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from unittest.mock import patch
 
 from mnemomatic import identity
@@ -27,16 +25,12 @@ from mnemomatic.identity import (
     verify_password,
 )
 from mnemomatic.throttle import FailureThrottle, client_key
-
-
-def _fast_scrypt():
-    """Patch the work factor down so the suite does not spend seconds hashing."""
-    return patch.multiple(identity, SCRYPT_LOG_N=10, SCRYPT_P=1)
+from tests._support import fast_scrypt, temp_db_path
 
 
 class TestPasswordHashing(unittest.TestCase):
     def test_round_trip_and_format(self):
-        with _fast_scrypt():
+        with fast_scrypt():
             stored = hash_password("correct horse battery")
             self.assertTrue(stored.startswith("$scrypt$ln=10,r=8,p=1$"))
             self.assertEqual(stored.count("$"), 4)
@@ -44,7 +38,7 @@ class TestPasswordHashing(unittest.TestCase):
             self.assertFalse(verify_password(stored, "correct horse batter"))
 
     def test_salts_differ(self):
-        with _fast_scrypt():
+        with fast_scrypt():
             self.assertNotEqual(hash_password("same"), hash_password("same"))
 
     def test_malformed_hash_verifies_false(self):
@@ -53,11 +47,11 @@ class TestPasswordHashing(unittest.TestCase):
         self.assertFalse(verify_password("$bcrypt$x$y$z", "x"))
 
     def test_needs_rehash_tracks_parameters(self):
-        with _fast_scrypt():
+        with fast_scrypt():
             weak = hash_password("pw")
         self.assertTrue(needs_rehash(weak))
         self.assertTrue(needs_rehash("garbage"))
-        with _fast_scrypt():
+        with fast_scrypt():
             # Under the patched constants the same hash counts as current.
             self.assertFalse(needs_rehash(weak))
 
@@ -84,19 +78,13 @@ class IdentityCase(unittest.TestCase):
     """A temp-file database (per-thread connections need a real file)."""
 
     def setUp(self):
-        self._patch = _fast_scrypt()
+        self._patch = fast_scrypt()
         self._patch.start()
-        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-        tmp.close()
-        self.path = Path(tmp.name)
+        self.addCleanup(self._patch.stop)
+        self.path = temp_db_path(self)
         self.db = Database(str(self.path))
+        self.addCleanup(self.db.close)
         self.ident = Identity(self.db)
-
-    def tearDown(self):
-        self.db.close()
-        self._patch.stop()
-        for p in (self.path, Path(str(self.path) + "-wal"), Path(str(self.path) + "-shm")):
-            p.unlink(missing_ok=True)
 
     def admin(self, name="root", password="rootpassword1"):
         return self.ident.create_user(name, role="admin", password=password)[0]
@@ -165,7 +153,7 @@ class TestUsers(IdentityCase):
             with self.assertRaises(IdentityError):
                 self.ident.authenticate("ghost", "whatever")
             v.assert_called_once()
-            self.assertEqual(v.call_args.args[0], DUMMY_HASH)
+            self.assertEqual(v.call_args.args[0], identity.DUMMY_HASH)
 
     def test_rehash_on_login(self):
         self.admin()

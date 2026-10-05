@@ -10,8 +10,8 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from mnemomatic.spa import build_spa_routes
+from tests._support import SPA_HTML
 
-HTML = "<!doctype html><html><head><title>Mnem-O-matic</title></head><body><div id=app></div></body></html>"
 
 
 def _stub(request):
@@ -26,7 +26,7 @@ class SpaCase(unittest.TestCase):
         (self.app_dir / "assets").mkdir()
         (self.app_dir / "assets" / "index-abc123.js").write_text("console.log('hi')")
         (self.app_dir / "favicon.svg").write_text("<svg/>")
-        (self.app_dir / "index.html").write_text(HTML)
+        (self.app_dir / "index.html").write_text(SPA_HTML)
         self.client = self._client()
 
     def _client(self):

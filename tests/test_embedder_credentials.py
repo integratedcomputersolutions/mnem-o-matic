@@ -7,17 +7,11 @@ carried to another host.
 """
 
 import json
-import threading
 import unittest
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 
 from mnemomatic.embeddings import HttpEmbedder, redact_url
-
-
-def _serve(handler_cls):
-    server = ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    return server
+from tests._support import serve
 
 
 class _Endpoint(BaseHTTPRequestHandler):
@@ -39,6 +33,14 @@ class _Endpoint(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def do_GET(self):
+        # urllib follows a 302 to a POST as a GET; record those too, or "the
+        # other host saw nothing" would hold even if the redirect were followed.
+        type(self).seen.append((self.path, self.headers.get("Authorization")))
+        self.send_response(404)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def log_message(self, *a):
         pass
@@ -65,9 +67,7 @@ class TestHttpEmbedderCredentials(unittest.TestCase):
 
         self.Endpoint, self.Elsewhere = Endpoint, Elsewhere
         for cls in (Endpoint, Elsewhere):
-            server = _serve(cls)
-            self.addCleanup(server.server_close)
-            self.addCleanup(server.shutdown)
+            server = serve(self, cls)
             cls.url = f"http://127.0.0.1:{server.server_port}"
 
     def test_api_key_sent_as_bearer_header(self):
@@ -84,8 +84,8 @@ class TestHttpEmbedderCredentials(unittest.TestCase):
         e = HttpEmbedder(self.Endpoint.url + "/v1/embeddings", api="openai", api_key="sk-secret")
         with self.assertRaises(RuntimeError) as ctx:
             e.embed("hello")
+        self.assertEqual(self.Elsewhere.seen, [])          # the key never reached the other host
         self.assertIn("HTTP 302", str(ctx.exception))
-        self.assertEqual(self.Elsewhere.seen, [])
 
     def test_errors_show_the_redacted_url(self):
         e = HttpEmbedder("http://user:hunter2@127.0.0.1:9/v1/embeddings?key=sk-secret", api="openai")
