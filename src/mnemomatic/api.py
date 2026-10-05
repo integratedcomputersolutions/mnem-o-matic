@@ -323,9 +323,13 @@ def build_api_routes(*, identity, db_getter, settings_info, first_run: FirstRun,
                    item_id=_audit_username(normalize_username(username)), reason="bad_setup_code")
             return _error("bad_setup_code", 403, "That setup code is not the one in the server log.")
         validate_password(password)
+        # The empty-table check above is only a fast path: the code stays
+        # valid until first_run.clear(), so concurrent requests can all pass
+        # it. only_if_no_users repeats it inside the insert's transaction.
         user, _ = await run_in_threadpool(
             ident().create_user, username, role="admin",
-            display_name=_str(data, "display_name", required=False) or "Administrator", password=password)
+            display_name=_str(data, "display_name", required=False) or "Administrator", password=password,
+            only_if_no_users=True)
         first_run.clear()
         record("admin.created", actor=user.username, item_type="user", item_id=user.username,
                source="setup_code")

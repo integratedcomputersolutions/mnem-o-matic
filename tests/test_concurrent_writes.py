@@ -199,6 +199,13 @@ class TestIdentityWrites(_FileDb):
         admins = self.count("SELECT COUNT(*) AS n FROM users WHERE role = 'admin' AND active = 1")
         self.assertEqual(admins, 1)
 
+    def test_only_if_no_users_lets_exactly_one_through(self):
+        results, errors = _race(6, lambda i: self.ident.create_user(
+            f"first{i}", role="admin", password="firstpassword1", only_if_no_users=True))
+        self.assertEqual(sum(1 for r in results if r), 1)
+        self.assertEqual({e.code for e in errors}, {"already_set_up"})
+        self.assertEqual(self.count("SELECT COUNT(*) AS n FROM users"), 1)
+
     def test_duplicate_username_race_leaves_no_open_transaction(self):
         results, errors = _race(4, lambda i: self.ident.create_user("same", password="samepassword12"))
         self.assertEqual(sum(1 for r in results if r), 1)
