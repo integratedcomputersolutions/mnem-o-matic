@@ -149,14 +149,13 @@ class TestRunReindex(unittest.TestCase):
         self.assertTrue(all(c.startswith("D>> ") for c in self.embedder.calls))
 
     def test_reindex_replaces_stale_vectors(self):
-        # Pre-existing vector from an "old model" points at axis 0; after
-        # reindex, searching with the old vector must not return the doc.
-        self.db.set_embedding("document", self.doc.id, axis(0))
+        # A vector from an "old model": the negation of what the current
+        # embedder produces, so it can never coincide with the new one.
+        expected = self.embedder.embed("small\nshort body")
+        self.db.set_embedding("document", self.doc.id, [-v for v in expected])
         server._run_reindex()
-        new_emb = self.embedder.embed("small\nshort body")
-        if new_emb[0] != 1.0:  # only meaningful when the fake axis differs
-            results = self.db.search_vec(axis(0), table="documents", namespace="ns", limit=1)
-            self.assertTrue(not results or results[0].score < 0.999)
+        stored = self.db.item_embedding("document", self.doc.id)
+        self.assertEqual([round(v, 5) for v in stored], expected)
 
     def test_reindex_with_dim_change_end_to_end(self):
         # Simulate MNEMOMATIC_EMBED_DIM=8 with a dim-8 embedder: after

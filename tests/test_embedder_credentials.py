@@ -40,6 +40,14 @@ class _Endpoint(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def do_GET(self):
+        # urllib follows a 302 to a POST as a GET; record those too, or "the
+        # other host saw nothing" would hold even if the redirect were followed.
+        type(self).seen.append((self.path, self.headers.get("Authorization")))
+        self.send_response(404)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def log_message(self, *a):
         pass
 
@@ -84,8 +92,8 @@ class TestHttpEmbedderCredentials(unittest.TestCase):
         e = HttpEmbedder(self.Endpoint.url + "/v1/embeddings", api="openai", api_key="sk-secret")
         with self.assertRaises(RuntimeError) as ctx:
             e.embed("hello")
+        self.assertEqual(self.Elsewhere.seen, [])          # the key never reached the other host
         self.assertIn("HTTP 302", str(ctx.exception))
-        self.assertEqual(self.Elsewhere.seen, [])
 
     def test_errors_show_the_redacted_url(self):
         e = HttpEmbedder("http://user:hunter2@127.0.0.1:9/v1/embeddings?key=sk-secret", api="openai")

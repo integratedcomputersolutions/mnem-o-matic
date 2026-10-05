@@ -211,17 +211,21 @@ class TestRelatedTool(ToolTestCase):
 
 class TestSearchToolFilters(ToolTestCase):
     def test_filters_reach_the_db(self):
+        # Each filter must exclude something, or dropping it on the way to the
+        # db would go unnoticed: only "recent" carries the tag, only "old" is aged.
         recent, _ = self.db.store_note(
             Note(namespace="proj", title="recent", content="topic", tags=["keep"]), axis(0))
         old, _ = self.db.store_note(
-            Note(namespace="proj", title="old", content="topic", tags=["keep"]), axis(0))
+            Note(namespace="proj", title="old", content="topic", tags=["other"]), axis(0))
         self._age("notes", old.id, 90)
 
         with patch.object(runtime, "_safe_embed", return_value=axis(0)):
             tagged = tools_search.search("topic", tags=["keep"], mode="fulltext")
+            tagged_hybrid = tools_search.search("topic", tags=["keep"], mode="hybrid")
             cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).date().isoformat()
             fresh = tools_search.search("topic", updated_after=cutoff, mode="hybrid")
-        self.assertEqual({r["id"] for r in tagged}, {recent.id, old.id})
+        self.assertEqual([r["id"] for r in tagged], [recent.id])
+        self.assertEqual([r["id"] for r in tagged_hybrid], [recent.id])
         self.assertEqual([r["id"] for r in fresh], [recent.id])
 
     def test_invalid_updated_after_is_rejected(self):

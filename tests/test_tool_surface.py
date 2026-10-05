@@ -169,8 +169,9 @@ class TestGetResources(_ToolTest):
         self.assertEqual(self.db.get_document(doc_id).retrieval_count, 1)
 
     def test_a_missing_item_does_not_count_as_retrieval(self):
-        tools_search.get_document("no-such-id")
-        self.assertEqual(self.db.list_audit(), [])
+        with patch.object(tools_search, "_record_access") as record:
+            tools_search.get_document("no-such-id")
+        record.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -111,6 +111,26 @@ class TestBackupLoop(BackupDirTestCase):
         self.assertFalse(thread.is_alive())
         self.assertEqual(len(list(self.dir.glob("mnemomatic-backup-*.zip"))), 1)
 
+    def test_failure_backs_off_a_full_interval(self):
+        # The newest archive stays old while backups fail, so next_delay keeps
+        # saying 0; without the back-off the loop would retry in a hot spin.
+        attempts, waits = [], []
+
+        class Stop:
+            def wait(self, timeout):
+                waits.append(timeout)
+                return len(waits) > 2           # end the loop after the back-off wait
+
+        def broken():
+            attempts.append(1)
+            raise RuntimeError("db unavailable")
+
+        with self.assertLogs("mnemomatic", "ERROR") as logs:
+            backup_loop(broken, self.dir, 3600.0, 7, "0.0.0-test", Stop())
+        self.assertEqual(waits[:2], [0.0, 3600.0])   # due now, then one full interval
+        self.assertEqual(len(attempts), 1)
+        self.assertIn("db unavailable", logs.output[0])
+
     def test_failure_is_caught_and_loop_stays_stoppable(self):
         def broken():
             raise RuntimeError("db unavailable")
