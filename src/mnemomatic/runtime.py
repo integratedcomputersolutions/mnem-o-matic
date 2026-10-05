@@ -70,10 +70,18 @@ def _offloaded(fn):
     return run
 
 
+# What tool() and resource() registered — by tool name and resource URI — so
+# a test can check, through FastMCP's public listings, that nothing was
+# registered around them with a bare @mcp.tool and so runs on the loop.
+OFFLOADED_TOOLS: set[str] = set()
+OFFLOADED_RESOURCES: set[str] = set()
+
+
 def tool(**kwargs):
     """`mcp.tool`, with the function run off the event loop."""
     def register(fn):
         mcp.tool(**kwargs)(_offloaded(fn))
+        OFFLOADED_TOOLS.add(kwargs.get("name") or fn.__name__)
         return fn
     return register
 
@@ -82,6 +90,7 @@ def resource(uri: str, **kwargs):
     """`mcp.resource`, with the function run off the event loop."""
     def register(fn):
         mcp.resource(uri, **kwargs)(_offloaded(fn))
+        OFFLOADED_RESOURCES.add(uri)
         return fn
     return register
 

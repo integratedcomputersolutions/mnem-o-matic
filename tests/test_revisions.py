@@ -7,7 +7,6 @@ pruning, and the list_revisions/restore tools end to end.
 """
 
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
 import mnemomatic.db as db_module
@@ -15,7 +14,7 @@ from mnemomatic.db import Database
 from mnemomatic.models import Document, Knowledge, Note
 from mnemomatic import tools_history
 from mnemomatic import tools_search
-from tests._support import MemDbCase, ToolCase
+from tests._support import MemDbCase, temp_db_path, ToolCase
 
 
 class DbTestCase(MemDbCase):
@@ -27,33 +26,28 @@ class DbTestCase(MemDbCase):
 
 class TestMigration(unittest.TestCase):
     def test_v1_database_gains_columns_and_revisions_table(self):
-        import tempfile
-        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-        tmp.close()
-        try:
-            # Build a current database, then strip it back to version-1 shape.
-            db = Database(tmp.name)
-            db.store_note(Note(namespace="p", title="t", content="c"), embedding=None)
-            conn = db._get_conn()
-            conn.execute("DROP TABLE revisions")
-            for table in ("documents", "knowledge", "notes"):
-                conn.execute(f"ALTER TABLE {table} DROP COLUMN retrieval_count")
-                conn.execute(f"ALTER TABLE {table} DROP COLUMN last_accessed")
-            conn.execute("PRAGMA user_version = 1")
-            conn.commit()
-            db.close()
+        path = temp_db_path(self)
+        # Build a current database, then strip it back to version-1 shape.
+        db = Database(str(path))
+        db.store_note(Note(namespace="p", title="t", content="c"), embedding=None)
+        conn = db._get_conn()
+        conn.execute("DROP TABLE revisions")
+        for table in ("documents", "knowledge", "notes"):
+            conn.execute(f"ALTER TABLE {table} DROP COLUMN retrieval_count")
+            conn.execute(f"ALTER TABLE {table} DROP COLUMN last_accessed")
+        conn.execute("PRAGMA user_version = 1")
+        conn.commit()
+        db.close()
 
-            migrated = Database(tmp.name)
-            conn = migrated._get_conn()
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()["user_version"],
-                             db_module.SCHEMA_VERSION)
-            row = conn.execute("SELECT retrieval_count, last_accessed FROM notes").fetchone()
-            self.assertEqual(row["retrieval_count"], 0)
-            self.assertIsNone(row["last_accessed"])
-            conn.execute("SELECT * FROM revisions")  # table exists
-            migrated.close()
-        finally:
-            Path(tmp.name).unlink(missing_ok=True)
+        migrated = Database(str(path))
+        conn = migrated._get_conn()
+        self.assertEqual(conn.execute("PRAGMA user_version").fetchone()["user_version"],
+                         db_module.SCHEMA_VERSION)
+        row = conn.execute("SELECT retrieval_count, last_accessed FROM notes").fetchone()
+        self.assertEqual(row["retrieval_count"], 0)
+        self.assertIsNone(row["last_accessed"])
+        conn.execute("SELECT * FROM revisions")  # table exists
+        migrated.close()
 
 
 class TestRecordAccess(DbTestCase):

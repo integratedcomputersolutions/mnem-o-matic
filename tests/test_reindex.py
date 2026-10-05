@@ -5,9 +5,7 @@ change) and server._run_reindex end to end against a real database with a
 fake embedder — including a dimension change.
 """
 
-import tempfile
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
 import mnemomatic.db
@@ -16,7 +14,7 @@ from mnemomatic import config
 from mnemomatic.db import SCHEMA_VERSION, Database
 from mnemomatic.models import Document, Knowledge, Note
 from mnemomatic import runtime
-from tests._support import EMBEDDING_DIM, FakeEmbedder, axis
+from tests._support import axis, EMBEDDING_DIM, FakeEmbedder, temp_db_path
 
 
 class TestRebuildVecTables(unittest.TestCase):
@@ -73,13 +71,8 @@ class TestSetEmbedding(unittest.TestCase):
 
 class TestDimChangeDeferral(unittest.TestCase):
     def setUp(self):
-        self._tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-        self._tmp.close()
-        self.path = self._tmp.name
+        self.path = str(temp_db_path(self))
         Database(self.path).close()  # created at the real EMBEDDING_DIM
-
-    def tearDown(self):
-        Path(self.path).unlink(missing_ok=True)
 
     def test_mismatch_with_flag_defers_to_reindex(self):
         with patch.object(mnemomatic.db, "EMBEDDING_DIM", 8):

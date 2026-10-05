@@ -2,12 +2,10 @@
 sessions, API tokens, the login throttle, and first-run bootstrap."""
 
 import io
-import tempfile
 import time
 import unittest
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from unittest.mock import patch
 
 from mnemomatic import identity
@@ -27,7 +25,7 @@ from mnemomatic.identity import (
     verify_password,
 )
 from mnemomatic.throttle import FailureThrottle, client_key
-from tests._support import fast_scrypt
+from tests._support import fast_scrypt, temp_db_path
 
 
 class TestPasswordHashing(unittest.TestCase):
@@ -82,17 +80,11 @@ class IdentityCase(unittest.TestCase):
     def setUp(self):
         self._patch = fast_scrypt()
         self._patch.start()
-        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-        tmp.close()
-        self.path = Path(tmp.name)
+        self.addCleanup(self._patch.stop)
+        self.path = temp_db_path(self)
         self.db = Database(str(self.path))
+        self.addCleanup(self.db.close)
         self.ident = Identity(self.db)
-
-    def tearDown(self):
-        self.db.close()
-        self._patch.stop()
-        for p in (self.path, Path(str(self.path) + "-wal"), Path(str(self.path) + "-shm")):
-            p.unlink(missing_ok=True)
 
     def admin(self, name="root", password="rootpassword1"):
         return self.ident.create_user(name, role="admin", password=password)[0]
@@ -161,7 +153,7 @@ class TestUsers(IdentityCase):
             with self.assertRaises(IdentityError):
                 self.ident.authenticate("ghost", "whatever")
             v.assert_called_once()
-            self.assertEqual(v.call_args.args[0], DUMMY_HASH)
+            self.assertEqual(v.call_args.args[0], identity.DUMMY_HASH)
 
     def test_rehash_on_login(self):
         self.admin()

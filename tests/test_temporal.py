@@ -8,14 +8,13 @@ fact_history tool, namespace rename/delete interplay, and restore guards.
 """
 
 import unittest
-from pathlib import Path
 
 import mnemomatic.db as db_module
 from mnemomatic.db import EMBEDDING_DIM, Database
 from mnemomatic.models import Knowledge
 from mnemomatic import tools_content
 from mnemomatic import tools_history
-from tests._support import MemDbCase, ToolCase
+from tests._support import MemDbCase, temp_db_path, ToolCase
 
 
 def _emb(seed: float) -> list[float]:
@@ -34,35 +33,30 @@ class DbTestCase(MemDbCase):
 
 class TestMigrationV3(unittest.TestCase):
     def test_v2_database_gains_validity_and_partial_index(self):
-        import tempfile
-        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-        tmp.close()
-        try:
-            # Build a current database, then strip it back to version-2 shape.
-            db = Database(tmp.name)
-            db.store_knowledge(Knowledge(namespace="p", subject="s", fact="f"), None)
-            conn = db._get_conn()
-            conn.execute("DROP INDEX idx_knowledge_ns_subject_current")
-            conn.execute("ALTER TABLE knowledge DROP COLUMN valid_until")
-            conn.execute("ALTER TABLE knowledge DROP COLUMN superseded_by")
-            conn.execute("CREATE UNIQUE INDEX idx_knowledge_ns_subject ON knowledge(namespace, subject)")
-            conn.execute("PRAGMA user_version = 2")
-            conn.commit()
-            db.close()
+        path = temp_db_path(self)
+        # Build a current database, then strip it back to version-2 shape.
+        db = Database(str(path))
+        db.store_knowledge(Knowledge(namespace="p", subject="s", fact="f"), None)
+        conn = db._get_conn()
+        conn.execute("DROP INDEX idx_knowledge_ns_subject_current")
+        conn.execute("ALTER TABLE knowledge DROP COLUMN valid_until")
+        conn.execute("ALTER TABLE knowledge DROP COLUMN superseded_by")
+        conn.execute("CREATE UNIQUE INDEX idx_knowledge_ns_subject ON knowledge(namespace, subject)")
+        conn.execute("PRAGMA user_version = 2")
+        conn.commit()
+        db.close()
 
-            migrated = Database(tmp.name)
-            conn = migrated._get_conn()
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()["user_version"],
-                             db_module.SCHEMA_VERSION)
-            row = conn.execute("SELECT valid_until, superseded_by FROM knowledge").fetchone()
-            self.assertIsNone(row["valid_until"])  # existing facts stay current
-            indexes = {r["name"] for r in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='knowledge'")}
-            self.assertIn("idx_knowledge_ns_subject_current", indexes)
-            self.assertNotIn("idx_knowledge_ns_subject", indexes)
-            migrated.close()
-        finally:
-            Path(tmp.name).unlink(missing_ok=True)
+        migrated = Database(str(path))
+        conn = migrated._get_conn()
+        self.assertEqual(conn.execute("PRAGMA user_version").fetchone()["user_version"],
+                         db_module.SCHEMA_VERSION)
+        row = conn.execute("SELECT valid_until, superseded_by FROM knowledge").fetchone()
+        self.assertIsNone(row["valid_until"])  # existing facts stay current
+        indexes = {r["name"] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='knowledge'")}
+        self.assertIn("idx_knowledge_ns_subject_current", indexes)
+        self.assertNotIn("idx_knowledge_ns_subject", indexes)
+        migrated.close()
 
 
 class TestStoreSemantics(DbTestCase):

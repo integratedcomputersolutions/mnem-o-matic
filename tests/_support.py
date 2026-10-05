@@ -8,8 +8,10 @@ work — `python -m pytest` and `python -m unittest tests/test_db.py`:
 
 import math
 import random
+import tempfile
 import threading
 import unittest
+from pathlib import Path
 from http.server import ThreadingHTTPServer
 from unittest.mock import patch
 
@@ -21,7 +23,8 @@ from mnemomatic.db import Database
 
 __all__ = [
     "AMARETTO", "CookieClient", "EMBEDDING_DIM", "FakeEmbedder", "GEMMA", "IdentityFixture", "MemDbCase", "SPA_HTML",
-    "ToolCase", "axis", "fast_scrypt", "mix", "random_unit_vector", "serve", "tilted_axis",
+    "ToolCase", "axis", "fast_scrypt", "mix", "random_unit_vector", "serve", "temp_db_path", "temp_dir",
+    "tilted_axis",
 ]
 
 # The dimension the suite embeds at. Matches the default the server falls back
@@ -77,15 +80,35 @@ AMARETTO = {**GEMMA, "embed_model": "amaretto-embed-148m"}
 SPA_HTML = "<!doctype html><html><head><title>Mnem-O-matic</title></head><body><div id=app></div></body></html>"
 
 
+# What sign-in verifies for an unknown username, made at the cheap work factor
+# like every other hash under fast_scrypt — the real one costs ~100 ms a check.
+_CHEAP_DUMMY_HASH = identity_module.hash_password("dummy", log_n=10, p=1)
+
+
 def fast_scrypt():
     """Patch the scrypt work factor down so the suite does not spend seconds hashing."""
-    return patch.multiple(identity_module, SCRYPT_LOG_N=10, SCRYPT_P=1)
+    return patch.multiple(identity_module, SCRYPT_LOG_N=10, SCRYPT_P=1, DUMMY_HASH=_CHEAP_DUMMY_HASH)
+
+
+def temp_dir(test: unittest.TestCase) -> Path:
+    """A fresh directory removed, with everything in it, when `test` ends."""
+    holder = tempfile.TemporaryDirectory(prefix="mnemomatic-test-")
+    test.addCleanup(holder.cleanup)
+    return Path(holder.name)
+
+
+def temp_db_path(test: unittest.TestCase) -> Path:
+    """Where a test's file-backed Database goes: not created yet, and removed
+    with its -wal/-shm companions when `test` ends, whatever the test did."""
+    return temp_dir(test) / "test.db"
 
 
 def serve(test: unittest.TestCase, handler_cls) -> ThreadingHTTPServer:
     """A local HTTP server on a free port, on a thread, stopped when `test` ends."""
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
+    # serve_forever checks for shutdown every poll_interval (0.5 s by
+    # default), so each stop would otherwise cost up to half a second.
+    threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
     test.addCleanup(server.server_close)
     test.addCleanup(server.shutdown)
     return server

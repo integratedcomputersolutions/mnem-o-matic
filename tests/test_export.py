@@ -9,7 +9,6 @@ import io
 import json
 import unittest
 import zipfile
-from pathlib import Path
 
 from unittest.mock import patch
 
@@ -20,7 +19,7 @@ from starlette.testclient import TestClient
 from mnemomatic import runtime, tools_admin
 from mnemomatic.audit import RequestMetaMiddleware
 from mnemomatic.auth import AuthMiddleware
-from tests._support import IdentityFixture
+from tests._support import IdentityFixture, temp_db_path
 from mnemomatic.db import Database
 from mnemomatic.export import EXPORT_FORMAT, _safe_name, _unique, build_export_zip
 from mnemomatic.models import Document, Knowledge, Note
@@ -184,10 +183,8 @@ class TestExportRoute(unittest.TestCase):
         # File-backed db: the TestClient serves requests on a worker thread,
         # and each thread gets its own connection — a ":memory:" database
         # would be empty there.
-        import tempfile
-        self._tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-        self._tmp.close()
-        self.db = Database(self._tmp.name)
+        self.db = Database(str(temp_db_path(self)))
+        self.addCleanup(self.db.close)
         self.db.store_note(Note(namespace="proj", title="n", content="x"), embedding=None)
 
         # The real route, reading the store through runtime._db as in the server.
@@ -198,10 +195,6 @@ class TestExportRoute(unittest.TestCase):
         app = Starlette(routes=[Route("/export", tools_admin._export_route, methods=["GET"])])
         self.client = TestClient(AuthMiddleware(RequestMetaMiddleware(app), identity=lambda: self.fx.identity),
                                  follow_redirects=False)
-
-    def tearDown(self):
-        self.db.close()
-        Path(self._tmp.name).unlink(missing_ok=True)
 
     def test_requires_a_credential(self):
         self.assertEqual(self.client.get("/export").status_code, 401)

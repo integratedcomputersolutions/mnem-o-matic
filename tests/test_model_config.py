@@ -8,18 +8,18 @@ server at import time.
 """
 
 import json
-import tempfile
 import unittest
 from unittest.mock import patch
 
 from mnemomatic import model_config
+from tests._support import temp_dir
 
 
 class TestLoad(unittest.TestCase):
     def _load_from(self, content: str) -> dict:
-        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
-            f.write(content)
-        with patch.object(model_config, "MODEL_CONFIG_PATH", f.name):
+        path = temp_dir(self) / "model_config.json"
+        path.write_text(content)
+        with patch.object(model_config, "MODEL_CONFIG_PATH", str(path)):
             return model_config.load()
 
     def test_valid_config(self):

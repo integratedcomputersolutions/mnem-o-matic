@@ -7,9 +7,7 @@ Run with: python -m unittest tests/test_db.py -v
 
 import signal
 import sqlite3
-import tempfile
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
 import sqlite_vec
@@ -20,7 +18,7 @@ from mnemomatic.db import (
     _SPECS,
 )
 from mnemomatic.models import Document, Knowledge, Note
-from tests._support import EMBEDDING_DIM, random_unit_vector, tilted_axis
+from tests._support import EMBEDDING_DIM, random_unit_vector, temp_db_path, tilted_axis
 
 
 # ── Documents ──────────────────────────────────────────────────────────────────
@@ -869,13 +867,7 @@ def _build_legacy_db(path: str, dim: int = EMBEDDING_DIM) -> None:
 
 class TestSchemaMigration(unittest.TestCase):
     def setUp(self):
-        self._tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-        self._tmp.close()
-        self.path = self._tmp.name
-        Path(self.path).unlink()  # legacy builder wants to create it fresh
-
-    def tearDown(self):
-        Path(self.path).unlink(missing_ok=True)
+        self.path = str(temp_db_path(self))     # not created: the legacy builder wants it fresh
 
     def _user_version(self, db: Database) -> int:
         return db._get_conn().execute("PRAGMA user_version").fetchone()["user_version"]
@@ -953,11 +945,19 @@ class TestChunkText(unittest.TestCase):
     """
 
     def setUp(self):
-        # Abort loudly instead of hanging CI if the loop ever regresses.
-        signal.alarm(20)
+        # Fail this test, rather than hang CI, if the loop ever regresses. A
+        # bare alarm would kill the whole run with no report ("Alarm clock"),
+        # so raise from a handler instead, and put the old one back after.
+        if not hasattr(signal, "SIGALRM"):          # Windows: no alarm, no guard
+            return
 
-    def tearDown(self):
-        signal.alarm(0)
+        def timed_out(signum, frame):
+            raise TimeoutError("_chunk_text did not finish within 20 s")
+
+        previous = signal.signal(signal.SIGALRM, timed_out)
+        self.addCleanup(signal.signal, signal.SIGALRM, previous)
+        self.addCleanup(signal.alarm, 0)
+        signal.alarm(20)
 
     def _assert_covers(self, text, chunks, chunk_size):
         self.assertGreater(len(chunks), 0)
