@@ -220,7 +220,7 @@ class TestRequestMeta(unittest.TestCase):
         self.assertEqual(request_meta(), {
             "actor": None, "client": None, "ip": None,
             "user": None, "user_id": None, "is_admin": False, "via": None,
-            "token_id": None, "token_hint": None, "token_name": None,
+            "token_id": None, "token_hint": None, "token_name": None, "token_scope": None,
         })
 
     def test_principal_in_scope_is_copied(self):
