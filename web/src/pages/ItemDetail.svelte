@@ -14,7 +14,7 @@
   const revisions = remote([]);
   const related = remote();
   $effect(() => {
-    const base = `/api/items/${type}/${seg(id)}`;
+    const base = `/api/items/${seg(type)}/${seg(id)}`;
     item.load(() => api.get(base).then((r) => r.item));
     revisions.load(() => api.get(`${base}/revisions`).then((r) => r.revisions));
     related.load(() => api.get(`${base}/related`));
