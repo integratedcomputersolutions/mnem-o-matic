@@ -42,6 +42,7 @@
     </Card>
     <Card title="Authentication">
       <p class="dim small">Every request carries <code>Authorization: Bearer &lt;token&gt;</code>. The server records what each token does under your name; revoke a token on <a href="/tokens">My tokens</a> and only that agent stops.</p>
+      <p class="dim small">Examples that put the token on a command line (<code>claude mcp add</code>, <code>export</code>, <code>curl</code>) leave it in your shell history. Clear that entry afterwards, or use the config-file form where the client has one.</p>
       {#if session.freshToken}<CopyField label="Your new token" value={session.freshToken} secret />{/if}
     </Card>
   </div>
