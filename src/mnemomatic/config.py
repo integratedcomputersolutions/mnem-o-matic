@@ -25,6 +25,9 @@ PORT = int(os.environ.get("MNEMOMATIC_PORT", "8000"))
 CORS_ORIGINS = os.environ.get("MNEMOMATIC_CORS_ORIGINS", "")
 EMBED_URL = os.environ.get("MNEMOMATIC_EMBED_URL", "")
 EMBED_MODEL = os.environ.get("MNEMOMATIC_EMBED_MODEL", "")
+# The commit the image was built from (Docker build arg). Empty in local and
+# source builds, which then report only the package version.
+BUILD = os.environ.get("MNEMOMATIC_BUILD", "").strip() or None
 MAX_SEARCH_LIMIT = 100
 MAX_LIST_LIMIT = 200
 

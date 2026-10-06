@@ -16,7 +16,7 @@ from mnemomatic.identity import FirstRun
 from mnemomatic.models import Document, Note
 from tests._support import CookieClient, IdentityFixture
 
-SETTINGS = {"version": "3.0.0-test", "mode": "FTS-only (no embedder)", "model": None}
+SETTINGS = {"version": "3.0.0-test", "build": "c4e171b0d2a9", "mode": "FTS-only (no embedder)", "model": None}
 
 
 class ApiCase(unittest.TestCase):
@@ -146,6 +146,7 @@ class TestSessionAndLogin(ApiCase):
         self.assertEqual(body["authenticated"], False)
         self.assertEqual(body["first_run"], False)
         self.assertEqual(body["version"], "3.0.0-test")
+        self.assertEqual(body["build"], "c4e171b0d2a9")
         self.assertEqual(body["https"]["state"], "off")
 
     def test_login_logout_round_trip(self):
@@ -573,6 +574,7 @@ class TestConnectSettingsHttps(ApiCase):
     def test_settings(self):
         body = self.client.get("/api/settings", cookies=self.user()).json()
         self.assertEqual(body["version"], "3.0.0-test")
+        self.assertEqual(body["build"], "c4e171b0d2a9")
         self.assertEqual(body["tls"]["state"], "off")
         self.assertIn("audit_keep_days", body)
         self.assertIsNone(body["backup"])

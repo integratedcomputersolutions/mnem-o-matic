@@ -101,7 +101,7 @@ def _sidecar_meta(spec, item) -> dict:
 
 
 def build_export_zip(db, namespace: str | None = None, *,
-                     server_version: str) -> tuple[bytes, str]:
+                     server_version: str, server_build: str | None = None) -> tuple[bytes, str]:
     """Build the archive for one namespace (or all) and suggest a filename.
 
     Returns (zip bytes, filename). Type folders without items are omitted;
@@ -111,10 +111,11 @@ def build_export_zip(db, namespace: str | None = None, *,
     item twice, or not at all.
     """
     with db.snapshot():
-        return _build_export_zip(db, namespace, server_version=server_version)
+        return _build_export_zip(db, namespace, server_version=server_version, server_build=server_build)
 
 
-def _build_export_zip(db, namespace: str | None, *, server_version: str) -> tuple[bytes, str]:
+def _build_export_zip(db, namespace: str | None, *, server_version: str,
+                      server_build: str | None) -> tuple[bytes, str]:
     now = datetime.now(timezone.utc)
     namespaces = [namespace] if namespace else db.list_namespaces()
 
@@ -147,6 +148,7 @@ def _build_export_zip(db, namespace: str | None, *, server_version: str) -> tupl
             "format": EXPORT_FORMAT,
             "exported_at": now.isoformat(),
             "server_version": server_version,
+            "server_build": server_build,
             "namespace_filter": namespace,
             "counts": counts,
             "namespaces": folder_by_ns,

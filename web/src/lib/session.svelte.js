@@ -7,6 +7,7 @@ export const session = $state({
   user: null,
   firstRun: false,
   version: null,
+  build: null,
   https: null,
   error: null,
   freshToken: null,   // a token just minted, for the Connect page; never persisted
@@ -18,6 +19,7 @@ export async function refresh() {
     session.user = s.authenticated ? s.user : null;
     session.firstRun = !!s.first_run;
     session.version = s.version;
+    session.build = s.build;
     session.https = s.https;
     session.error = null;
   } catch (e) {

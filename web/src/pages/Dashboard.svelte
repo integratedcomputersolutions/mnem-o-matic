@@ -11,7 +11,7 @@
   import { remote } from '../lib/load.svelte.js';
   import { session, isAdmin } from '../lib/session.svelte.js';
   import { seg, itemHref } from '../lib/router.svelte.js';
-  import { fmtNumber, fmtRelative } from '../lib/format.js';
+  import { fmtNumber, fmtRelative, fmtVersion } from '../lib/format.js';
 
   const overview = remote({ namespaces: [], settings: null, events: [] });
   $effect(() => {
@@ -65,7 +65,7 @@
         {#if isAdmin()}<a href="/admin/https"><StatusBadge tone={httpsTone} label={httpsLabel} /></a>
         {:else}<StatusBadge tone={httpsTone} label={httpsLabel} />{/if}
       </div>
-      <div class="row between"><span class="dim">Version</span><span class="mono">{settings?.version || '…'}</span></div>
+      <div class="row between"><span class="dim">Version</span><span class="mono">{fmtVersion(settings?.version, settings?.build) || '…'}</span></div>
     </div>
     <p class="help mt">Agents connect with a personal token — see <a href="/connect">Connect an agent</a>.</p>
   </Card>

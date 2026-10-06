@@ -132,7 +132,7 @@ Security notes:
 
 ```
 mnemomatic-export-2026-08-02.zip
-├── export-info.json          # manifest: format version, date, counts, namespace map
+├── export-info.json          # manifest: format version, server version and build, date, counts, namespace map
 └── <namespace>/
     ├── documents/
     │   ├── <title>.md        # the document content, byte-faithful — nothing injected

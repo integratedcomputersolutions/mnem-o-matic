@@ -7,6 +7,7 @@ returns plausible but wrong results with no error, so the tool has to report
 it plainly.
 """
 
+import json
 import unittest
 from unittest.mock import patch
 
@@ -111,6 +112,23 @@ class TestBackendDetail(_InfoTest):
         unknown = {**GEMMA, "embed_model": "some-private-model"}
         with patch.object(config, "embed_identity", return_value=unknown):
             self.assertNotIn("model_url", self.info())
+
+
+class TestServerBuild(_InfoTest):
+    """The image's commit sits next to the release version, so a bug report
+    says which build is running; local builds report none."""
+
+    def test_build_is_reported_next_to_the_version(self):
+        sha = "c4e171b0d2a9e3f5"
+        with patch.object(config, "BUILD", sha):
+            settings, health = tools_admin._settings_info(), json.loads(tools_admin.health())
+        self.assertEqual(settings["build"], sha)
+        self.assertEqual(health["build"], sha)
+
+    def test_local_build_reports_none(self):
+        with patch.object(config, "BUILD", None):
+            self.assertIsNone(tools_admin._settings_info()["build"])
+            self.assertIsNone(json.loads(tools_admin.health())["build"])
 
 
 if __name__ == "__main__":

@@ -299,7 +299,8 @@ def build_api_routes(*, identity, db_getter, settings_info, first_run: FirstRun,
 
     async def session(request: Request):
         principal = getattr(request.state, "principal", None)
-        base = {"version": settings_info().get("version"), "https": https_status()}
+        info = settings_info()
+        base = {"version": info.get("version"), "build": info.get("build"), "https": https_status()}
         if principal is None:
             return _json({**base, "authenticated": False, "first_run": ident().count_users() == 0})
         return _json({**base, "authenticated": True, "user": principal.user.public()})

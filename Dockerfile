@@ -304,8 +304,16 @@ FROM runtime-base AS full
 COPY --from=builder-full /install /usr/local
 COPY --from=model-builder /app/model /app/model
 
+# The commit this image was built from, shown next to the version. Declared
+# last so a new SHA only rebuilds this layer.
+ARG MNEMOMATIC_BUILD=""
+ENV MNEMOMATIC_BUILD=$MNEMOMATIC_BUILD
+
 # ── Runtime: lite ──────────────────────────────────────────────────────────────
 
 FROM runtime-base AS lite
 
 COPY --from=builder-lite /install /usr/local
+
+ARG MNEMOMATIC_BUILD=""
+ENV MNEMOMATIC_BUILD=$MNEMOMATIC_BUILD
