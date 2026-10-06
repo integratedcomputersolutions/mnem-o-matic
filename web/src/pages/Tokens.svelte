@@ -99,8 +99,8 @@
       <label for="ts">Access</label>
       <select id="ts" class="select" bind:value={scope} required>
         <option value="" disabled>Choose…</option>
-        <option value="read">Read only: search and read, never change anything</option>
-        <option value="write">Read &amp; write: everything you can do</option>
+        <option value="read">Read only: search and read memory</option>
+        <option value="write">Read &amp; write: also store, update and delete</option>
       </select>
       <div class="help">Give agents that only recall memory a read-only token. If it leaks, nothing can be deleted or overwritten with it.</div>
     </div>
