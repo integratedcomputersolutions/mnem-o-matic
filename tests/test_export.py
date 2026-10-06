@@ -166,6 +166,15 @@ class TestArchive(unittest.TestCase):
         self.assertEqual(manifest["namespace_filter"], "keep")
         self.assertEqual(manifest["counts"]["notes"], 1)
 
+    def test_manifest_records_the_build(self):
+        data, _ = build_export_zip(self.db, server_version="0.0.0-test", server_build="c4e171b0d2a9")
+        with _open(data) as zf:
+            manifest = json.loads(zf.read("export-info.json"))
+        self.assertEqual(manifest["server_version"], "0.0.0-test")
+        self.assertEqual(manifest["server_build"], "c4e171b0d2a9")
+        with _open(_build(self.db)[0]) as zf:
+            self.assertIsNone(json.loads(zf.read("export-info.json"))["server_build"])
+
     def test_empty_store_exports_manifest_only(self):
         data, _ = _build(self.db)
         with _open(data) as zf:

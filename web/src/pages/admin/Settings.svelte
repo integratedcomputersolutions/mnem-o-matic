@@ -6,6 +6,7 @@
   import StatusBadge from '../../components/StatusBadge.svelte';
   import { api } from '../../lib/api.js';
   import { remote } from '../../lib/load.svelte.js';
+  import { fmtVersion } from '../../lib/format.js';
 
   const settings = remote();
   $effect(() => { settings.load(() => api.get('/api/settings')); });
@@ -49,7 +50,7 @@
 
     <Card title="Server">
       <dl class="kv">
-        <dt>Version</dt><dd class="mono">{s.version}</dd>
+        <dt>Version</dt><dd class="mono" title={s.build || undefined}>{fmtVersion(s.version, s.build)}</dd>
         <dt>TLS</dt><dd>{s.tls?.state}{#if s.tls?.name} · {s.tls.name}{/if} {#if s.tls?.state !== 'off'}<a href="/admin/https" class="small">manage</a>{/if}</dd>
         <dt>Trusted proxies</dt><dd>{s.trusted_proxies?.length ? s.trusted_proxies.join(', ') : 'none'}</dd>
         <dt>Audit retention</dt><dd>{s.audit_keep_days ? `${s.audit_keep_days} days` : 'forever'}</dd>

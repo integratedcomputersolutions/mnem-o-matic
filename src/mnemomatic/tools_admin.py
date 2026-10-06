@@ -19,6 +19,7 @@ def health() -> str:
     return json.dumps({
         "status": "ok",
         "version": _server_version(),
+        "build": _server_build(),
         "embedding_mode": embedding_mode,
         "auth": "per-user",
     })
@@ -33,11 +34,17 @@ def _server_version() -> str:
         return "unknown"
 
 
+def _server_build() -> str | None:
+    """The commit the image was built from, or None for local builds."""
+    return config.BUILD
+
+
 def _make_export(namespace: str | None) -> tuple[bytes, str]:
     """Build the export archive; shared by /export and the web viewer."""
     from mnemomatic.export import build_export_zip
 
-    return build_export_zip(runtime._db(), namespace, server_version=_server_version())
+    return build_export_zip(runtime._db(), namespace, server_version=_server_version(),
+                            server_build=_server_build())
 
 
 async def _health_route(request):
@@ -108,6 +115,7 @@ def _settings_info() -> dict:
     model_name = config.embed_identity()["embed_model"] or None
     info = {
         "version": _server_version(),
+        "build": _server_build(),
         "mode": embedder.mode if embedder is not None else "FTS-only (no embedder)",
         "model": model_name,
         "model_url": _HF_MODEL_PAGES.get(model_name),

@@ -33,10 +33,11 @@ def _backups(backup_dir: Path) -> list[Path]:
     return sorted(backup_dir.glob(_PATTERN))
 
 
-def run_backup(db, backup_dir: Path, keep: int, server_version: str) -> Path:
+def run_backup(db, backup_dir: Path, keep: int, server_version: str,
+               server_build: str | None = None) -> Path:
     """Write one backup archive atomically, prune beyond *keep*, return its path."""
     backup_dir.mkdir(parents=True, exist_ok=True)
-    data, _ = build_export_zip(db, server_version=server_version)
+    data, _ = build_export_zip(db, server_version=server_version, server_build=server_build)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     target = backup_dir / f"mnemomatic-backup-{stamp}.zip"
     part = target.with_name(target.name + ".part")
@@ -58,11 +59,11 @@ def next_delay(backup_dir: Path, interval: float) -> float:
 
 
 def backup_loop(db_getter, backup_dir: Path, interval: float, keep: int,
-                server_version: str, stop: threading.Event) -> None:
+                server_version: str, server_build: str | None, stop: threading.Event) -> None:
     """Back up whenever the newest archive is *interval* seconds old, until *stop*."""
     while not stop.wait(next_delay(backup_dir, interval)):
         try:
-            target = run_backup(db_getter(), backup_dir, keep, server_version)
+            target = run_backup(db_getter(), backup_dir, keep, server_version, server_build)
             logger.info("Backup written: %s", target)
         except Exception as e:
             logger.error("Backup failed: %s: %s", type(e).__name__, e)
@@ -73,7 +74,8 @@ def backup_loop(db_getter, backup_dir: Path, interval: float, keep: int,
 
 
 def start_backup_thread(db_getter, backup_dir: Path, *, interval_hours: float,
-                        keep: int, server_version: str) -> threading.Thread:
+                        keep: int, server_version: str,
+                        server_build: str | None = None) -> threading.Thread:
     """Start the backup loop on a daemon thread and return it."""
     if interval_hours <= 0:
         raise ValueError(f"MNEMOMATIC_BACKUP_INTERVAL must be positive, got {interval_hours}")
@@ -82,7 +84,7 @@ def start_backup_thread(db_getter, backup_dir: Path, *, interval_hours: float,
     thread = threading.Thread(
         target=backup_loop,
         args=(db_getter, backup_dir, interval_hours * 3600.0, keep,
-              server_version, threading.Event()),
+              server_version, server_build, threading.Event()),
         name="mnemomatic-backup",
         daemon=True,
     )

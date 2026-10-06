@@ -6,6 +6,7 @@ scheduling via next_delay, and the loop's failure handling.
 """
 
 import io
+import json
 import tempfile
 import threading
 import time
@@ -40,6 +41,11 @@ class TestRunBackup(BackupDirTestCase):
             self.assertIn("proj/notes/n.md", zf.namelist())
         # Atomic write: no .part left behind.
         self.assertEqual(list(self.dir.glob("*.part")), [])
+
+    def test_records_the_build(self):
+        target = run_backup(self.db, self.dir, keep=7, server_version="0.0.0-test", server_build="c4e171b0d2a9")
+        with zipfile.ZipFile(io.BytesIO(target.read_bytes())) as zf:
+            self.assertEqual(json.loads(zf.read("export-info.json"))["server_build"], "c4e171b0d2a9")
 
     def test_creates_missing_directory(self):
         nested = self.dir / "a" / "b"
@@ -88,7 +94,7 @@ class TestBackupLoop(BackupDirTestCase):
     def _run_loop(self, db_getter, interval, stop):
         thread = threading.Thread(
             target=backup_loop,
-            args=(db_getter, self.dir, interval, 7, "0.0.0-test", stop),
+            args=(db_getter, self.dir, interval, 7, "0.0.0-test", None, stop),
             daemon=True,
         )
         thread.start()
@@ -126,7 +132,7 @@ class TestBackupLoop(BackupDirTestCase):
             raise RuntimeError("db unavailable")
 
         with self.assertLogs("mnemomatic", "ERROR") as logs:
-            backup_loop(broken, self.dir, 3600.0, 7, "0.0.0-test", Stop())
+            backup_loop(broken, self.dir, 3600.0, 7, "0.0.0-test", None, Stop())
         self.assertEqual(waits[:2], [0.0, 3600.0])   # due now, then one full interval
         self.assertEqual(len(attempts), 1)
         self.assertIn("db unavailable", logs.output[0])

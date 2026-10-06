@@ -44,6 +44,7 @@ from mnemomatic import tools_admin    # noqa: F401
 from mnemomatic.tools_admin import (
     _export_route,
     _health_route,
+    _server_build,
     _server_version,
     _settings_info,
 )
@@ -270,7 +271,7 @@ def build_app(tls: TlsState | None, app_dir: Path = APP_DIR):
 def main():
     logging.basicConfig(level=logging.INFO)
 
-    logger.info("Starting Mnem-O-matic MCP server")
+    logger.info("Starting Mnem-O-matic MCP server v%s (build: %s)", _server_version(), _server_build() or "none")
     logger.info("Configuration: db_path=%s, host=%s, port=%s", config.DB_PATH, config.HOST, config.PORT)
 
     # Pre-warm db and resolve embedder so the first request doesn't pay setup costs
@@ -300,7 +301,8 @@ def main():
     if config.BACKUP_DIR:
         from mnemomatic.backup import start_backup_thread
         start_backup_thread(runtime._db, Path(config.BACKUP_DIR), interval_hours=config.BACKUP_INTERVAL_HOURS,
-                            keep=config.BACKUP_KEEP, server_version=_server_version())
+                            keep=config.BACKUP_KEEP, server_version=_server_version(),
+                            server_build=_server_build())
         logger.info("Scheduled backups: every %gh to %s (keeping %d)",
                     config.BACKUP_INTERVAL_HOURS, config.BACKUP_DIR, config.BACKUP_KEEP)
 

@@ -3,6 +3,7 @@
   import { session, logout } from '../lib/session.svelte.js';
   import { route } from '../lib/router.svelte.js';
   import { sidebarGroups, activeFor } from '../lib/pages.js';
+  import { fmtVersion } from '../lib/format.js';
 
   const groups = $derived(sidebarGroups(session.user));
   const active = $derived(activeFor(route.path));
@@ -36,7 +37,7 @@
         <span class="sep" aria-hidden="true"></span>
         <img class="bai" src="/bostonai-logo.png" alt="Boston AI" />
       </div>
-      {#if session.version}<span class="ver">v{session.version}</span>{/if}
+      {#if session.version}<span class="ver" title={session.build || undefined}>v{fmtVersion(session.version, session.build)}</span>{/if}
     </div>
   </div>
 </aside>

@@ -58,3 +58,9 @@ export function errorText(e) {
   if (!e) return '';
   return e.message || String(e);
 }
+
+// "3.0.0 (c4e171b)" for CI images, plain "3.0.0" for local builds.
+export function fmtVersion(version, build) {
+  if (!version) return '';
+  return build ? `${version} (${build.slice(0, 7)})` : version;
+}
