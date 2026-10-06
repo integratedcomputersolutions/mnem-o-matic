@@ -4,7 +4,7 @@
 
 The quickest path is the **Connect an agent** page in the web UI: it shows this server's URLs and a copy-ready configuration for each client, filled in with a token you just created. What follows is the same information in text form.
 
-Every client needs two things — the MCP endpoint and a personal API token, sent as `Authorization: Bearer mnm_…`. Tokens are created per person under **My tokens**; make one per agent or machine so you can revoke them individually.
+Every client needs two things — the MCP endpoint and a personal API token, sent as `Authorization: Bearer mnm_…`. Tokens are created per person under **My tokens**; make one per agent or machine so you can revoke them individually, and make it read-only when the agent only needs to recall.
 
 ### Claude Code
 
@@ -52,7 +52,9 @@ There is no shared key. People sign in to the web UI with a username and passwor
 
 **Sessions** are an `HttpOnly`, `SameSite=Strict` cookie, `Secure` over HTTPS, lasting 24 hours or 2 idle hours. Changing your password ends your other sessions.
 
-**Tokens** start with `mnm_`, are shown exactly once, and are stored only as a hash. Each can carry a name, an optional expiry, and shows when it was last used. Up to 25 live tokens per person. Revoking one is immediate. Five invalid tokens from one address within a minute lock that address out of `/mcp` for five minutes; missing or malformed headers do not count.
+**Tokens** start with `mnm_`, are shown exactly once, and are stored only as a hash. Each can carry a name, an optional expiry, and shows when it was last used.
+
+Each token is either **read only** or **read & write**, chosen when you create it. A read-only token sees and calls only the read-only tools (`search`, `read`, `list_items`, `related`, `fact_history`, `list_revisions`, `list_audit`, `consolidation_report`, `embedding_info`) and can download `/export`. Any other tool is left out of its tool list and refused if called (`read_only_token`). The scope applies whatever the owner's role, so an administrator's read-only token is read-only too. Give one to agents that only recall memory: if it leaks, nothing can be changed with it. Tokens created before read-only tokens existed are read & write. Up to 25 live tokens per person. Revoking one is immediate. Five invalid tokens from one address within a minute lock that address out of `/mcp` for five minutes; missing or malformed headers do not count.
 
 ### Error responses on `/mcp`
 
