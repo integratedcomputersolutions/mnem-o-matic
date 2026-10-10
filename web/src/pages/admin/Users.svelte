@@ -60,7 +60,7 @@
   <tbody>
     {#each users.data as u (u.id)}
       <tr>
-        <td><b>{u.username}</b>{#if u.display_name}<div class="muted small">{u.display_name}</div>{/if}</td>
+        <td><b>{u.username}</b>{#if u.display_name}<div class="muted small">{u.display_name}</div>{/if}{#if u.external_id && u.external_id !== u.display_name}<div class="muted small">via proxy: {u.external_id}</div>{/if}</td>
         <td>
           {#if u.id === me}<span class="badge brand">admin · you</span>
           {:else}

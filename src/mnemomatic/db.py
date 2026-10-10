@@ -48,7 +48,8 @@ BUSY_TIMEOUT_MS = 5000
 # proofs are bound to it.
 # Version 7: api_tokens.scope, "read" or "write". A read token may call only
 # the read-only tools; tokens minted before the upgrade become "write".
-SCHEMA_VERSION = 7
+# Version 8: users.external_id, a trusted proxy's identity for a user.
+SCHEMA_VERSION = 8
 CHUNK_THRESHOLD = int(os.environ.get("MNEMOMATIC_CHUNK_THRESHOLD", "2000"))
 CHUNK_SIZE = int(os.environ.get("MNEMOMATIC_CHUNK_SIZE", "1000"))
 CHUNK_OVERLAP = int(os.environ.get("MNEMOMATIC_CHUNK_OVERLAP", "200"))
@@ -832,7 +833,7 @@ class Database:
 
     @classmethod
     def _migrate_content_schema(cls, conn: sqlite3.Connection) -> None:
-        """Apply the content-table migrations (v2 through v7) in order.
+        """Apply the content-table migrations (v2 through v8) in order.
 
         Every step is idempotent (column-existence checks, IF NOT EXISTS) so
         this is safe to run on any database regardless of which path reached it.
@@ -843,6 +844,7 @@ class Database:
         cls._migrate_to_v5(conn)
         cls._migrate_to_v6(conn)
         cls._migrate_to_v7(conn)
+        cls._migrate_to_v8(conn)
 
     @staticmethod
     def _record_migration(conn: sqlite3.Connection, from_version: int) -> None:
@@ -986,6 +988,20 @@ class Database:
         if "scope" not in cols:
             conn.execute("ALTER TABLE api_tokens ADD COLUMN scope TEXT NOT NULL DEFAULT 'write' "
                          "CHECK (scope IN ('read', 'write'))")
+
+    @staticmethod
+    def _migrate_to_v8(conn: sqlite3.Connection) -> None:
+        """Version 8: users.external_id — the identity a trusted proxy knows a
+        user by (an email address, usually). NULL for users created here.
+        Unique among the users that have one, so a proxy's name for a person
+        resolves to exactly one row."""
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(users)")}
+        if "external_id" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN external_id TEXT")
+        conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_users_external_id
+            ON users(external_id) WHERE external_id IS NOT NULL
+        """)
 
     def connection(self) -> sqlite3.Connection:
         """This thread's connection, for modules that own their own tables

@@ -24,7 +24,7 @@ v3.0 replaces the single shared API key and the viewer's shared secret with **us
 
 | 2.x | 3.0 |
 | --- | --- |
-| `MNEMOMATIC_API_KEY` shared by every agent | Removed. Each person creates `mnm_…` tokens in the web UI; `/mcp` refuses anything else |
+| `MNEMOMATIC_API_KEY` shared by every agent | Removed. Each person creates `mnm_…` tokens in the web UI; `/mcp` refuses anything else. A gateway that signs people in itself can vouch for them instead — see [Behind an identity-aware proxy](#behind-an-identity-aware-proxy) |
 | `MNEMOMATIC_UI_TOKEN` and the viewer at `/ui` | Removed. The web UI is at `/`, behind a sign-in |
 | Caddy + mkcert in the default compose file | The server runs its own CA on port 8443; Caddy is an optional overlay under `deploy/caddy/` |
 | Ports 80/443 published by Caddy | Ports 8000 (plain, setup) and 8443 (HTTPS) published by the server |
@@ -224,6 +224,46 @@ docker compose -f docker-compose.yml -f deploy/caddy/docker-compose.caddy.yml up
 ```
 
 It unpublishes 8000/8443, publishes 80/443, serves `/health` on port 80 without the HTTPS redirect, answers `/api`, `/mcp` and `/export` on port 80 with the same `403 https_required` as the server's own plain port (a redirect would let a client configured with `http://` keep sending its token in the clear without anyone noticing), redirects everything else to HTTPS, caps request bodies, and sends `Strict-Transport-Security: max-age=31536000` on HTTPS responses — without `includeSubDomains` or `preload`, since the same hostname may serve other things. If you later move that hostname back to plain HTTP, browsers that saw the header keep refusing it until the year is up (Chrome: `chrome://net-internals/#hsts`; Firefox: forget the site). The server itself sends HSTS on its own HTTPS listener only once HTTPS is confirmed and only on port 443, for the reason given under [HTTPS](#https). For nginx, the equivalent is `proxy_pass http://mnemomatic:8000;` with `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;` and `X-Forwarded-Proto $scheme;` — and on port 80, `return 403` for `/api`, `/mcp` and `/export` rather than redirecting them.
+
+### Behind an identity-aware proxy
+
+A portal or gateway that already authenticates people — one sign-in for several apps — can vouch for them instead of each person holding a Mnem-O-matic token. Set a secret only the proxy knows:
+
+```yaml
+services:
+  mnemomatic:
+    environment:
+      - MNEMOMATIC_TLS=off
+      - MNEMOMATIC_TRUSTED_PROXIES=*      # or the proxy's IP / the Docker network CIDR
+      - MNEMOMATIC_PROXY_SECRET=…          # 32+ random characters, generated once per install
+```
+
+The proxy then sends, on every `/mcp` and `/export` request it forwards:
+
+```
+Authorization: Bearer <the secret>
+X-Mnemomatic-User: alice@example.com
+```
+
+and Mnem-O-matic acts as that person. The first time an identity is seen a user is created for it: username derived from the identity (`alice`, or `alice-2` if that name is taken), role `user`, and **no password** — nobody can sign in to the web UI as that user until an administrator issues a temporary password under **Admin → Users**. Later requests match on the identity alone, case-insensitively. The audit log's `actor` for such a user is the identity the proxy sent (the email address), so history lines up with the proxy's own logs and with 2.x audit rows where the proxy set `X-Mnemomatic-Actor`.
+
+What the proxy must guarantee, since the server cannot: that the secret is reachable only by the proxy, that it strips any `Authorization` and `X-Mnemomatic-*` headers a client sends before adding its own, and that it sets the user header from the identity it verified. The rules on the server side:
+
+- The user header means nothing without the secret: a client sending it with no credential, a wrong secret, or its own personal token gets exactly what it would have got without the header. Personal `mnm_…` tokens keep working alongside the proxy.
+- The secret means nothing without a user: a request carrying it and no user header is refused with `401 proxy_user_missing`. There is no shared or anonymous principal behind the secret.
+- A wrong secret counts as a failed token for the lockout (five in a minute, five minutes out), which is why `MNEMOMATIC_TRUSTED_PROXIES` matters here: without it every request looks like the proxy's address and one misconfigured client locks out everyone behind it.
+- A user an administrator has deactivated stays refused (`403 account_disabled`) whatever the proxy says.
+- The secret is compared in constant time and never appears in the UI, the settings endpoint, logs or exports. A secret shorter than 32 characters stops the server at startup.
+
+Optional headers, each read only when its name is configured:
+
+| Variable | Header carries |
+| --- | --- |
+| `MNEMOMATIC_PROXY_USER_HEADER` | The user's identity (default `X-Mnemomatic-User`). Up to 254 characters, no whitespace; an email address is the usual choice |
+| `MNEMOMATIC_PROXY_NAME_HEADER` | A display name, UTF-8. Sets it on first sight and updates it when it changes |
+| `MNEMOMATIC_PROXY_ROLE_HEADER` | `admin` or `user`. Sets the role on first sight and updates it when it changes; anything else is refused with `400 invalid_role`. Without it proxy users are `user`, and an administrator can promote them in the UI. A proxy cannot demote the only active administrator |
+
+A fresh data directory works at once: `/mcp` through the proxy needs no setup step. The one-time setup code is still printed so an administrator can claim the web UI; `MNEMOMATIC_ADMIN_PASSWORD` creates that account headlessly instead.
 
 ## Quick Start (Pre-built Images)
 
@@ -448,6 +488,10 @@ Environment variables (set in `docker-compose.yml` or passed to Docker):
 | `MNEMOMATIC_TLS_DIR`        | `<database directory>/tls`  | Where the CA and server certificate live (`ca.crt`, `ca.key`, `leaf.crt`, `leaf.key`, optional `custom.crt`/`custom.key`) |
 | `MNEMOMATIC_ADMIN_PASSWORD` | *(unset)*                   | First start only: create the `admin` user with this password instead of printing a setup code (10+ characters). Ignored once any user exists. |
 | `MNEMOMATIC_TRUSTED_PROXIES` | *(unset)*                  | Reverse proxies whose `X-Forwarded-For` / `X-Forwarded-Proto` are believed: comma-separated IPs or CIDRs, or `*` when only the proxy can reach the server port. Unset means the socket peer is treated as the client. See [Behind your own reverse proxy](#behind-your-own-reverse-proxy). |
+| `MNEMOMATIC_PROXY_SECRET`   | *(unset)*                   | Turns on trusted-proxy sign-in: a gateway sending this as its bearer token may name the user per request, and the user is created on first sight. 32+ characters. Never shown in the UI or logs. See [Behind an identity-aware proxy](#behind-an-identity-aware-proxy). |
+| `MNEMOMATIC_PROXY_USER_HEADER` | `X-Mnemomatic-User`      | The header the proxy names the user in (an email address, usually). Read only when the request carries the proxy secret. |
+| `MNEMOMATIC_PROXY_NAME_HEADER` | *(unset)*                | Optional header carrying a display name for the proxy's user. |
+| `MNEMOMATIC_PROXY_ROLE_HEADER` | *(unset)*                | Optional header carrying the proxy's user's role, `admin` or `user`. Proxy users are `user` without it. |
 | `MNEMOMATIC_BACKUP_DIR`     | *(unset)*                   | Directory for scheduled export-zip backups. Backups disabled when unset. |
 | `MNEMOMATIC_BACKUP_INTERVAL` | `24`                       | Hours between scheduled backups                          |
 | `MNEMOMATIC_BACKUP_KEEP`    | `7`                         | Scheduled backup archives to retain; older ones are pruned |

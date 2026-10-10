@@ -127,6 +127,8 @@ def _settings_info() -> dict:
         "chunk_threshold": CHUNK_THRESHOLD,
         "chunk_size": CHUNK_SIZE,
         "chunk_overlap": CHUNK_OVERLAP,
+        # Whether a trusted proxy may vouch for users — never the secret itself.
+        "proxy_auth": config.PROXY_SECRET is not None,
     }
     if config.EMBED_URL:
         # Every signed-in user sees this; credentials stay with the operator.
