@@ -20,7 +20,7 @@ import uvicorn
 from mnemomatic import config, runtime
 from mnemomatic.api import SecurityHeadersMiddleware, build_api_routes
 from mnemomatic.audit import RequestMetaMiddleware
-from mnemomatic.auth import AuthMiddleware
+from mnemomatic.auth import AuthMiddleware, ProxyAuth
 from mnemomatic.bodylimit import BodyLimitMiddleware
 from mnemomatic.compact import CompactToolsMiddleware
 from mnemomatic.db import _SPECS, EMBEDDING_DIM
@@ -237,8 +237,9 @@ def build_app(tls: TlsState | None, app_dir: Path = APP_DIR):
     # Inside AuthMiddleware, which is what puts the principal in the scope.
     app = RequestMetaMiddleware(app)
 
-    # Every /mcp call carries a per-user token; every /api call a session.
-    app = AuthMiddleware(app, identity=runtime._identity)
+    # Every /mcp call carries a per-user token (or a trusted proxy's secret
+    # and the user it vouches for); every /api call a session.
+    app = AuthMiddleware(app, identity=runtime._identity, proxy=ProxyAuth.from_config())
 
     # Outside auth so an oversized body is refused before anything buffers it,
     # inside CORS so a 413 still carries the CORS headers a browser needs.
@@ -268,6 +269,22 @@ def build_app(tls: TlsState | None, app_dir: Path = APP_DIR):
     return app
 
 
+def _check_proxy_config() -> None:
+    """Refuse a proxy secret too short to be one, and say what the mode means."""
+    if config.PROXY_SECRET is None:
+        return
+    if len(config.PROXY_SECRET) < config.PROXY_SECRET_MIN_LEN:
+        logger.error("MNEMOMATIC_PROXY_SECRET must be at least %d characters (%d given)",
+                     config.PROXY_SECRET_MIN_LEN, len(config.PROXY_SECRET))
+        raise SystemExit(1)
+    logger.info("Trusted-proxy sign-in is on: users named by the %s header (display name: %s, role: %s)",
+                config.PROXY_USER_HEADER, config.PROXY_NAME_HEADER or "none", config.PROXY_ROLE_HEADER or "none")
+    if not config.TRUSTED_PROXIES:
+        logger.warning("MNEMOMATIC_PROXY_SECRET is set without MNEMOMATIC_TRUSTED_PROXIES: every request "
+                       "will appear to come from the proxy's address, so one bad credential locks out "
+                       "everyone behind it and the audit log records the proxy's IP")
+
+
 def main():
     logging.basicConfig(level=logging.INFO)
 
@@ -284,6 +301,7 @@ def main():
     except IdentityError as e:
         logger.error("MNEMOMATIC_ADMIN_PASSWORD rejected: %s", e.details)
         raise SystemExit(1)
+    _check_proxy_config()
     logger.info("Initializing embedder...")
     runtime._embedder()
 

@@ -4,9 +4,10 @@ The audit trail wants to answer *who* changed *what*. The layers, from most
 to least trustworthy:
 
 - user / token: the authenticated principal AuthMiddleware resolved — the
-  username behind the session cookie or API token, plus the token's id and
-  hint so a revoked token's history stays traceable. This is the audit
-  log's ``actor``.
+  user behind the session cookie, API token or trusted proxy's vouching,
+  plus the token's id and hint so a revoked token's history stays
+  traceable. This is the audit log's ``actor``: the username, or for a user
+  a proxy introduced, the proxy's identity for them (``Principal.actor``).
 - ip / user-agent: what the connection itself reveals. Behind a reverse
   proxy the ip is the proxy's own unless MNEMOMATIC_TRUSTED_PROXIES names it,
   which lets uvicorn resolve the real client from X-Forwarded-For.
@@ -39,7 +40,7 @@ _request_meta: ContextVar[dict] = ContextVar("mnemomatic_request_meta", default=
 def request_meta() -> dict:
     """The current request's identity fields: actor (header label), client
     (user-agent), ip, and — when authenticated — user, user_id, is_admin,
-    via ("session" or "token"), token_id, token_hint, token_name."""
+    via ("session", "token" or "proxy"), token_id, token_hint, token_name."""
     return _request_meta.get()
 
 
@@ -93,7 +94,7 @@ class RequestMetaMiddleware:
         }
         principal = scope.get("state", {}).get("principal")
         if principal is not None:
-            meta.update(user=principal.user.username, user_id=principal.user.id,
+            meta.update(user=principal.actor, user_id=principal.user.id,
                         is_admin=principal.user.is_admin, via=principal.via,
                         token_id=principal.token_id, token_hint=principal.token_hint,
                         token_name=principal.token_name)

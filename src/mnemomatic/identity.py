@@ -11,11 +11,18 @@ The server has two kinds of credential and this module owns both:
   makes the audit log's ``actor`` an authenticated name rather than a header
   the client chose for itself.
 
+A third kind of caller is a **trusted proxy** (see ``auth.py``): a gateway
+that signs people in itself and, holding a secret only it knows, names the
+user on each request. Such users are created here on first sight, keyed by
+the proxy's identity for them (``external_id``), and have no password of
+their own.
+
 Passwords are hashed with scrypt from the standard library — no extra
 dependency — in a self-describing PHC-style string, so the parameters can be
 raised later and old hashes upgraded on the next successful login.
 
-Nothing here writes to the audit log except the bootstrap path; the HTTP
+Nothing here writes to the audit log except the bootstrap path and a proxy
+user's creation (both happen before any request identity exists); the HTTP
 layer records login, token, and user-management events with the request's
 identity attached. Keeping that out of here keeps these methods testable
 without a request in flight.
@@ -39,9 +46,16 @@ logger = logging.getLogger("mnemomatic")
 # ── Policy constants ────────────────────────────────────────────────────────
 
 USERNAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,31}$")
+USERNAME_MAX = 32
 MIN_PASSWORD_LEN = 10
 MAX_PASSWORD_LEN = 1024
 ROLES = ("admin", "user")
+
+# What sits in password_hash for a user a trusted proxy introduced: not a
+# parseable hash, so it verifies as nothing, and recognisably "no password"
+# rather than a hash of something. An admin's password reset replaces it.
+NO_PASSWORD_HASH = "!"
+EXTERNAL_ID_MAX = 254          # an email address at most, per RFC 5321
 
 TOKEN_PREFIX = "mnm_"
 TOKEN_HINT_LEN = len(TOKEN_PREFIX) + 6     # enough to tell tokens apart in a list, useless to guess from
@@ -190,6 +204,30 @@ def validate_username(name: str) -> str:
     return name
 
 
+def normalize_external_id(value: str) -> str:
+    """A proxy's identity for a user as stored: stripped and lower-cased,
+    since it is usually an email address and case is not identity there.
+    Raises for an empty value, one with whitespace or control characters,
+    or one longer than an address can be."""
+    value = (value or "").strip().lower()
+    if not value or len(value) > EXTERNAL_ID_MAX or any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in value):
+        raise IdentityError("invalid_external_id", 400,
+                            f"The user identity must be 1–{EXTERNAL_ID_MAX} characters with no whitespace.")
+    return value
+
+
+def username_from_external_id(external_id: str) -> str:
+    """A username in the local format for a proxy identity: what precedes any
+    '@', with each run of characters outside [a-z0-9._-] replaced by '-' and
+    leading punctuation dropped, trimmed to fit. 'user' if nothing usable
+    is left. Uniqueness is the caller's problem."""
+    local = external_id.split("@", 1)[0].lower()
+    base = re.sub(r"[^a-z0-9._-]+", "-", local).lstrip("._-")
+    if len(base) < 2:
+        base = "user"
+    return base[:USERNAME_MAX]
+
+
 def validate_password(password: str) -> None:
     if not isinstance(password, str) or len(password) < MIN_PASSWORD_LEN:
         raise IdentityError("weak_password", 400,
@@ -221,6 +259,7 @@ class User:
     must_change_password: bool
     temp_password_expires_at: str | None
     created_at: str
+    external_id: str | None = None      # a trusted proxy's name for this user
 
     @property
     def is_admin(self) -> bool:
@@ -237,6 +276,7 @@ class User:
             "must_change_password": self.must_change_password,
             "temp_password_expires_at": self.temp_password_expires_at,
             "created_at": self.created_at,
+            "external_id": self.external_id,
         }
 
 
@@ -246,6 +286,7 @@ def _row_to_user(row: dict) -> User:
         role=row["role"], active=bool(row["active"]),
         must_change_password=bool(row["must_change_password"]),
         temp_password_expires_at=row["temp_password_expires_at"], created_at=row["created_at"],
+        external_id=row["external_id"],
     )
 
 
@@ -253,10 +294,18 @@ def _row_to_user(row: dict) -> User:
 class Principal:
     """Who a request is acting as, and through which credential."""
     user: User
-    via: str                     # "session" or "token"
+    via: str                     # "session", "token" or "proxy"
     token_id: int | None = None
     token_hint: str | None = None
     token_name: str | None = None
+
+    @property
+    def actor(self) -> str:
+        """The name the audit log records for this user: the proxy's identity
+        for a user it introduced (so history lines up across the proxy's own
+        logs), the username otherwise. Independent of `via`, so one person
+        is one actor however they arrived."""
+        return self.user.external_id or self.user.username
 
 
 # ── Login throttle ──────────────────────────────────────────────────────────
@@ -568,7 +617,9 @@ class Identity:
         """
         username = normalize_username(username)
         row = self._conn().execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
-        stored = row["password_hash"] if row else DUMMY_HASH
+        # A proxy-introduced user has no password: verify against the dummy
+        # so refusing them costs the same as refusing an unknown name.
+        stored = row["password_hash"] if row and row["password_hash"] != NO_PASSWORD_HASH else DUMMY_HASH
         ok = verify_password(stored, password)
         if row is None or not ok:
             raise IdentityError("invalid_credentials", 401, "Wrong username or password.")
@@ -766,6 +817,79 @@ class Identity:
                 w.execute("UPDATE api_tokens SET revoked_at = ? WHERE id = ?", (_iso(_now()), token_id))
             row = conn.execute("SELECT * FROM api_tokens WHERE id = ?", (token_id,)).fetchone()
         return self._token_public(row)
+
+    # ── trusted proxy ──
+
+    def resolve_proxy_user(self, external_id: str, *, display_name: str | None = None,
+                           role: str | None = None) -> Principal:
+        """The principal a trusted proxy vouches for, created on first sight.
+
+        Called only after AuthMiddleware has checked the proxy's secret, so
+        the identity is believed. A new user gets a username derived from the
+        identity (suffixed until unique), the role the proxy named or `user`,
+        the display name it sent or the identity itself, and no password:
+        nobody can sign in to the account until an admin issues a temporary
+        one. A returning user is matched on the identity alone; a role or
+        display name the proxy sends updates the row, so the proxy stays the
+        source of truth for whatever it chooses to say. Raises
+        account_disabled (403) for a user an admin has deactivated here —
+        the proxy does not get to override that.
+        """
+        external_id = normalize_external_id(external_id)
+        if role is not None and role not in ROLES:
+            raise IdentityError("invalid_role", 400, f"Role must be one of: {', '.join(ROLES)}.")
+        display = (display_name or "").strip()[:128]
+        row = self._conn().execute("SELECT * FROM users WHERE external_id = ?", (external_id,)).fetchone()
+        if row is None:
+            row = self._create_proxy_user(external_id, display or external_id, role or "user")
+        user = _row_to_user(row)
+        if not user.active:
+            raise IdentityError("account_disabled", 403, "This account is disabled.")
+        updates: dict[str, str] = {}
+        if role is not None and role != user.role:
+            try:
+                self._guard_last_admin(user)
+                updates["role"] = role
+            except IdentityError:
+                logger.warning("Proxy asked to demote %r, the only active administrator; keeping admin",
+                               user.username)
+        if display and display != user.display_name:
+            updates["display_name"] = display
+        if updates:
+            with self._db.write() as conn:
+                conn.execute(f"UPDATE users SET {', '.join(f'{k} = ?' for k in updates)} WHERE id = ?",
+                             (*updates.values(), user.id))
+            user = self.get_user(user.id)
+        return Principal(user=user, via="proxy")
+
+    def _create_proxy_user(self, external_id: str, display_name: str, role: str) -> dict:
+        """Insert the row for a proxy identity seen for the first time and
+        return it. Two first requests for one person can race; the unique
+        index makes one of them lose, and the loser reads the winner's row."""
+        base = username_from_external_id(external_id)
+        try:
+            with self._db.write() as conn:
+                taken = {r["username"].lower() for r in conn.execute(
+                    "SELECT username FROM users WHERE username = ? OR username LIKE ?", (base, base + "-%"))}
+                username, n = base, 2
+                while username in taken:
+                    suffix = f"-{n}"
+                    username, n = base[:USERNAME_MAX - len(suffix)] + suffix, n + 1
+                cur = conn.execute(
+                    "INSERT INTO users (username, display_name, role, password_hash, must_change_password, "
+                    "temp_password_expires_at, active, created_at, external_id) VALUES (?, ?, ?, ?, 0, NULL, 1, ?, ?)",
+                    (username, display_name, role, NO_PASSWORD_HASH, _iso(_now()), external_id),
+                )
+                row_id = cur.lastrowid
+        except sqlite3.IntegrityError:
+            row = self._conn().execute("SELECT * FROM users WHERE external_id = ?", (external_id,)).fetchone()
+            if row is None:
+                raise
+            return row
+        write_event(self._db, "user.created", actor=external_id, item_type="user", item_id=username,
+                    role=role, source="proxy")
+        logger.info("Created user %r for proxy identity %r", username, external_id)
+        return self._conn().execute("SELECT * FROM users WHERE id = ?", (row_id,)).fetchone()
 
     def resolve_token(self, raw: str) -> Principal | None:
         """The principal behind a bearer value, or None when it is unknown,

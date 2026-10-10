@@ -10,6 +10,13 @@ Two credentials, two audiences:
   ``mnm_session``. Each scheme reads only its own name, so a cookie set or
   sniffed over plain HTTP never stands in for an HTTPS session.
 
+A **trusted proxy** is the opt-in third way in (``MNEMOMATIC_PROXY_SECRET``):
+a gateway that signs people in itself sends its secret as the bearer token
+on ``/mcp`` or ``/export`` and names the user in a header, and the user is
+created on first sight. The headers mean nothing without the secret, and the
+secret means nothing without a user — there is no shared or anonymous
+principal behind it. Personal tokens keep working alongside.
+
 ``/export`` takes either, since both the CLI and the web UI download it.
 ``/health``, the login endpoints, the CA download, the setup page, and the
 SPA itself need nothing — they either carry no data or exist so a client can
@@ -21,12 +28,15 @@ through untouched, and so a rejection is one small send rather than a
 Response object built around a request that never reached the app.
 """
 
+import hmac
 import json
 import logging
+from dataclasses import dataclass
 
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from mnemomatic.identity import Principal
+from mnemomatic import config
+from mnemomatic.identity import IdentityError, Principal
 from mnemomatic.throttle import FailureThrottle, client_key
 
 logger = logging.getLogger("mnemomatic")
@@ -52,6 +62,44 @@ _PASSWORD_CHANGE_REQUIRED = (403, {
     "error": "password_change_required",
     "details": "Choose a new password before doing anything else.",
 })
+
+
+@dataclass(frozen=True)
+class ProxyAuth:
+    """How a trusted proxy identifies itself and the user it speaks for.
+
+    The secret arrives as the bearer token; the headers carry the user's
+    identity (required), display name and role (both optional, only read
+    when configured). Header names are matched case-insensitively.
+    """
+    secret: str
+    user_header: str
+    name_header: str | None = None
+    role_header: str | None = None
+
+    @classmethod
+    def from_config(cls) -> "ProxyAuth | None":
+        """The proxy the environment describes, or None when the mode is off."""
+        if not config.PROXY_SECRET:
+            return None
+        return cls(secret=config.PROXY_SECRET, user_header=config.PROXY_USER_HEADER,
+                   name_header=config.PROXY_NAME_HEADER, role_header=config.PROXY_ROLE_HEADER)
+
+    def matches(self, token: str) -> bool:
+        """Constant-time: a guess learns nothing from how long the refusal took."""
+        return hmac.compare_digest(token.encode("utf-8"), self.secret.encode("utf-8"))
+
+
+def _header_text(headers: dict[str, str], name: str | None) -> str | None:
+    """A header's value as text, or None. Header values were decoded as
+    latin-1 to get them into a dict; a proxy sends names and addresses as
+    UTF-8, so undo that here for the ones that carry a person's name."""
+    if not name:
+        return None
+    raw = headers.get(name.lower())
+    if raw is None:
+        return None
+    return raw.encode("latin-1").decode("utf-8", "replace").strip()
 
 
 def classify(method: str, path: str) -> str:
@@ -108,14 +156,17 @@ class AuthMiddleware:
 
     `identity` is a callable returning the Identity store (so tests can hand
     in their own, and the server can hand in the lazily built singleton).
-    Repeated invalid tokens from one address trip the same lockout the old
-    shared key had: five failures in a minute, five minutes out.
+    `proxy` turns on trusted-proxy sign-in for the bearer paths. Repeated
+    invalid tokens from one address trip the same lockout the old shared key
+    had: five failures in a minute, five minutes out.
     """
 
-    def __init__(self, app: ASGIApp, identity, *, throttle: FailureThrottle | None = None):
+    def __init__(self, app: ASGIApp, identity, *, throttle: FailureThrottle | None = None,
+                 proxy: ProxyAuth | None = None):
         self.app = app
         self._identity = identity
         self._throttle = throttle or FailureThrottle()
+        self._proxy = proxy
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -198,6 +249,9 @@ class AuthMiddleware:
         if not token:
             return None, (401, {"error": "invalid_authorization", "details": "Token is empty"}, None)
 
+        if self._proxy is not None and self._proxy.matches(token):
+            return self._from_proxy(headers, ip, method, path)
+
         principal = self._identity().resolve_token(token)
         if principal is None:
             self._throttle.record_failure(client_key(ip))
@@ -208,4 +262,27 @@ class AuthMiddleware:
         self._throttle.record_success(client_key(ip))
         logger.debug("Authenticated %s via token %s (%s %s from %s)",
                      principal.user.username, principal.token_hint, method, path, ip)
+        return principal, None
+
+    def _from_proxy(self, headers: dict[str, str], ip: str, method: str, path: str):
+        """The secret checked out, so the proxy is vouching for whoever the
+        user header names. No header, no user: that is a misconfigured proxy
+        rather than a guess, so it is refused without counting against the
+        throttle, and never falls back to a shared or anonymous principal."""
+        proxy = self._proxy
+        external_id = _header_text(headers, proxy.user_header)
+        if not external_id:
+            logger.warning("Proxy secret without a %s header (%s %s from %s)", proxy.user_header, method, path, ip)
+            return None, (401, {"error": "proxy_user_missing",
+                                "details": f"The trusted proxy must name the user in the {proxy.user_header} header."},
+                          None)
+        role = (_header_text(headers, proxy.role_header) or "").lower() or None
+        try:
+            principal = self._identity().resolve_proxy_user(
+                external_id, display_name=_header_text(headers, proxy.name_header), role=role)
+        except IdentityError as e:
+            logger.warning("Proxy user refused: %s (%s %s from %s)", e.code, method, path, ip)
+            return None, (e.status, {"error": e.code, "details": e.details}, None)
+        self._throttle.record_success(client_key(ip))
+        logger.debug("Authenticated %s via proxy (%s %s from %s)", principal.actor, method, path, ip)
         return principal, None

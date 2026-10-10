@@ -203,7 +203,7 @@ Each event carries the timestamp, operation (`store`, `update`, `supersede`, `de
 
 | Field | Source | Trust |
 |-------|--------|-------|
-| `actor` | The authenticated username — the owner of the token or session that made the request | Authenticated |
+| `actor` | The authenticated username — the owner of the token or session that made the request. For a user a [trusted proxy](installation.md#behind-an-identity-aware-proxy) introduced, the identity the proxy sent (an email address, usually), whichever way they arrived | Authenticated |
 | `detail.token` | The token's name, id and hint (`mnm_` + 6 characters), when the request came through a token — the Activity page shows the name | Authenticated; stays meaningful after the token is revoked |
 | `detail.label` | The client's `X-Mnemomatic-Actor` header, if it sends one — a sub-identity within one person's tokens ("laptop", "ci") | Self-declared |
 | `client` | The `User-Agent` header | What the connecting software reports |

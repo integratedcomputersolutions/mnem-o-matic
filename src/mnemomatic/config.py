@@ -31,6 +31,27 @@ BUILD = os.environ.get("MNEMOMATIC_BUILD", "").strip() or None
 MAX_SEARCH_LIMIT = 100
 MAX_LIST_LIMIT = 200
 
+# Trusted-proxy sign-in. A gateway that authenticates people itself can vouch
+# for them: it sends this secret as the bearer token on /mcp and /export plus a
+# header naming the user, and the user is created here on first sight. Off
+# unless the secret is set. The mechanics are in auth.ProxyAuth.
+PROXY_SECRET = os.environ.get("MNEMOMATIC_PROXY_SECRET", "").strip() or None
+PROXY_SECRET_MIN_LEN = 32
+PROXY_USER_HEADER = os.environ.get("MNEMOMATIC_PROXY_USER_HEADER", "").strip() or "X-Mnemomatic-User"
+PROXY_NAME_HEADER = os.environ.get("MNEMOMATIC_PROXY_NAME_HEADER", "").strip() or None
+PROXY_ROLE_HEADER = os.environ.get("MNEMOMATIC_PROXY_ROLE_HEADER", "").strip() or None
+
+# 2.x credentials the server no longer reads. Left in a compose file from
+# before the upgrade they would be silently ignored, which is worse than one
+# line saying what replaced them.
+for _stale, _replacement in (
+    ("MNEMOMATIC_API_KEY", "agents use personal tokens (mnm_…) from the web UI, "
+                           "or a trusted proxy vouches for users via MNEMOMATIC_PROXY_SECRET"),
+    ("MNEMOMATIC_UI_TOKEN", "the web UI is behind a sign-in"),
+):
+    if os.environ.get(_stale, "").strip():
+        logger.warning("%s is set but no longer used since 3.0 — %s", _stale, _replacement)
+
 # First-run bootstrap. Only read while the users table is empty: it creates
 # the initial `admin` without the setup-code dance, for compose files and CI.
 # With users present it is ignored (and logged as such), never re-applied.
