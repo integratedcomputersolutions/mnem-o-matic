@@ -8,7 +8,7 @@ cannot be rebuilt.
 
 import os
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import mnemomatic.server as server
 from mnemomatic import config
@@ -152,3 +152,30 @@ class TestNeverDestroyWhatCannotBeRebuilt(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestStartupGate(unittest.TestCase):
+    """Whether startup runs the rebuild at all, with the rebuild itself patched
+    out: auto must be a no-op when nothing changed, or every restart would
+    re-embed the whole store."""
+
+    def _run(self, mode, pending):
+        db = MagicMock()
+        db.reindex_pending = pending
+        with patch.object(config, "REINDEX_MODE", mode), \
+             patch.object(runtime, "_db", return_value=db), \
+             patch.object(server, "_run_reindex") as run:
+            server._reindex_at_startup()
+        return run.called
+
+    def test_auto_with_nothing_pending_does_not_rebuild(self):
+        self.assertFalse(self._run("auto", pending=False))
+
+    def test_auto_with_a_change_pending_rebuilds(self):
+        self.assertTrue(self._run("auto", pending=True))
+
+    def test_force_rebuilds_regardless(self):
+        self.assertTrue(self._run("force", pending=False))
+
+    def test_off_never_rebuilds(self):
+        self.assertFalse(self._run("off", pending=True))
