@@ -19,7 +19,7 @@ updates:
       - dependency-name: "*"
         update-types: ["version-update:semver-major", "version-update:semver-minor"]
 
-  - package-ecosystem: docker
+  - package-ecosystem: docker-compose      # the overlay is a compose file, which `docker` does not read
     directory: /deploy/caddy
     schedule:
       interval: weekly
