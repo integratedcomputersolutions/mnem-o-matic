@@ -18,11 +18,15 @@
 # Models"). Same-dimension swaps are caught by the recorded model identity.
 ARG EMBED_MODEL=arctic-embed-xs
 
+# Base images are pinned by digest (the multi-platform manifest list, so one
+# pin serves amd64 and arm64): a tag can be moved under a build, a digest
+# cannot. Dependabot (.github/dependabot.yml) bumps them weekly.
+
 # ── Web UI build ──────────────────────────────────────────────────────────────
 # Produces the Vite bundle the Python package ships. Node never reaches a
 # runtime image. Package manifests are copied first so `npm ci` caches
 # across edits to the UI sources.
-FROM --platform=$BUILDPLATFORM node:22-bookworm-slim AS web-builder
+FROM --platform=$BUILDPLATFORM node:22-bookworm-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392 AS web-builder
 
 WORKDIR /app/web
 COPY web/package.json web/package-lock.json ./
@@ -34,7 +38,7 @@ RUN npm run build
 # Shared setup for the Python builders: system tools, source code, and the
 # install script both builders run.
 
-FROM python:3.11-slim AS builder-base
+FROM python:3.11-slim@sha256:e88e9763f943ec1834f992a4b51e0f24500486803e8bc534e5767af9ea65f6ce AS builder-base
 
 WORKDIR /app
 
@@ -266,7 +270,7 @@ RUN install-server
 # Everything the full and lite images share; each adds only its own /install
 # (and, for full, the model).
 
-FROM gcr.io/distroless/python3-debian12:nonroot AS runtime-base
+FROM gcr.io/distroless/python3-debian12:nonroot@sha256:7d1042ce588ab97019fe95c24ffca7bc5a82ccdac572511d5e09bda4435c89c5 AS runtime-base
 
 WORKDIR /app
 
