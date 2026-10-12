@@ -5,6 +5,7 @@ import { api, setSignedOutHandler } from './api.js';
 export const session = $state({
   loading: true,
   user: null,
+  via: null,          // 'session' for a password sign-in, 'proxy' when a portal signed us in
   firstRun: false,
   version: null,
   build: null,
@@ -17,6 +18,7 @@ export async function refresh() {
   try {
     const s = await api.get('/api/session');
     session.user = s.authenticated ? s.user : null;
+    session.via = s.authenticated ? s.via || 'session' : null;
     session.firstRun = !!s.first_run;
     session.version = s.version;
     session.build = s.build;
@@ -33,6 +35,7 @@ export async function refresh() {
 // carry one person's freshly minted token into the next person's session.
 export function signOutLocally() {
   session.user = null;
+  session.via = null;
   session.freshToken = null;
 }
 setSignedOutHandler(signOutLocally);
@@ -41,6 +44,7 @@ export async function login(username, password) {
   const r = await api.post('/api/login', { username, password });
   signOutLocally();
   session.user = r.user;
+  session.via = 'session';
   session.firstRun = false;
   return r.user;
 }
@@ -54,3 +58,6 @@ export async function logout() {
 }
 
 export const isAdmin = () => !!session.user && session.user.role === 'admin';
+// Signed in by a portal in front of the UI: no password, no tokens to paste,
+// no sign-out of our own.
+export const viaProxy = () => session.via === 'proxy';

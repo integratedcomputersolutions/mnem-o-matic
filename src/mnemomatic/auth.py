@@ -12,10 +12,13 @@ Two credentials, two audiences:
 
 A **trusted proxy** is the opt-in third way in (``MNEMOMATIC_PROXY_SECRET``):
 a gateway that signs people in itself sends its secret as the bearer token
-on ``/mcp`` or ``/export`` and names the user in a header, and the user is
-created on first sight. The headers mean nothing without the secret, and the
-secret means nothing without a user — there is no shared or anonymous
-principal behind it. Personal tokens keep working alongside.
+and names the user in a header, and the user is created on first sight. On
+``/mcp`` and ``/export`` that stands in for a personal token; under ``/api``
+it stands in for the session cookie, so a portal that fronts the web UI can
+sign its people straight in. The headers mean nothing without the secret,
+and the secret means nothing without a user — there is no shared or
+anonymous principal behind it. Personal tokens and passwords keep working
+alongside.
 
 ``/export`` takes either, since both the CLI and the web UI download it.
 ``/health``, the login endpoints, the CA download, the setup page, and the
@@ -184,7 +187,12 @@ class AuthMiddleware:
             # A public /api route (the session probe) still likes to know who
             # is asking; a bad or absent cookie simply means "nobody".
             if path.startswith("/api"):
-                principal = self._from_cookie(scope)
+                principal, refusal = self._from_proxy_if_offered(headers, ip, method, path)
+                if refusal:
+                    await _send_json(send, *refusal)
+                    return
+                if principal is None:
+                    principal = self._from_cookie(scope)
         elif kind == "bearer":
             principal, refusal = self._from_bearer(headers, ip, method, path)
             if refusal:
@@ -211,7 +219,12 @@ class AuthMiddleware:
                     await _send_json(send, *_PASSWORD_CHANGE_REQUIRED)
                     return
         else:  # session
-            principal = self._from_cookie(scope)
+            principal, refusal = self._from_proxy_if_offered(headers, ip, method, path)
+            if refusal:
+                await _send_json(send, *refusal)
+                return
+            if principal is None:
+                principal = self._from_cookie(scope)
             if principal is None:
                 logger.debug("Unauthenticated %s %s from %s", method, path, ip)
                 await _send_json(send, 401, {"error": "unauthenticated", "details": "Sign in first."})
@@ -263,6 +276,33 @@ class AuthMiddleware:
         logger.debug("Authenticated %s via token %s (%s %s from %s)",
                      principal.user.username, principal.token_hint, method, path, ip)
         return principal, None
+
+    def _from_proxy_if_offered(self, headers: dict[str, str], ip: str, method: str, path: str):
+        """For the browser paths: the proxy's sign-in when the request carries
+        a bearer token, else (None, None) and the cookie decides.
+
+        A browser never sends a bearer token, so one here is the proxy — or
+        someone guessing at the secret. With the mode off it is ignored (a
+        token is not a session). With it on, anything but the secret is
+        refused and counted by the throttle, exactly as on the bearer paths.
+        """
+        if self._proxy is None:
+            return None, None
+        header = headers.get("authorization", "").strip()
+        if not header.lower().startswith("bearer "):
+            return None, None
+        wait = self._throttle.retry_after(client_key(ip))
+        if wait:
+            return None, (429, {"error": "throttled",
+                                "details": f"Too many failed authentication attempts; retry after {wait} seconds"},
+                          {"Retry-After": str(wait)})
+        if not self._proxy.matches(header[7:].strip()):
+            self._throttle.record_failure(client_key(ip))
+            logger.warning("Bearer value on a browser path is not the proxy secret (%s %s from %s)",
+                           method, path, ip)
+            return None, (403, {"error": "invalid_token",
+                                "details": "Only the trusted proxy's secret signs in on this path."}, None)
+        return self._from_proxy(headers, ip, method, path)
 
     def _from_proxy(self, headers: dict[str, str], ip: str, method: str, path: str):
         """The secret checked out, so the proxy is vouching for whoever the

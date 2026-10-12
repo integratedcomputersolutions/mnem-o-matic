@@ -20,7 +20,7 @@ from starlette.testclient import TestClient
 
 from mnemomatic import config, server
 from mnemomatic.audit import RequestMetaMiddleware, request_meta
-from mnemomatic.auth import AuthMiddleware, ProxyAuth
+from mnemomatic.auth import COOKIE_NAME, AuthMiddleware, ProxyAuth
 from mnemomatic.db import SCHEMA_VERSION, Database
 from mnemomatic.identity import (
     NO_PASSWORD_HASH,
@@ -29,7 +29,7 @@ from mnemomatic.identity import (
     normalize_external_id,
     username_from_external_id,
 )
-from tests._support import IdentityFixture, fast_scrypt, temp_db_path
+from tests._support import CookieClient, IdentityFixture, fast_scrypt, temp_db_path
 
 SECRET = "s" * 40
 USER_HEADER = "X-Mnemomatic-User"
@@ -209,6 +209,111 @@ class TestRefusals(ProxyCase):
             self.call("bob@example.com", secret=SECRET[:-1] + "t")
         self.assertNotIn(SECRET, r.text)
         self.assertNotIn(SECRET, "\n".join(logs.output))
+
+
+class TestWebUi(unittest.TestCase):
+    """The same secret and user header sign a person into the browser API, in
+    place of the session cookie: a portal fronting the web UI adds both on
+    every request. Driven through the real API routes, so the session probe,
+    sign-out and password change answer as the UI will see them."""
+
+    def setUp(self):
+        from starlette.applications import Starlette
+
+        from mnemomatic.api import SecurityHeadersMiddleware, build_api_routes
+        from mnemomatic.identity import FirstRun
+
+        self.fx = IdentityFixture()
+        self.addCleanup(self.fx.close)
+        proxy = ProxyAuth(secret=SECRET, user_header=USER_HEADER, role_header="X-Mnemomatic-Role")
+        mount = build_api_routes(identity=lambda: self.fx.identity, db_getter=lambda: self.fx.db,
+                                 settings_info=lambda: {"version": "3.0.0-test", "build": None},
+                                 first_run=FirstRun(), https=None)
+        app = Starlette(routes=[mount])
+        app = RequestMetaMiddleware(app)
+        app = AuthMiddleware(app, identity=lambda: self.fx.identity, proxy=proxy)
+        app = SecurityHeadersMiddleware(app, pending_origin=lambda: None, hsts=lambda: False)
+        self.client = CookieClient(app, base_url="http://testserver")
+
+    def proxied(self, user="bob@example.com", secret=SECRET, **extra):
+        headers = {"Authorization": f"Bearer {secret}", "Origin": "http://testserver"}
+        if user is not None:
+            headers[USER_HEADER] = user
+        headers.update(extra)
+        return headers
+
+    def test_session_probe_names_the_proxy_user(self):
+        r = self.client.get("/api/session", headers=self.proxied())
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        self.assertTrue(body["authenticated"])
+        self.assertEqual(body["via"], "proxy")
+        self.assertEqual(body["user"]["username"], "bob")
+        self.assertEqual(body["user"]["external_id"], "bob@example.com")
+        # Still a session probe without credentials: nobody, not an error.
+        r = self.client.get("/api/session")
+        self.assertEqual(r.status_code, 200)
+        self.assertFalse(r.json()["authenticated"])
+        self.assertNotIn("via", r.json())
+
+    def test_a_cookie_session_reports_via_session(self):
+        cookie = {COOKIE_NAME: self.fx.identity.create_session(self.fx.user.id)}
+        r = self.client.get("/api/session", cookies=cookie)
+        self.assertEqual(r.json()["via"], "session")
+
+    def test_session_paths_take_the_proxy_in_place_of_the_cookie(self):
+        r = self.client.get("/api/me/tokens", headers=self.proxied())
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["tokens"], [])
+        # A proxy admin reaches the admin API; a proxy user does not.
+        r = self.client.get("/api/admin/users", headers=self.proxied("boss@example.com", **{"X-Mnemomatic-Role": "admin"}))
+        self.assertEqual(r.status_code, 200, r.text)
+        r = self.client.get("/api/admin/users", headers=self.proxied())
+        self.assertEqual(r.status_code, 403)
+
+    def test_no_sign_out_and_no_password_for_a_proxy_user(self):
+        for path in ("/api/logout", "/api/password"):
+            r = self.client.post(path, headers=self.proxied(), json={"current_password": "x", "new_password": "y" * 12})
+            self.assertEqual(r.status_code, 409, path)
+            self.assertEqual(r.json()["error"], "proxy_session")
+        self.assertEqual([e["op"] for e in self.fx.db.list_audit() if e["op"].startswith("auth.")], [])
+
+    def test_secret_without_a_user_is_refused_on_browser_paths_too(self):
+        r = self.client.get("/api/me/tokens", headers=self.proxied(user=None))
+        self.assertEqual(r.status_code, 401)
+        self.assertEqual(r.json()["error"], "proxy_user_missing")
+
+    def test_user_header_without_the_secret_is_nobody(self):
+        r = self.client.get("/api/me/tokens", headers={USER_HEADER: "bob@example.com"})
+        self.assertEqual(r.status_code, 401)
+        self.assertEqual(r.json()["error"], "unauthenticated")
+        # Nor does a cookie session get to rename itself with the header.
+        cookie = {COOKIE_NAME: self.fx.identity.create_session(self.fx.user.id)}
+        r = self.client.get("/api/session", headers={USER_HEADER: "bob@example.com"}, cookies=cookie)
+        self.assertEqual(r.json()["user"]["username"], "alice")
+        self.assertNotIn("bob", {u["username"] for u in self.fx.identity.list_users()})
+
+    def test_other_bearer_values_are_refused_and_throttled(self):
+        for _ in range(5):
+            r = self.client.get("/api/me/tokens", headers=self.proxied(secret="guess" * 8))
+            self.assertEqual(r.status_code, 403)
+            self.assertEqual(r.json()["error"], "invalid_token")
+        r = self.client.get("/api/me/tokens", headers=self.proxied())
+        self.assertEqual(r.status_code, 429)
+
+    def test_mode_off_ignores_a_bearer_on_browser_paths(self):
+        from starlette.applications import Starlette
+
+        from mnemomatic.api import build_api_routes
+        from mnemomatic.identity import FirstRun
+        mount = build_api_routes(identity=lambda: self.fx.identity, db_getter=lambda: self.fx.db,
+                                 settings_info=lambda: {"version": "t", "build": None},
+                                 first_run=FirstRun(), https=None)
+        client = CookieClient(AuthMiddleware(Starlette(routes=[mount]), identity=lambda: self.fx.identity),
+                              base_url="http://testserver")
+        r = client.get("/api/me/tokens", headers=self.proxied())
+        self.assertEqual(r.status_code, 401)
+        self.assertEqual(r.json()["error"], "unauthenticated")
 
 
 class TestModeOff(unittest.TestCase):

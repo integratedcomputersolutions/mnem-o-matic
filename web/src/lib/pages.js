@@ -1,6 +1,8 @@
 // The one table that drives the sidebar and the route guard. A page is shown
 // in the sidebar when it has a label and the user's role allows it; a path
 // resolves to a page only when the role allows it, otherwise NotFound.
+// `local: true` marks pages about our own credentials, which a person signed
+// in by a portal (session.via === 'proxy') has no use for.
 
 import { matchPath } from './router.svelte.js';
 
@@ -24,23 +26,24 @@ export const pages = [
   { path: '/browse/:ns/:type/:id', page: Browse, role: 'any' },
   { path: '/search', page: Search, role: 'any', label: 'Search', group: 'Memory' },
   { path: '/audit', page: Audit, role: 'any', label: 'Activity', group: 'Memory' },
-  { path: '/connect', page: Connect, role: 'any', label: 'Connect an agent', group: 'Agents' },
-  { path: '/tokens', page: Tokens, role: 'any', label: 'My tokens', group: 'Agents' },
+  { path: '/connect', page: Connect, role: 'any', label: 'Connect an agent', group: 'Agents', local: true },
+  { path: '/tokens', page: Tokens, role: 'any', label: 'My tokens', group: 'Agents', local: true },
   { path: '/account', page: Account, role: 'any', label: 'Account', group: 'You' },
   { path: '/admin/users', page: Users, role: 'admin', label: 'Users', group: 'Admin' },
   { path: '/admin/https', page: Https, role: 'admin', label: 'HTTPS', group: 'Admin' },
   { path: '/admin/settings', page: Settings, role: 'admin', label: 'Settings', group: 'Admin' },
 ];
 
-export function allowed(entry, user) {
+export function allowed(entry, user, via = 'session') {
+  if (entry.local && via === 'proxy') return false;
   return entry.role === 'any' || (user && user.role === entry.role);
 }
 
 // Sidebar groups, in first-seen order, holding only labelled pages the user may see.
-export function sidebarGroups(user) {
+export function sidebarGroups(user, via = 'session') {
   const groups = [];
   for (const entry of pages) {
-    if (!entry.label || !allowed(entry, user)) continue;
+    if (!entry.label || !allowed(entry, user, via)) continue;
     let g = groups.find((x) => x.name === entry.group);
     if (!g) groups.push((g = { name: entry.group, items: [] }));
     g.items.push(entry);
@@ -48,11 +51,11 @@ export function sidebarGroups(user) {
   return groups;
 }
 
-export function resolve(path, user) {
+export function resolve(path, user, via = 'session') {
   for (const entry of pages) {
     const params = matchPath(entry.path, path);
     if (params) {
-      if (!allowed(entry, user)) break;
+      if (!allowed(entry, user, via)) break;
       return { entry, params };
     }
   }

@@ -3,7 +3,7 @@
   import PageHeader from '../components/PageHeader.svelte';
   import Card from '../components/Card.svelte';
   import ChangePassword from '../screens/ChangePassword.svelte';
-  import { session } from '../lib/session.svelte.js';
+  import { session, viaProxy } from '../lib/session.svelte.js';
   import { fmtDate } from '../lib/format.js';
   const u = $derived(session.user);
 </script>
@@ -19,7 +19,13 @@
     </dl>
     <p class="help mt">Display names and roles are set by an administrator.</p>
   </Card>
-  <Card title="Change password" subtitle="Other browser sessions are signed out; your tokens keep working.">
-    <ChangePassword />
-  </Card>
+  {#if viaProxy()}
+    <Card title="Sign-in" subtitle="Your portal signs you in here.">
+      <p class="help">This account has no password of its own: the portal vouches for you on every request, and signing out happens there. Your identity for the audit trail is <b>{u.external_id || u.username}</b>.</p>
+    </Card>
+  {:else}
+    <Card title="Change password" subtitle="Other browser sessions are signed out; your tokens keep working.">
+      <ChangePassword />
+    </Card>
+  {/if}
 </div>

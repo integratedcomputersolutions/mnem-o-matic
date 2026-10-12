@@ -1,11 +1,11 @@
 <script>
   import Logo from './Logo.svelte';
-  import { session, logout } from '../lib/session.svelte.js';
+  import { session, logout, viaProxy } from '../lib/session.svelte.js';
   import { route } from '../lib/router.svelte.js';
   import { sidebarGroups, activeFor } from '../lib/pages.js';
   import { fmtVersion } from '../lib/format.js';
 
-  const groups = $derived(sidebarGroups(session.user));
+  const groups = $derived(sidebarGroups(session.user, session.via));
   const active = $derived(activeFor(route.path));
   let open = $state(false);
 </script>
@@ -30,7 +30,11 @@
       <div class="truncate"><b>{session.user?.display_name || session.user?.username}</b></div>
       <div class="muted small truncate">{session.user?.username} · {session.user?.role}</div>
     </div>
-    <button type="button" class="btn ghost sm" onclick={logout}>Sign out</button>
+    {#if viaProxy()}
+      <div class="muted small">Signed in through your portal</div>
+    {:else}
+      <button type="button" class="btn ghost sm" onclick={logout}>Sign out</button>
+    {/if}
     <div class="brands">
       <div class="logos">
         <img class="ics" src="/ics-logo.svg" alt="ICS" />
