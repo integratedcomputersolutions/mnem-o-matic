@@ -1,15 +1,21 @@
+import base64
+import contextvars
 import functools
+import hashlib
+import hmac
 import json
 import logging
 import math
 import os
 import socket
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 from mnemomatic import model_config
+from mnemomatic.audit import request_meta
 
 logger = logging.getLogger("mnemomatic")
 
@@ -41,6 +47,17 @@ EMBED_API = os.environ.get("MNEMOMATIC_EMBED_API", "openai").strip().lower()
 # Sent as "Authorization: Bearer <key>" to the embedding endpoint, so a hosted
 # API's key need not live in MNEMOMATIC_EMBED_URL, which users can see.
 EMBED_API_KEY = os.environ.get("MNEMOMATIC_EMBED_API_KEY", "").strip()
+# Who each embedding call is for. When both are set, a call made on behalf of
+# a person the trusted proxy identified carries a short-lived HS256 JWT in
+# this header — {"email", "iat", "exp"} signed with the secret — so a gateway
+# that meters the embedder can attribute the call to the person rather than
+# to this server. Calls with no such person behind them (local accounts,
+# the startup reindex) carry no header and stay the server's own.
+EMBED_USER_HEADER = os.environ.get("MNEMOMATIC_EMBED_USER_HEADER", "").strip()
+EMBED_USER_SECRET = os.environ.get("MNEMOMATIC_EMBED_USER_SECRET", "").strip()
+EMBED_USER_SECRET_MIN_LEN = 32
+EMBED_USER_TOKEN_TTL = 300           # seconds a minted token stays valid
+_USER_TOKEN_KEY = "embed_user_jwt"   # where the request's minted token is kept
 
 
 def redact_url(url: str) -> str:
@@ -55,6 +72,38 @@ def redact_url(url: str) -> str:
         netloc += f":{parts.port}"
     redacted = urllib.parse.urlunsplit((parts.scheme, netloc, parts.path, "", ""))
     return redacted + ("?…" if parts.query else "")
+
+
+def _b64url(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def mint_user_token(email: str, secret: str, now: float | None = None) -> str:
+    """An HS256 JWT naming `email`, valid for EMBED_USER_TOKEN_TTL seconds."""
+    issued = int(now if now is not None else time.time())
+    header = _b64url(json.dumps({"alg": "HS256", "typ": "JWT"}, separators=(",", ":")).encode())
+    claims = _b64url(json.dumps({"email": email, "iat": issued, "exp": issued + EMBED_USER_TOKEN_TTL},
+                                separators=(",", ":")).encode())
+    signing_input = f"{header}.{claims}".encode("ascii")
+    signature = hmac.new(secret.encode("utf-8"), signing_input, hashlib.sha256).digest()
+    return f"{header}.{claims}.{_b64url(signature)}"
+
+
+def user_token(secret: str) -> str | None:
+    """The token for the person behind the current request, minted once per
+    request and reused for every embedding call it makes (each chunk of a
+    document included), or None when nobody identifiable is behind it."""
+    meta = request_meta()
+    email = meta.get("external_id")
+    if not email:
+        return None
+    token = meta.get(_USER_TOKEN_KEY)
+    if token is None:
+        # A real request's meta is its own dict (RequestMetaMiddleware); the
+        # shared empty record never has an external_id, so this never writes
+        # into it.
+        token = meta[_USER_TOKEN_KEY] = mint_user_token(email, secret)
+    return token
 
 
 class _NoRedirects(urllib.request.HTTPRedirectHandler):
@@ -192,7 +241,8 @@ class HttpEmbedder:
       Ollama's native /api/embeddings endpoint.
     """
 
-    def __init__(self, url: str, model: str = "", api: str | None = None, api_key: str | None = None):
+    def __init__(self, url: str, model: str = "", api: str | None = None, api_key: str | None = None,
+                 user_header: str | None = None, user_secret: str | None = None):
         if not url:
             raise ValueError("MNEMOMATIC_EMBED_URL must be set and non-empty")
         self.api = (api or EMBED_API)
@@ -204,6 +254,8 @@ class HttpEmbedder:
         # What logs, errors, and the settings page show instead of `url`.
         self.display_url = redact_url(url)
         self.api_key = EMBED_API_KEY if api_key is None else api_key
+        self.user_header = EMBED_USER_HEADER if user_header is None else user_header
+        self.user_secret = EMBED_USER_SECRET if user_secret is None else user_secret
         self.model = model
         self.embed = functools.lru_cache(maxsize=256)(self._embed)
 
@@ -244,9 +296,14 @@ class HttpEmbedder:
             except Exception as e:
                 logger.error("Batch embedding failed for item %d/%d: %s", i + 1, len(texts), e)
 
+        # Mint the person's token here, before the fan-out, so every chunk
+        # carries the same one; the workers then run under a copy of this
+        # request's context, since a pool thread inherits none by itself.
+        if self.user_header and self.user_secret:
+            user_token(self.user_secret)
         with ThreadPoolExecutor(max_workers=min(EMBED_CONCURRENCY, len(texts))) as pool:
             for i, text in enumerate(texts):
-                pool.submit(_one, i, text)
+                pool.submit(contextvars.copy_context().run, _one, i, text)
         return results
 
     def _embed(self, text: str) -> list[float]:
@@ -264,6 +321,10 @@ class HttpEmbedder:
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
+        if self.user_header and self.user_secret:
+            token = user_token(self.user_secret)
+            if token:
+                headers[self.user_header] = token
         req = urllib.request.Request(self.url, data=payload, headers=headers)
 
         # Failures raise without logging here: the caller (runtime._safe_embed,

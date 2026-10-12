@@ -31,7 +31,7 @@ logger = logging.getLogger("mnemomatic")
 
 _EMPTY = {
     "actor": None, "client": None, "ip": None,
-    "user": None, "user_id": None, "is_admin": False, "via": None,
+    "user": None, "user_id": None, "is_admin": False, "via": None, "external_id": None,
     "token_id": None, "token_hint": None, "token_name": None, "token_scope": None,
 }
 _request_meta: ContextVar[dict] = ContextVar("mnemomatic_request_meta", default=_EMPTY)
@@ -40,7 +40,10 @@ _request_meta: ContextVar[dict] = ContextVar("mnemomatic_request_meta", default=
 def request_meta() -> dict:
     """The current request's identity fields: actor (header label), client
     (user-agent), ip, and — when authenticated — user, user_id, is_admin,
-    via ("session", "token" or "proxy"), token_id, token_hint, token_name, token_scope."""
+    via ("session", "token" or "proxy"), external_id (a trusted proxy's
+    identity for the user, usually an email), token_id, token_hint,
+    token_name, token_scope. Outside a request (bootstrap, reindex, the
+    CLI) it is the shared empty record: never write into it."""
     return _request_meta.get()
 
 
@@ -96,6 +99,7 @@ class RequestMetaMiddleware:
         if principal is not None:
             meta.update(user=principal.actor, user_id=principal.user.id,
                         is_admin=principal.user.is_admin, via=principal.via,
+                        external_id=principal.user.external_id,
                         token_id=principal.token_id, token_hint=principal.token_hint,
                         token_name=principal.token_name, token_scope=principal.token_scope)
         token = _request_meta.set(meta)
