@@ -1,0 +1,25 @@
+# Keeps the digest pins current: base images in the Dockerfile and the Caddy
+# overlay, and the commit SHAs the workflows pin their actions to. Each
+# ecosystem's updates arrive as one grouped pull request a week.
+version: 2
+updates:
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      base-images:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directory: /deploy/caddy
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
