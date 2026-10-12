@@ -284,6 +284,28 @@ def _reindex_at_startup() -> None:
         logger.info("Embedder matches the stored index — no reindex needed")
 
 
+def _check_embed_user_config() -> None:
+    """Per-person attribution of external embedding calls needs both the
+    header name and a secret that is one. Half a setting is a mistake worth
+    naming; a short secret is refused like the proxy's."""
+    from mnemomatic.embeddings import EMBED_USER_HEADER, EMBED_USER_SECRET, EMBED_USER_SECRET_MIN_LEN
+    if not EMBED_USER_HEADER and not EMBED_USER_SECRET:
+        return
+    if not (EMBED_USER_HEADER and EMBED_USER_SECRET):
+        logger.warning("MNEMOMATIC_EMBED_USER_HEADER and MNEMOMATIC_EMBED_USER_SECRET work only together; "
+                       "embedding calls will not carry a person's identity")
+        return
+    if len(EMBED_USER_SECRET) < EMBED_USER_SECRET_MIN_LEN:
+        logger.error("MNEMOMATIC_EMBED_USER_SECRET must be at least %d characters (%d given)",
+                     EMBED_USER_SECRET_MIN_LEN, len(EMBED_USER_SECRET))
+        raise SystemExit(1)
+    if not config.EMBED_URL:
+        logger.warning("MNEMOMATIC_EMBED_USER_HEADER is set but there is no external embedder "
+                       "(MNEMOMATIC_EMBED_URL); nothing will carry it")
+        return
+    logger.info("External embedding calls name the person behind them in the %s header", EMBED_USER_HEADER)
+
+
 def _check_proxy_config() -> None:
     """Refuse a proxy secret too short to be one, and say what the mode means."""
     if config.PROXY_SECRET is None:
@@ -317,6 +339,7 @@ def main():
         logger.error("MNEMOMATIC_ADMIN_PASSWORD rejected: %s", e.details)
         raise SystemExit(1)
     _check_proxy_config()
+    _check_embed_user_config()
     logger.info("Initializing embedder...")
     runtime._embedder()
 

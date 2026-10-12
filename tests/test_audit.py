@@ -219,7 +219,7 @@ class TestRequestMeta(unittest.TestCase):
     def test_defaults_outside_a_request(self):
         self.assertEqual(request_meta(), {
             "actor": None, "client": None, "ip": None,
-            "user": None, "user_id": None, "is_admin": False, "via": None,
+            "user": None, "user_id": None, "is_admin": False, "via": None, "external_id": None,
             "token_id": None, "token_hint": None, "token_name": None, "token_scope": None,
         })
 
