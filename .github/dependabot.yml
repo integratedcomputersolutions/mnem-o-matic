@@ -1,6 +1,11 @@
 # Keeps the digest pins current: base images in the Dockerfile and the Caddy
 # overlay, and the commit SHAs the workflows pin their actions to. Each
 # ecosystem's updates arrive as one grouped pull request a week.
+#
+# For the base images only the digest behind the pinned tag should move: the
+# Python version is chosen to match the distroless runtime's interpreter, and
+# the Node major is chosen with the web build. A new major or minor is a
+# deliberate change, not an update, so those are ignored here.
 version: 2
 updates:
   - package-ecosystem: docker
@@ -10,11 +15,17 @@ updates:
     groups:
       base-images:
         patterns: ["*"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
 
   - package-ecosystem: docker
     directory: /deploy/caddy
     schedule:
       interval: weekly
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: /
