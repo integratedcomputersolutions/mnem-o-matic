@@ -876,32 +876,55 @@ class Identity:
 
     def _create_proxy_user(self, external_id: str, display_name: str, role: str) -> dict:
         """Insert the row for a proxy identity seen for the first time and
-        return it. Two first requests for one person can race; the unique
-        index makes one of them lose, and the loser reads the winner's row."""
+        return it.
+
+        Two kinds of first request can race. Two for the *same* person: the
+        unique index on external_id makes one lose, and the loser reads the
+        winner's row. Two for *different* people whose identities derive the
+        same username (alice@one.example, alice@two.example): both pick the
+        same free suffix, the loser's insert fails on username, and it tries
+        again with that name excluded. A handful of rounds covers any burst.
+        """
         base = username_from_external_id(external_id)
-        try:
-            with self._db.write() as conn:
-                taken = {r["username"].lower() for r in conn.execute(
-                    "SELECT username FROM users WHERE username = ? OR username LIKE ?", (base, base + "-%"))}
-                username, n = base, 2
-                while username in taken:
-                    suffix = f"-{n}"
-                    username, n = base[:USERNAME_MAX - len(suffix)] + suffix, n + 1
-                cur = conn.execute(
-                    "INSERT INTO users (username, display_name, role, password_hash, must_change_password, "
-                    "temp_password_expires_at, active, created_at, external_id) VALUES (?, ?, ?, ?, 0, NULL, 1, ?, ?)",
-                    (username, display_name, role, NO_PASSWORD_HASH, _iso(_now()), external_id),
-                )
-                row_id = cur.lastrowid
-        except sqlite3.IntegrityError:
-            row = self._conn().execute("SELECT * FROM users WHERE external_id = ?", (external_id,)).fetchone()
-            if row is None:
-                raise
-            return row
-        write_event(self._db, "user.created", actor=external_id, item_type="user", item_id=username,
-                    role=role, source="proxy")
-        logger.info("Created user %r for proxy identity %r", username, external_id)
-        return self._conn().execute("SELECT * FROM users WHERE id = ?", (row_id,)).fetchone()
+        excluded: set[str] = set()
+        for _attempt in range(8):
+            try:
+                with self._db.write() as conn:
+                    username = self._free_username(conn, base, excluded)
+                    cur = conn.execute(
+                        "INSERT INTO users (username, display_name, role, password_hash, must_change_password, "
+                        "temp_password_expires_at, active, created_at, external_id) "
+                        "VALUES (?, ?, ?, ?, 0, NULL, 1, ?, ?)",
+                        (username, display_name, role, NO_PASSWORD_HASH, _iso(_now()), external_id),
+                    )
+                    row_id = cur.lastrowid
+            except sqlite3.IntegrityError:
+                row = self._conn().execute("SELECT * FROM users WHERE external_id = ?", (external_id,)).fetchone()
+                if row is not None:
+                    return row
+                excluded.add(username)
+                continue
+            write_event(self._db, "user.created", actor=external_id, item_type="user", item_id=username,
+                        role=role, source="proxy")
+            logger.info("Created user %r for proxy identity %r", username, external_id)
+            return self._conn().execute("SELECT * FROM users WHERE id = ?", (row_id,)).fetchone()
+        raise IdentityError("username_contended", 503,
+                            "Could not pick a free username for this identity; retry.")
+
+    @staticmethod
+    def _free_username(conn: sqlite3.Connection, base: str, excluded: set[str]) -> str:
+        """`base`, or the first `base-N` that no user holds and this caller
+        has not already seen fail. `_` and `%` in base are LIKE wildcards, so
+        they are escaped: the prefix match means exactly the prefix."""
+        pattern = base.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "-%"
+        taken = {r["username"].lower() for r in conn.execute(
+            "SELECT username FROM users WHERE username = ? OR username LIKE ? ESCAPE '\\'", (base, pattern))}
+        taken |= excluded
+        username, n = base, 2
+        while username in taken:
+            suffix = f"-{n}"
+            username, n = base[:USERNAME_MAX - len(suffix)] + suffix, n + 1
+        return username
 
     def resolve_token(self, raw: str) -> Principal | None:
         """The principal behind a bearer value, or None when it is unknown,

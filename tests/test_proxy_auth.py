@@ -346,6 +346,53 @@ class TestProxyUsersInTheStore(unittest.TestCase):
         self.assertEqual(len(set(results)), 1)
         self.assertEqual(len([u for u in self.identity.list_users() if u["external_id"]]), 1)
 
+    def test_different_people_racing_to_one_username_all_get_a_user(self):
+        import threading
+        people = [f"alice@{d}.example" for d in ("one", "two", "three", "four")]
+        results, errors = {}, []
+
+        def hit(email):
+            try:
+                results[threading.get_ident(), email] = self.identity.resolve_proxy_user(email).user.username
+            except Exception as e:  # pragma: no cover - a failure is the finding
+                errors.append(e)
+
+        threads = [threading.Thread(target=hit, args=(email,)) for email in people for _ in range(3)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(errors, [])
+        by_email = {}
+        for (_, email), username in results.items():
+            by_email.setdefault(email, set()).add(username)
+        self.assertEqual({len(v) for v in by_email.values()}, {1})
+        self.assertEqual(sorted(u for v in by_email.values() for u in v), ["alice", "alice-2", "alice-3", "alice-4"])
+
+    def test_username_collision_is_retried_with_the_next_suffix(self):
+        # Force the race deterministically: the free-name probe twice reports a
+        # name another request took in the meantime, so the insert fails on
+        # username, not on external_id, and the loser must try again.
+        self.identity.create_user("alice", password="password-alice-1")
+        self.identity.create_user("alice-2", password="password-alice-2")
+        real = Identity._free_username
+        stale = iter(["alice", "alice-2"])
+
+        def probe(conn, base, excluded):
+            return next(stale, None) or real(conn, base, excluded)
+
+        with patch.object(Identity, "_free_username", staticmethod(probe)):
+            p = self.identity.resolve_proxy_user("alice@example.com")
+        self.assertEqual(p.user.username, "alice-3")
+        created = [e for e in self.db.list_audit() if e["op"] == "user.created"]
+        self.assertEqual([e["item_id"] for e in created], ["alice-3"])
+
+    def test_underscore_in_the_base_is_not_a_wildcard(self):
+        self.identity.create_user("bobxsmith", password="password-bobx-1")
+        self.identity.create_user("bobxsmith-2", password="password-bobx-2")
+        self.assertEqual(self.identity.resolve_proxy_user("bob_smith@example.com").user.username, "bob_smith")
+        self.assertEqual(self.identity.resolve_proxy_user("bob_smith@other.example").user.username, "bob_smith-2")
+
 
 class TestMigrationV8(unittest.TestCase):
     """A v7 database gains the external_id column and its index."""
