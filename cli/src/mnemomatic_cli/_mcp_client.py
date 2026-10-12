@@ -136,6 +136,10 @@ class MCPClient:
 
     def call_tool(self, name: str, arguments: dict) -> dict | list:
         result = self._rpc("tools/call", {"name": name, "arguments": arguments})
+        if result.get("isError"):
+            # A refused or failed call carries plain text, not a JSON result.
+            raise RuntimeError(" ".join(item.get("text", "") for item in result["content"]).strip()
+                               or f"{name} failed")
         return _one_or_all([json.loads(item["text"]) for item in result["content"]])
 
     def read_resource(self, uri: str) -> str | list[str]:

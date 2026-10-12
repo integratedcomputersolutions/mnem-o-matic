@@ -47,6 +47,9 @@ TOKEN_PREFIX = "mnm_"
 TOKEN_HINT_LEN = len(TOKEN_PREFIX) + 6     # enough to tell tokens apart in a list, useless to guess from
 MAX_ACTIVE_TOKENS = 25
 MAX_TOKEN_DAYS = 3650
+# What a token may do over MCP. "read" reaches only the read-only tools,
+# whatever its owner's role; "write" reaches everything its owner can.
+TOKEN_SCOPES = ("read", "write")
 
 SESSION_TTL = timedelta(hours=24)
 SESSION_IDLE = timedelta(hours=2)
@@ -257,6 +260,12 @@ class Principal:
     token_id: int | None = None
     token_hint: str | None = None
     token_name: str | None = None
+    token_scope: str | None = None
+
+    @property
+    def can_write(self) -> bool:
+        """A session acts with the user's full rights; a token only with its scope's."""
+        return self.via != "token" or self.token_scope == "write"
 
 
 # ── Login throttle ──────────────────────────────────────────────────────────
@@ -709,7 +718,7 @@ class Identity:
 
     @staticmethod
     def _token_public(row: dict) -> dict:
-        return {k: row[k] for k in ("id", "name", "hint", "created_at", "expires_at",
+        return {k: row[k] for k in ("id", "name", "hint", "scope", "created_at", "expires_at",
                                     "last_used_at", "revoked_at")}
 
     def list_tokens(self, user_id: int) -> list[dict]:
@@ -718,12 +727,15 @@ class Identity:
         ).fetchall()
         return [self._token_public(r) for r in rows]
 
-    def create_token(self, user_id: int, name: str, expires_in_days: int = 0) -> tuple[dict, str]:
+    def create_token(self, user_id: int, name: str, expires_in_days: int = 0, *,
+                     scope: str = "write") -> tuple[dict, str]:
         """Mint a token for `user_id`. Returns (public record, raw token); the
         raw value is never recoverable afterwards."""
         name = (name or "").strip()
         if not 1 <= len(name) <= 64:
             raise IdentityError("invalid_name", 400, "Token names are 1–64 characters.")
+        if scope not in TOKEN_SCOPES:
+            raise IdentityError("invalid_scope", 400, f"Token scope must be one of: {', '.join(TOKEN_SCOPES)}.")
         try:
             days = int(expires_in_days or 0)
         except (TypeError, ValueError):
@@ -746,9 +758,9 @@ class Identity:
             raw = generate_token()
             expires = _iso(now + timedelta(days=days)) if days else None
             cur = conn.execute(
-                "INSERT INTO api_tokens (user_id, name, token_hash, hint, created_at, expires_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (user_id, name, _sha256(raw), raw[:TOKEN_HINT_LEN], _iso(now), expires),
+                "INSERT INTO api_tokens (user_id, name, token_hash, hint, scope, created_at, expires_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (user_id, name, _sha256(raw), raw[:TOKEN_HINT_LEN], scope, _iso(now), expires),
             )
             row = conn.execute("SELECT * FROM api_tokens WHERE id = ?", (cur.lastrowid,)).fetchone()
             return self._token_public(row), raw
@@ -774,7 +786,8 @@ class Identity:
             return None
         conn = self._conn()
         row = conn.execute(
-            "SELECT t.id AS tid, t.hint, t.name AS tname, t.expires_at, t.last_used_at, u.* FROM api_tokens t "
+            "SELECT t.id AS tid, t.hint, t.name AS tname, t.scope AS tscope, t.expires_at, t.last_used_at, "
+            "u.* FROM api_tokens t "
             "JOIN users u ON u.id = t.user_id "
             "WHERE t.token_hash = ? AND t.revoked_at IS NULL AND u.active = 1",
             (_sha256(raw),),
@@ -789,7 +802,7 @@ class Identity:
             with self._db.write() as w:
                 w.execute("UPDATE api_tokens SET last_used_at = ? WHERE id = ?", (_iso(now), row["tid"]))
         return Principal(user=_row_to_user(row), via="token", token_id=row["tid"], token_hint=row["hint"],
-                         token_name=row["tname"])
+                         token_name=row["tname"], token_scope=row["tscope"])
 
 
 # ── Bootstrap ───────────────────────────────────────────────────────────────

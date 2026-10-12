@@ -20,10 +20,11 @@ import threading
 
 import anyio
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 from pydantic import ValidationError
 
 from mnemomatic import config
-from mnemomatic.audit import write_event
+from mnemomatic.audit import request_meta, write_event
 from mnemomatic.db import (
     CHUNK_OVERLAP,
     CHUNK_SIZE,
@@ -36,7 +37,46 @@ from mnemomatic.identity import FirstRun, Identity
 
 logger = logging.getLogger("mnemomatic")
 
-mcp = FastMCP(
+def _read_only_caller() -> bool:
+    """True when the current MCP request came in on a read-scoped token.
+
+    Every /mcp request is token-authenticated, so via == "token" is the normal
+    case. Calls with no request behind them (tests, in-process use) act with
+    full rights, as a session would.
+    """
+    meta = request_meta()
+    return meta.get("via") == "token" and meta.get("token_scope") != "write"
+
+
+def _marked_read_only(tool) -> bool:
+    return bool(tool.annotations and tool.annotations.readOnlyHint)
+
+
+class _ScopedMCP(FastMCP):
+    """FastMCP that keeps read tokens to the read-only tools.
+
+    The tools' own annotations decide: only those marked readOnlyHint are
+    listed for, or callable by, a read token. A tool without that mark is
+    treated as a write, so a new tool is gated until someone says otherwise.
+    Resources are all reads and pass through.
+    """
+
+    async def list_tools(self):
+        tools = await super().list_tools()
+        if not _read_only_caller():
+            return tools
+        return [t for t in tools if _marked_read_only(t)]
+
+    async def call_tool(self, name, arguments):
+        tool = self._tool_manager.get_tool(name)
+        # An unknown name falls through to FastMCP's own "Unknown tool" error.
+        if tool is not None and _read_only_caller() and not _marked_read_only(tool):
+            raise ToolError(f"read_only_token: this token is read-only and cannot call {name}. "
+                            "Use a token with write scope.")
+        return await super().call_tool(name, arguments)
+
+
+mcp = _ScopedMCP(
     "Mnem-O-matic",
     json_response=True,
     host=config.HOST,

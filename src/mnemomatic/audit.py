@@ -31,7 +31,7 @@ logger = logging.getLogger("mnemomatic")
 _EMPTY = {
     "actor": None, "client": None, "ip": None,
     "user": None, "user_id": None, "is_admin": False, "via": None,
-    "token_id": None, "token_hint": None, "token_name": None,
+    "token_id": None, "token_hint": None, "token_name": None, "token_scope": None,
 }
 _request_meta: ContextVar[dict] = ContextVar("mnemomatic_request_meta", default=_EMPTY)
 
@@ -39,7 +39,7 @@ _request_meta: ContextVar[dict] = ContextVar("mnemomatic_request_meta", default=
 def request_meta() -> dict:
     """The current request's identity fields: actor (header label), client
     (user-agent), ip, and — when authenticated — user, user_id, is_admin,
-    via ("session" or "token"), token_id, token_hint, token_name."""
+    via ("session" or "token"), token_id, token_hint, token_name, token_scope."""
     return _request_meta.get()
 
 
@@ -96,7 +96,7 @@ class RequestMetaMiddleware:
             meta.update(user=principal.user.username, user_id=principal.user.id,
                         is_admin=principal.user.is_admin, via=principal.via,
                         token_id=principal.token_id, token_hint=principal.token_hint,
-                        token_name=principal.token_name)
+                        token_name=principal.token_name, token_scope=principal.token_scope)
         token = _request_meta.set(meta)
         try:
             await self.app(scope, receive, send)

@@ -87,7 +87,7 @@ The server ships its own web interface — sign in, browse everything the agents
 <sub><i>Click any image to view full size.</i></sub>
 </div>
 
-**People, not a shared key.** Each person signs in with a password and creates their own API tokens — one per agent or machine. Every MCP request is attributed to the token's owner, so the audit log names who did what, and revoking one token stops one agent. Two roles: administrators manage users and HTTPS; everyone else manages their own tokens. There is no per-user data separation — the store is shared, which is the point.
+**People, not a shared key.** Each person signs in with a password and creates their own API tokens — one per agent or machine. Every MCP request is attributed to the token's owner, so the audit log names who did what, and revoking one token stops one agent. A token can be read-only, for agents that only recall memory. Two roles: administrators manage users and HTTPS; everyone else manages their own tokens. There is no per-user data separation — the store is shared, which is the point.
 
 **HTTPS out of the box.** An administrator types the server's hostname; the server mints a private certificate authority bound to that one name and starts serving HTTPS. Trust the CA once per device (the setup page has the steps for each OS and for Node and Python tools), confirm from the browser, and plain HTTP steps aside. Your own certificate, or your own reverse proxy, work too. [More →](docs/installation.md#https)
 

@@ -46,7 +46,9 @@ BUSY_TIMEOUT_MS = 5000
 # Version 6: users.credential_version, bumped whenever a user's credentials
 # are invalidated (password change or reset, deactivation); known-device
 # proofs are bound to it.
-SCHEMA_VERSION = 6
+# Version 7: api_tokens.scope, "read" or "write". A read token may call only
+# the read-only tools; tokens minted before the upgrade become "write".
+SCHEMA_VERSION = 7
 CHUNK_THRESHOLD = int(os.environ.get("MNEMOMATIC_CHUNK_THRESHOLD", "2000"))
 CHUNK_SIZE = int(os.environ.get("MNEMOMATIC_CHUNK_SIZE", "1000"))
 CHUNK_OVERLAP = int(os.environ.get("MNEMOMATIC_CHUNK_OVERLAP", "200"))
@@ -830,7 +832,7 @@ class Database:
 
     @classmethod
     def _migrate_content_schema(cls, conn: sqlite3.Connection) -> None:
-        """Apply the content-table migrations (v2 through v6) in order.
+        """Apply the content-table migrations (v2 through v7) in order.
 
         Every step is idempotent (column-existence checks, IF NOT EXISTS) so
         this is safe to run on any database regardless of which path reached it.
@@ -840,6 +842,7 @@ class Database:
         cls._migrate_to_v4(conn)
         cls._migrate_to_v5(conn)
         cls._migrate_to_v6(conn)
+        cls._migrate_to_v7(conn)
 
     @staticmethod
     def _record_migration(conn: sqlite3.Connection, from_version: int) -> None:
@@ -974,6 +977,15 @@ class Database:
         cols = {row["name"] for row in conn.execute("PRAGMA table_info(users)")}
         if "credential_version" not in cols:
             conn.execute("ALTER TABLE users ADD COLUMN credential_version INTEGER NOT NULL DEFAULT 0")
+
+    @staticmethod
+    def _migrate_to_v7(conn: sqlite3.Connection) -> None:
+        """Version 7: api_tokens.scope. Existing tokens keep doing what they
+        did, so they all become "write"."""
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(api_tokens)")}
+        if "scope" not in cols:
+            conn.execute("ALTER TABLE api_tokens ADD COLUMN scope TEXT NOT NULL DEFAULT 'write' "
+                         "CHECK (scope IN ('read', 'write'))")
 
     def connection(self) -> sqlite3.Connection:
         """This thread's connection, for modules that own their own tables

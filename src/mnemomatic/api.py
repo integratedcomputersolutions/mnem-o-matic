@@ -416,9 +416,10 @@ def build_api_routes(*, identity, db_getter, settings_info, first_run: FirstRun,
         principal = _principal(request)
         data = await _body(request)
         rec, raw = ident().create_token(principal.user.id, _str(data, "name"),
-                                        data.get("expires_in_days", 0))
+                                        data.get("expires_in_days", 0),
+                                        scope=_str(data, "scope", required=False, default="write"))
         record("token.created", item_type="token", item_id=str(rec["id"]), title=rec["name"],
-               hint=rec["hint"], expires_at=rec["expires_at"])
+               hint=rec["hint"], scope=rec["scope"], expires_at=rec["expires_at"])
         return _json({**rec, "token": raw}, 201)
 
     async def tokens_revoke(request: Request):

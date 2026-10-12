@@ -19,6 +19,7 @@
   let createOpen = $state(false);
   let name = $state('');
   let expires = $state('0');
+  let scope = $state('');          // no default: the person picks read or write
   let created = $state(null);      // {name, token} shown once
   let confirmRevoke = $state(null);
 
@@ -34,11 +35,12 @@
   function create(e) {
     e.preventDefault();
     op.run(async () => {
-      const r = await api.post('/api/me/tokens', { name: name.trim(), expires_in_days: Number(expires) });
+      const r = await api.post('/api/me/tokens', { name: name.trim(), scope, expires_in_days: Number(expires) });
       created = r;
       session.freshToken = r.token;       // memory only, for the Connect page
       createOpen = false;
       name = '';
+      scope = '';
       await load();
     });
   }
@@ -67,13 +69,14 @@
   <Empty text="No tokens yet. Create one, then paste it into your agent's configuration." />
 {:else}
   <TableCard>
-    <thead><tr><th>Name</th><th>Hint</th><th>Status</th><th>Created</th><th>Expires</th><th>Last used</th><th></th></tr></thead>
+    <thead><tr><th>Name</th><th>Hint</th><th>Access</th><th>Status</th><th>Created</th><th>Expires</th><th>Last used</th><th></th></tr></thead>
     <tbody>
       {#each tokens.data as t (t.id)}
         {@const [tone, label] = status(t)}
         <tr>
           <td><b>{t.name}</b></td>
           <td class="mono muted">{t.hint}…</td>
+          <td>{#if t.scope === 'read'}<StatusBadge tone="neutral" label="Read only" />{:else}<StatusBadge tone="brand" label="Read & write" />{/if}</td>
           <td><StatusBadge {tone} {label} /></td>
           <td class="muted small nowrap">{fmtDate(t.created_at)}</td>
           <td class="muted small nowrap">{t.expires_at ? fmtDate(t.expires_at) : 'never'}</td>
@@ -93,6 +96,15 @@
       <div class="help">Only for your own reference — which agent or machine holds it.</div>
     </div>
     <div class="field">
+      <label for="ts">Access</label>
+      <select id="ts" class="select" bind:value={scope} required>
+        <option value="" disabled>Choose…</option>
+        <option value="read">Read only: search and read memory</option>
+        <option value="write">Read &amp; write: also store, update and delete</option>
+      </select>
+      <div class="help">Give agents that only recall memory a read-only token. If it leaks, nothing can be deleted or overwritten with it.</div>
+    </div>
+    <div class="field">
       <label for="te">Expires</label>
       <select id="te" class="select" bind:value={expires}>
         <option value="0">Never</option><option value="30">In 30 days</option>
@@ -102,7 +114,7 @@
   </form>
   {#snippet footer()}
     <button class="btn ghost" type="button" onclick={() => (createOpen = false)}>Cancel</button>
-    <button class="btn primary" type="submit" form="create-token" disabled={op.busy || !name.trim()}>{op.busy ? 'Creating…' : 'Create'}</button>
+    <button class="btn primary" type="submit" form="create-token" disabled={op.busy || !name.trim() || !scope}>{op.busy ? 'Creating…' : 'Create'}</button>
   {/snippet}
 </Modal>
 
