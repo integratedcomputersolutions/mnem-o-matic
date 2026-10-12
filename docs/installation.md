@@ -265,6 +265,8 @@ Optional headers, each read only when its name is configured:
 
 A fresh data directory works at once: `/mcp` through the proxy needs no setup step. The one-time setup code is still printed so an administrator can claim the web UI; `MNEMOMATIC_ADMIN_PASSWORD` creates that account headlessly instead.
 
+**The web UI too.** The same secret and user header, sent on every request under `/api`, sign the person into the web UI with no password of their own: the portal that fronts the UI port adds `Authorization: Bearer <secret>` and the user header, and the browser never holds either. Such a session has no sign-out and no password change (both answer `409 proxy_session`; the portal's own sign-out ends it), and the pages about personal tokens are hidden since the portal's token is what the person's agents use. Roles follow the role header as above, so a portal's administrator can be an administrator here. With the mode on, any other bearer value under `/api` is refused with `403 invalid_token` and counts toward the lockout; without it, `/api` takes only the session cookie as before. The Origin check on state-changing requests still applies, so the portal must forward the browser's `Host` or name itself in `MNEMOMATIC_TRUSTED_PROXIES` and send `X-Forwarded-Host`.
+
 ## Quick Start (Pre-built Images)
 
 Pre-built images for `linux/amd64` and `linux/arm64` are published to the GitHub Container Registry on every release. No build step required.

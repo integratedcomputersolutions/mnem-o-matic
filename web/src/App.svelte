@@ -14,7 +14,7 @@
     return installRouter();
   });
 
-  const resolved = $derived(resolve(route.path, session.user));
+  const resolved = $derived(resolve(route.path, session.user, session.via));
   const Page = $derived(resolved.entry.page);
 </script>
 

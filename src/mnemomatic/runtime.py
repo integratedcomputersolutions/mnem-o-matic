@@ -76,12 +76,25 @@ class _ScopedMCP(FastMCP):
         return await super().call_tool(name, arguments)
 
 
+def _package_version() -> str:
+    """What `initialize` reports as serverInfo.version: this package's, not
+    the MCP SDK's (FastMCP's default)."""
+    from importlib.metadata import PackageNotFoundError, version
+    try:
+        return version("mnemomatic-server")
+    except PackageNotFoundError:
+        return "unknown"
+
+
 mcp = _ScopedMCP(
     "Mnem-O-matic",
     json_response=True,
     host=config.HOST,
     port=config.PORT,
 )
+# FastMCP reports the MCP SDK's version as serverInfo.version unless told
+# otherwise; the low-level server reads this attribute at initialize time.
+mcp._mcp_server.version = _package_version()
 
 
 # FastMCP calls a synchronous tool or resource function inline, on the event

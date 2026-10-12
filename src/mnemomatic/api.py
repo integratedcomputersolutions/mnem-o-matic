@@ -303,7 +303,7 @@ def build_api_routes(*, identity, db_getter, settings_info, first_run: FirstRun,
         base = {"version": info.get("version"), "build": info.get("build"), "https": https_status()}
         if principal is None:
             return _json({**base, "authenticated": False, "first_run": ident().count_users() == 0})
-        return _json({**base, "authenticated": True, "user": principal.user.public()})
+        return _json({**base, "authenticated": True, "user": principal.user.public(), "via": principal.via})
 
     async def first_run_setup(request: Request):
         data = await _body(request)
@@ -376,6 +376,8 @@ def build_api_routes(*, identity, db_getter, settings_info, first_run: FirstRun,
 
     async def logout(request: Request):
         principal = _principal(request)
+        if principal.via == "proxy":
+            raise ApiError("proxy_session", 409, "You are signed in through your portal; sign out there.")
         ident().delete_session(_session_cookie(request))
         record("auth.logout", item_type="user", item_id=principal.user.username)
         resp = _no_content()
@@ -384,6 +386,9 @@ def build_api_routes(*, identity, db_getter, settings_info, first_run: FirstRun,
 
     async def password(request: Request):
         principal = _principal(request)
+        if principal.via == "proxy":
+            raise ApiError("proxy_session", 409,
+                           "You are signed in through your portal; this account has no password here.")
         data = await _body(request)
         # A stolen session cookie must not become a way to brute-force the
         # account's password through this endpoint.

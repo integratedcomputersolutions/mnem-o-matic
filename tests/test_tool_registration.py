@@ -72,6 +72,12 @@ class TestToolRegistration(unittest.TestCase):
     def test_prompts(self):
         self.assertEqual({p.name for p in asyncio.run(server.mcp.list_prompts())}, EXPECTED_PROMPTS)
 
+    def test_initialize_reports_our_version_not_the_sdks(self):
+        from mnemomatic.tools_admin import _server_version
+        opts = server.mcp._mcp_server.create_initialization_options()
+        self.assertEqual(opts.server_version, _server_version())
+        self.assertEqual(opts.server_name, "Mnem-O-matic")
+
     def test_health_resource_is_registered(self):
         resources = {str(r.uri) for r in asyncio.run(server.mcp.list_resources())}
         self.assertIn("mnemomatic://health", resources)
