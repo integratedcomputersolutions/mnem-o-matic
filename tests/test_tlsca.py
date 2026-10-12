@@ -124,6 +124,11 @@ class TestStateMachine(TlsCase):
         with self.assertRaises(TlsError) as cm:
             self.state.confirm("memory.example", "wrong", "right")
         self.assertEqual(cm.exception.code, "instance_mismatch")
+        # An empty id matches an empty expectation only by accident: a browser
+        # that read nothing back has not proved the name reaches this server.
+        with self.assertRaises(TlsError) as cm:
+            self.state.confirm("memory.example", "", "")
+        self.assertEqual(cm.exception.code, "instance_mismatch")
         with self.assertRaises(TlsError) as cm:
             self.state.confirm("other.example", "right", "right")
         self.assertEqual(cm.exception.code, "name_mismatch")
@@ -257,7 +262,7 @@ class TestPlainPortGate(unittest.TestCase):
 
         routes = [Route(p, ok, methods=["GET", "POST"]) for p in
                   ("/", "/health", "/setup", "/ca.crt", "/api/instance-id", "/api/session", "/mcp", "/export",
-                   "/browse")]
+                   "/browse", "/healthx", "/health/x", "/api/instance-id/x", "/setup/x")]
         # Same nesting as the server: the listener tag is outermost, the gate inside it.
         app = ListenerTag(PlainPortGate(Starlette(routes=routes), state), listener)
         return TestClient(app, follow_redirects=False)
@@ -282,6 +287,18 @@ class TestPlainPortGate(unittest.TestCase):
             self.assertEqual(resp.json()["error"], "https_required")
             self.assertEqual(resp.json()["https_url"], "https://memory.example:8443")
         for path in ("/", "/browse"):
+            resp = c.get(path)
+            self.assertEqual(resp.status_code, 302, path)
+            self.assertEqual(resp.headers["location"], "/setup")
+
+    def test_allow_list_is_exact_not_a_prefix(self):
+        # A prefix match would let /api/instance-id/<anything> reach the API
+        # over plain HTTP, and /health<anything> dodge the redirect.
+        c = self._client("plain", active=True)
+        resp = c.get("/api/instance-id/x")
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(resp.json()["error"], "https_required")
+        for path in ("/healthx", "/health/x", "/setup/x"):
             resp = c.get(path)
             self.assertEqual(resp.status_code, 302, path)
             self.assertEqual(resp.headers["location"], "/setup")

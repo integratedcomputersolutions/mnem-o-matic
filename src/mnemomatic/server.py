@@ -269,6 +269,21 @@ def build_app(tls: TlsState | None, app_dir: Path = APP_DIR):
     return app
 
 
+def _reindex_at_startup() -> None:
+    """Opt-in full re-embed (model/dim/prefix changes) before serving traffic.
+
+    Under "auto" the database has already compared the recorded embedding
+    identity against the configured one, so reindex_pending is the whole
+    question: nothing changed, nothing to do. "force" rebuilds regardless;
+    "off" never rebuilds, even with a change pending (the database refused
+    to start in that case before we got here).
+    """
+    if config.REINDEX_MODE == "force" or (config.REINDEX_MODE == "auto" and runtime._db().reindex_pending):
+        _run_reindex()
+    elif config.REINDEX_MODE == "auto":
+        logger.info("Embedder matches the stored index — no reindex needed")
+
+
 def _check_proxy_config() -> None:
     """Refuse a proxy secret too short to be one, and say what the mode means."""
     if config.PROXY_SECRET is None:
@@ -305,14 +320,7 @@ def main():
     logger.info("Initializing embedder...")
     runtime._embedder()
 
-    # Opt-in full re-embed (model/dim/prefix changes) before serving traffic.
-    # Under "auto" the database has already compared the recorded embedding
-    # identity against the configured one, so reindex_pending is the whole
-    # question: nothing changed, nothing to do.
-    if config.REINDEX_MODE == "force" or (config.REINDEX_MODE == "auto" and runtime._db().reindex_pending):
-        _run_reindex()
-    elif config.REINDEX_MODE == "auto":
-        logger.info("Embedder matches the stored index — no reindex needed")
+    _reindex_at_startup()
 
     # Scheduled backups on a daemon thread (the Database hands each thread its
     # own connection, so the loop reads safely alongside request handling).
