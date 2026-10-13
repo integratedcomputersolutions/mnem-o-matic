@@ -37,7 +37,11 @@ jobs:
     strategy:
       fail-fast: false
       # Each flavour on both architectures. The release list is the check
-      # list plus the other published model.
+      # list plus the other published model. The Dockerfile target and the
+      # model each flavour maps to are derived where they are used: an
+      # `include` entry naming a flavour absent from the list would not
+      # match any combination and would be added as a new one with no
+      # platform and no runner, which fails the job before it starts.
       matrix:
         flavor: ${{ fromJSON(inputs.publish && '["lite", "full", "full-gte-multilingual-base"]' || '["lite", "full"]') }}
         platform: [linux/amd64, linux/arm64]
@@ -48,15 +52,6 @@ jobs:
           - platform: linux/arm64
             runner: ubuntu-24.04-arm
             arch: arm64
-          - flavor: lite
-            target: lite
-            model: arctic-embed-xs       # unused by the lite target; the build arg must still parse
-          - flavor: full
-            target: full
-            model: arctic-embed-xs
-          - flavor: full-gte-multilingual-base
-            target: full
-            model: gte-multilingual-base
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -90,13 +85,14 @@ jobs:
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
         with:
           context: .
-          target: ${{ matrix.target }}
+          target: ${{ matrix.flavor == 'lite' && 'lite' || 'full' }}
           platforms: ${{ matrix.platform }}
           push: ${{ inputs.publish }}
           labels: ${{ steps.meta.outputs.labels }}
+          # EMBED_MODEL is unused by the lite target but must still parse.
           build-args: |
             MNEMOMATIC_BUILD=${{ github.sha }}
-            EMBED_MODEL=${{ matrix.model }}
+            EMBED_MODEL=${{ matrix.flavor == 'full-gte-multilingual-base' && 'gte-multilingual-base' || 'arctic-embed-xs' }}
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=${{ inputs.publish }}
           # One cache per matrix leg, so the builds do not overwrite each other's.
           cache-from: type=gha,scope=${{ matrix.flavor }}-${{ matrix.arch }}

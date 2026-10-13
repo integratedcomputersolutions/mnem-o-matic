@@ -1,6 +1,7 @@
 name: Publish Docker Images
 
-# Every push and pull request builds all four images as a check, with a token
+# Every push and pull request builds the lite and full flavours on both
+# architectures as a check, with a token
 # that can only read. Only a `v*` tag gets a token that can write to ghcr.io,
 # and only that run pushes. The matrix lives once, in build-images.yml.
 
