@@ -101,7 +101,7 @@ docker run -d --name mnemomatic -p 8000:8000 -p 8443:8443 -v "$(pwd)/data:/data"
 docker logs mnemomatic          # prints a one-time setup code
 ```
 
-Open `http://your-host:8000`, enter the code, and you have an administrator account. (Ports taken on your host? See [If 8000 or 8443 is already taken](docs/installation.md#if-8000-or-8443-is-already-taken) — the HTTPS port must move together with `MNEMOMATIC_HTTPS_PORT`.) From there: create a token under **My tokens**, paste it into your client with the snippets on **Connect an agent**, and enable HTTPS under **Admin → HTTPS**.
+That image bundles the small Arctic embedding model; `latest-full-gte-multilingual-base` bundles the multilingual one, `latest-lite` brings none and takes an external embedder, and the two Gemma-derived models are [built from source](docs/installation.md#choosing-the-built-in-embedding-model). Open `http://your-host:8000`, enter the code, and you have an administrator account. (Ports taken on your host? See [If 8000 or 8443 is already taken](docs/installation.md#if-8000-or-8443-is-already-taken) — the HTTPS port must move together with `MNEMOMATIC_HTTPS_PORT`.) From there: create a token under **My tokens**, paste it into your client with the snippets on **Connect an agent**, and enable HTTPS under **Admin → HTTPS**.
 
 Both Docker images run as an unprivileged user (uid 65532) — nothing in the server needs root. `GET /health` reports liveness without credentials, and the images ship a `HEALTHCHECK` that polls it, so `docker compose up --wait` and orchestrator readiness gates work with no configuration. Everything else requires a signed-in user or a token.
 
@@ -116,4 +116,6 @@ The database records which embedding model built its vector index, so swapping m
 
 ## License
 
-[Apache License 2.0](LICENSE)
+[Apache License 2.0](LICENSE) for the software and this repository.
+
+**Bundled models.** The published images bundle Apache-2.0 models only (Arctic Embed xs, GTE multilingual base). EmbeddingGemma and Amaretto Embed 148m are Model Derivatives of Google's Gemma under the [Gemma Terms of Use](https://ai.google.dev/gemma/terms); no image with them is published. Building one from source downloads their weights and means accepting those terms, including the [Gemma Prohibited Use Policy](https://ai.google.dev/gemma/prohibited_use_policy); the build puts the terms and a `NOTICE` in the image at `/app/model/`. This repository itself contains no model weights.

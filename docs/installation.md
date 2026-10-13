@@ -10,11 +10,13 @@ Nothing else: TLS certificates come from the server's own certificate authority 
 
 | Profile           | Image size | Embeddings                          | Semantic search |
 | ----------------- | ---------- | ----------------------------------- | --------------- |
-| `full` (default)  | ~320–650 MB | Built-in ONNX model (CPU), selectable at build time | Yes |
+| `full` (default)  | ~320 MB    | Built-in Arctic Embed xs (CPU)      | Yes |
+| `full-gte-multilingual-base` | ~650 MB | Built-in GTE multilingual base | Yes |
+| `full` built from source with `EMBED_MODEL` | ~320–650 MB | Any of the four models, including the two Gemma-derived ones | Yes |
 | `lite` + Ollama   | ~120 MB    | External via `MNEMOMATIC_EMBED_URL` | Yes             |
 | `lite` (FTS-only) | ~120 MB    | None                                | No              |
 
-Choose the profile that fits your setup. The `full` image is self-contained and works out of the box; its bundled embedding model is chosen with the `EMBED_MODEL` build argument (see [Choosing the built-in embedding model](#choosing-the-built-in-embedding-model)). The `lite` image is significantly smaller and delegates embedding to an Ollama instance (or any compatible API), or runs keyword-only search if no embedder is configured.
+Choose the profile that fits your setup. The `full` images are self-contained and work out of the box: `-full` bundles Arctic Embed xs and `-full-gte-multilingual-base` bundles GTE multilingual base, both Apache-2.0. EmbeddingGemma and Amaretto Embed 148m are under the Gemma Terms of Use and are not published as images: build them from source with the `EMBED_MODEL` build argument (see [Choosing the built-in embedding model](#choosing-the-built-in-embedding-model)). The `lite` image is significantly smaller and delegates embedding to an Ollama instance (or any compatible API), or runs keyword-only search if no embedder is configured.
 
 ## Upgrading from v2.x to v3.0
 
@@ -325,13 +327,20 @@ Any OpenAI-compatible embedding endpoint works the same way — Ollama's `/v1/em
 
 ### Available image tags
 
+Every tag is a multi-platform manifest for `linux/amd64` and `linux/arm64`.
+
 | Tag | Description |
 |-----|-------------|
-| `latest-full` | Latest release, built-in ONNX embeddings |
+| `latest-full` | Latest release, built-in Arctic Embed xs (384 dims, English, Apache-2.0) |
+| `latest-full-gte-multilingual-base` | Latest release, built-in GTE multilingual base (768 dims, ~70 languages, Apache-2.0) |
 | `latest-lite` | Latest release, no ML stack |
-| `3.0.0-full` / `3.0.0-lite` | Exact version |
-| `3.0-full` / `3.0-lite` | Minor floating tag |
-| `3-full` / `3-lite` | Major floating tag |
+| `3.0.0-<flavor>` | Exact version, e.g. `3.0.0-full-gte-multilingual-base` |
+| `3.0-<flavor>` | Minor floating tag |
+| `3-<flavor>` | Major floating tag |
+
+**Model licences.** The published images bundle Apache-2.0 models only. EmbeddingGemma-300m and Amaretto Embed 148m are Model Derivatives of Google's Gemma under the [Gemma Terms of Use](https://ai.google.dev/gemma/terms), so no image with them is published: build one yourself with `EMBED_MODEL=embeddinggemma` or `EMBED_MODEL=amaretto-embed-148m`, which downloads the weights from Hugging Face and means accepting those terms, including the use restrictions of Section 3.2 and the [Gemma Prohibited Use Policy](https://ai.google.dev/gemma/prohibited_use_policy). The build places the terms at `/app/model/LICENSE` and a `NOTICE` naming what was modified (ONNX export and quantization) in the image, so an image you distribute within your organisation carries them.
+
+The model is part of the image, and the database records which model built its index: moving a data directory between flavours is a model switch, which the server refuses to start on until `MNEMOMATIC_REINDEX=auto` re-embeds everything once (see [Switching embedding models](#switching-embedding-models)).
 
 ---
 
@@ -356,7 +365,7 @@ The first build takes a few minutes — it builds the web UI in a Node stage and
 
 ### Choosing the built-in embedding model
 
-The `full` image bundles one of four embedding models, selected with the `EMBED_MODEL` build argument:
+A `full` image bundles one of four embedding models. Two are published (`-full` is Arctic, `-full-gte-multilingual-base` is GTE, see [Available image tags](#available-image-tags)); the two Gemma-derived ones are built from source, selecting with the `EMBED_MODEL` build argument:
 
 | `EMBED_MODEL` | Dimensions | Languages | Query embed (CPU) | Model size | RAM (running) | Notes |
 | ------------- | ---------- | --------- | ----------------- | ---------- | ------------- | ----- |

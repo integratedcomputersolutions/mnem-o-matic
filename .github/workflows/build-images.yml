@@ -8,6 +8,14 @@ name: Build images
 # themselves push (by digest) on a release, so the split has to be at the
 # caller. The jobs here declare no permissions of their own: they inherit
 # exactly what the caller grants.
+#
+# Flavours: `lite` (no ML stack) and one `full` image per published embedding
+# model. The Arctic one keeps the plain `-full` suffix it always had; GTE is
+# `-full-gte-multilingual-base`. The two Gemma-derived models (EmbeddingGemma,
+# Amaretto) are deliberately not published: their weights carry the Gemma
+# Terms of Use, and users build those images from source and accept the terms
+# themselves. A check run builds only `lite` and `full`, the pair that
+# exercises both Dockerfile targets; a release builds the published set.
 
 on:
   workflow_call:
@@ -23,25 +31,32 @@ env:
 
 jobs:
   build:
-    name: Build ${{ matrix.target }} (${{ matrix.platform }})
+    name: Build ${{ matrix.flavor }} (${{ matrix.platform }})
     runs-on: ${{ matrix.runner }}
 
     strategy:
       fail-fast: false
+      # Each flavour on both architectures. The release list is the check
+      # list plus the other published model.
       matrix:
+        flavor: ${{ fromJSON(inputs.publish && '["lite", "full", "full-gte-multilingual-base"]' || '["lite", "full"]') }}
+        platform: [linux/amd64, linux/arm64]
         include:
-          - target: lite
-            platform: linux/amd64
+          - platform: linux/amd64
             runner: ubuntu-latest
-          - target: lite
-            platform: linux/arm64
+            arch: amd64
+          - platform: linux/arm64
             runner: ubuntu-24.04-arm
-          - target: full
-            platform: linux/amd64
-            runner: ubuntu-latest
-          - target: full
-            platform: linux/arm64
-            runner: ubuntu-24.04-arm
+            arch: arm64
+          - flavor: lite
+            target: lite
+            model: arctic-embed-xs       # unused by the lite target; the build arg must still parse
+          - flavor: full
+            target: full
+            model: arctic-embed-xs
+          - flavor: full-gte-multilingual-base
+            target: full
+            model: gte-multilingual-base
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -63,7 +78,7 @@ jobs:
         with:
           images: ${{ env.IMAGE }}
           flavor: |
-            suffix=-${{ matrix.target }},onlatest=true
+            suffix=-${{ matrix.flavor }},onlatest=true
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -79,44 +94,46 @@ jobs:
           platforms: ${{ matrix.platform }}
           push: ${{ inputs.publish }}
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: MNEMOMATIC_BUILD=${{ github.sha }}
+          build-args: |
+            MNEMOMATIC_BUILD=${{ github.sha }}
+            EMBED_MODEL=${{ matrix.model }}
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=${{ inputs.publish }}
-          # One cache per matrix leg, so the four builds do not overwrite each other's.
-          cache-from: type=gha,scope=${{ matrix.target }}-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.target }}-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
+          # One cache per matrix leg, so the builds do not overwrite each other's.
+          cache-from: type=gha,scope=${{ matrix.flavor }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.flavor }}-${{ matrix.arch }}
 
       - name: Export digest
         if: inputs.publish
         run: |
-          mkdir -p /tmp/digests/${{ matrix.target }}
+          mkdir -p /tmp/digests/${{ matrix.flavor }}
           digest="${{ steps.build.outputs.digest }}"
-          touch "/tmp/digests/${{ matrix.target }}/${digest#sha256:}"
+          touch "/tmp/digests/${{ matrix.flavor }}/${digest#sha256:}"
 
       - name: Upload digest
         if: inputs.publish
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
-          name: digest-${{ matrix.target }}-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
-          path: /tmp/digests/${{ matrix.target }}
+          name: digest-${{ matrix.flavor }}-${{ matrix.arch }}
+          path: /tmp/digests/${{ matrix.flavor }}
           if-no-files-found: error
           retention-days: 1
 
   merge:
-    name: Merge ${{ matrix.target }} manifest
+    name: Merge ${{ matrix.flavor }} manifest
     runs-on: ubuntu-latest
     if: inputs.publish
     needs: build
 
     strategy:
       matrix:
-        target: [lite, full]
+        flavor: [lite, full, full-gte-multilingual-base]
 
     steps:
       - name: Download digests
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
-          path: /tmp/digests/${{ matrix.target }}
-          pattern: digest-${{ matrix.target }}-*
+          path: /tmp/digests/${{ matrix.flavor }}
+          pattern: digest-${{ matrix.flavor }}-*
           merge-multiple: true
 
       - name: Set up Docker Buildx
@@ -135,7 +152,7 @@ jobs:
         with:
           images: ${{ env.IMAGE }}
           flavor: |
-            suffix=-${{ matrix.target }},onlatest=true
+            suffix=-${{ matrix.flavor }},onlatest=true
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -143,7 +160,7 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Create and push multi-platform manifest
-        working-directory: /tmp/digests/${{ matrix.target }}
+        working-directory: /tmp/digests/${{ matrix.flavor }}
         run: |
           # Word splitting is the point: one -t per tag, one digest per file.
           # shellcheck disable=SC2046
