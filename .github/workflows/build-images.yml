@@ -9,10 +9,13 @@ name: Build images
 # caller. The jobs here declare no permissions of their own: they inherit
 # exactly what the caller grants.
 #
-# Flavours: `lite` (no ML stack) and one `full` image per bundled embedding
-# model. The Arctic one keeps the plain `-full` suffix it always had; the
-# others are `-full-<model>`. A check run builds only `lite` and `full`, the
-# pair that exercises both Dockerfile targets; a release builds every model.
+# Flavours: `lite` (no ML stack) and one `full` image per published embedding
+# model. The Arctic one keeps the plain `-full` suffix it always had; GTE is
+# `-full-gte-multilingual-base`. The two Gemma-derived models (EmbeddingGemma,
+# Amaretto) are deliberately not published: their weights carry the Gemma
+# Terms of Use, and users build those images from source and accept the terms
+# themselves. A check run builds only `lite` and `full`, the pair that
+# exercises both Dockerfile targets; a release builds the published set.
 
 on:
   workflow_call:
@@ -34,9 +37,9 @@ jobs:
     strategy:
       fail-fast: false
       # Each flavour on both architectures. The release list is the check
-      # list plus the three other models.
+      # list plus the other published model.
       matrix:
-        flavor: ${{ fromJSON(inputs.publish && '["lite", "full", "full-gte-multilingual-base", "full-embeddinggemma", "full-amaretto-embed-148m"]' || '["lite", "full"]') }}
+        flavor: ${{ fromJSON(inputs.publish && '["lite", "full", "full-gte-multilingual-base"]' || '["lite", "full"]') }}
         platform: [linux/amd64, linux/arm64]
         include:
           - platform: linux/amd64
@@ -54,12 +57,6 @@ jobs:
           - flavor: full-gte-multilingual-base
             target: full
             model: gte-multilingual-base
-          - flavor: full-embeddinggemma
-            target: full
-            model: embeddinggemma
-          - flavor: full-amaretto-embed-148m
-            target: full
-            model: amaretto-embed-148m
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -129,7 +126,7 @@ jobs:
 
     strategy:
       matrix:
-        flavor: [lite, full, full-gte-multilingual-base, full-embeddinggemma, full-amaretto-embed-148m]
+        flavor: [lite, full, full-gte-multilingual-base]
 
     steps:
       - name: Download digests
