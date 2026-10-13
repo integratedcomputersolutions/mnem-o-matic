@@ -25,11 +25,11 @@ from mnemomatic.tlsca import CertHolder, TlsError, TlsState, fingerprint, valida
 class TestValidateName(unittest.TestCase):
     def test_accepts_dns_names(self):
         self.assertEqual(validate_name(" Memory.Example. "), "memory.example")
-        self.assertEqual(validate_name("ariosto"), "ariosto")
+        self.assertEqual(validate_name("memory"), "memory")
         self.assertEqual(validate_name("a-b.c0"), "a-b.c0")
 
     def test_rejects_ips_and_junk(self):
-        for bad in ("", "192.168.0.114", "::1", "[::1]", "-bad.example", "bad-.example", "a b", "x" * 254, "under_score"):
+        for bad in ("", "192.0.2.1", "::1", "[::1]", "-bad.example", "bad-.example", "a b", "x" * 254, "under_score"):
             with self.subTest(bad=bad):
                 with self.assertRaises(TlsError) as cm:
                     validate_name(bad)

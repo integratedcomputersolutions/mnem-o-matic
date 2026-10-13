@@ -20,7 +20,7 @@ Choose the profile that fits your setup. The `full` images are self-contained an
 
 ## Upgrading from v2.x to v3.0
 
-v3.0 replaces the single shared API key and the viewer's shared secret with **users and personal API tokens**, serves HTTPS itself, and ships a new web UI. Your content is untouched — the database migrates forward automatically on first start (schema version 4 → 5) — but every client's credential changes, so plan a few minutes.
+v3.0 replaces the single shared API key and the viewer's shared secret with **users and personal API tokens**, serves HTTPS itself, and ships a new web UI. Your content is untouched — the database migrates forward automatically on first start (schema version 4 → 8) — but every client's credential changes, so plan a few minutes.
 
 ### What breaks
 
@@ -501,6 +501,7 @@ Environment variables (set in `docker-compose.yml` or passed to Docker):
 | `MNEMOMATIC_TLS_DIR`        | `<database directory>/tls`  | Where the CA and server certificate live (`ca.crt`, `ca.key`, `leaf.crt`, `leaf.key`, optional `custom.crt`/`custom.key`) |
 | `MNEMOMATIC_ADMIN_PASSWORD` | *(unset)*                   | First start only: create the `admin` user with this password instead of printing a setup code (10+ characters). Ignored once any user exists. |
 | `MNEMOMATIC_TRUSTED_PROXIES` | *(unset)*                  | Reverse proxies whose `X-Forwarded-For` / `X-Forwarded-Proto` are believed: comma-separated IPs or CIDRs, or `*` when only the proxy can reach the server port. Unset means the socket peer is treated as the client. See [Behind your own reverse proxy](#behind-your-own-reverse-proxy). |
+| `MNEMOMATIC_CORS_ORIGINS`   | *(unset)*                   | Browser-based MCP clients only: comma-separated origins (`scheme://host:port`) a browser may call the server from. `*` opens it to any website holding a token, and is warned about at startup; unset sends no CORS headers. |
 | `MNEMOMATIC_PROXY_SECRET`   | *(unset)*                   | Turns on trusted-proxy sign-in: a gateway sending this as its bearer token may name the user per request, and the user is created on first sight. 32+ characters. Never shown in the UI or logs. See [Behind an identity-aware proxy](#behind-an-identity-aware-proxy). |
 | `MNEMOMATIC_PROXY_USER_HEADER` | `X-Mnemomatic-User`      | The header the proxy names the user in (an email address, usually). Read only when the request carries the proxy secret. |
 | `MNEMOMATIC_PROXY_NAME_HEADER` | *(unset)*                | Optional header carrying a display name for the proxy's user. |
@@ -519,6 +520,7 @@ Environment variables (set in `docker-compose.yml` or passed to Docker):
 | `MNEMOMATIC_EMBED_API`      | `openai`                    | Endpoint wire format: `openai` (llama.cpp, vLLM, LM Studio, Ollama `/v1/embeddings`) or `ollama` (native `/api/embeddings`) |
 | `MNEMOMATIC_EMBED_MODEL`    | *(empty)*                   | Model name passed to the external embedder               |
 | `MNEMOMATIC_EMBED_CONCURRENCY` | `8`                      | Parallel requests to the external embedder when embedding chunked documents |
+| `MNEMOMATIC_EMBED_TIMEOUT`  | `30`                        | Seconds to wait for one external embedding call. A call that times out is logged and treated as no embedding: a store keeps the item but without a vector (full-text search only until a reindex), and a hybrid search degrades to full-text for that request |
 | `MNEMOMATIC_EMBED_DIM`      | *(bundled model's; else 384)* | Embedding dimension — must match the model's output. Defaults to the bundled model's dimension from `model_config.json`; 384 without a config file. |
 | `MNEMOMATIC_EMBED_QUERY_PREFIX` | *(bundled model's; else empty)* | Task prefix prepended to search queries before embedding (asymmetric models). Defaults from `model_config.json`; empty when `MNEMOMATIC_EMBED_URL` is set. |
 | `MNEMOMATIC_EMBED_DOC_PREFIX` | *(bundled model's; else empty)* | Task prefix prepended to stored content before embedding (asymmetric models). Defaults from `model_config.json`; empty when `MNEMOMATIC_EMBED_URL` is set. |
