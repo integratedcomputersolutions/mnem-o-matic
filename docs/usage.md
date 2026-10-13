@@ -427,7 +427,7 @@ Mnem-O-matic validates all inputs to prevent silent failures:
 | **Namespace length** | ≤ 100 chars | Used for grouping related entries |
 | **Content length** | ≤ 100,000 chars | Documents, notes, facts |
 | **Title length** | ≤ 500 chars | Document/note titles, knowledge subjects |
-| **Search query** | Non-empty, ≤ 10,000 chars | Empty queries rejected; very long queries capped |
+| **Search query** | Non-empty | Empty queries rejected |
 | **Search results** | ≤ 100 results | Limited to prevent memory exhaustion; use smaller limits for faster results |
 | **Tags per entry** | ≤ 100 tags | Too many tags degrade performance |
 | **Tag length** | ≤ 50 chars each | Keep tags short and descriptive |
@@ -592,3 +592,4 @@ MCP resources provide read-only access to browse stored data:
 | `mnemomatic://document/{id}`         | Get a specific document        |
 | `mnemomatic://knowledge-entry/{id}`  | Get a specific knowledge entry |
 | `mnemomatic://note/{id}`             | Get a specific note            |
+| `mnemomatic://health`                | Server status: version, build commit, embedding mode |
