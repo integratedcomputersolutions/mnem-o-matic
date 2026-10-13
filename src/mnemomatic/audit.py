@@ -16,15 +16,31 @@ to least trustworthy:
   detail, never as the actor.
 
 Tool handlers run deep inside the MCP app with no view of the HTTP request,
-so RequestMetaMiddleware captures these fields into a contextvar that the
-audit writer reads. Pure ASGI (no BaseHTTPMiddleware) so streamed MCP
-responses pass through untouched. It sits *inside* AuthMiddleware, which is
-where the principal in ``scope["state"]`` comes from.
+so RequestMetaMiddleware captures these fields into a record that
+``request_meta()`` hands to the audit writer, the read-only gate and the
+embedder. The record is kept in two places, and the order matters:
+
+- On the request's ASGI scope, under ``scope["state"]``. The MCP SDK runs
+  every tool call inside the task of the *session*, which was started while
+  serving that session's ``initialize`` request and so inherits that
+  request's contextvars for its whole life. A contextvar alone would make
+  every later call on the session act as whoever initialized it, including
+  a read-only token that merely reuses a write token's session id. The SDK
+  attaches the Starlette request of the *current* call to its request
+  context, so the record is read from there first.
+- In a contextvar, for the plain HTTP routes (``/export``, ``/api``) and
+  for the batch embedding workers, which run under a copy of the calling
+  context. Outside any request it is the shared empty record.
+
+Pure ASGI (no BaseHTTPMiddleware) so streamed MCP responses pass through
+untouched. It sits *inside* AuthMiddleware, which is where the principal in
+``scope["state"]`` comes from.
 """
 
 import logging
 from contextvars import ContextVar
 
+from mcp.server.lowlevel.server import request_ctx
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 logger = logging.getLogger("mnemomatic")
@@ -35,6 +51,7 @@ _EMPTY = {
     "token_id": None, "token_hint": None, "token_name": None, "token_scope": None,
 }
 _request_meta: ContextVar[dict] = ContextVar("mnemomatic_request_meta", default=_EMPTY)
+_SCOPE_KEY = "mnemomatic_request_meta"
 
 
 def request_meta() -> dict:
@@ -42,8 +59,22 @@ def request_meta() -> dict:
     (user-agent), ip, and — when authenticated — user, user_id, is_admin,
     via ("session", "token" or "proxy"), external_id (a trusted proxy's
     identity for the user, usually an email), token_id, token_hint,
-    token_name, token_scope. Outside a request (bootstrap, reindex, the
-    CLI) it is the shared empty record: never write into it."""
+    token_name, token_scope.
+
+    Inside an MCP tool, prompt or resource handler this is the record of the
+    HTTP request carrying *that* call, whichever request opened the session.
+    Elsewhere it is the record of the request being served, and outside a
+    request (bootstrap, reindex, the CLI) the shared empty record: never
+    write into it."""
+    try:
+        request = request_ctx.get().request
+    except LookupError:
+        request = None
+    scope = getattr(request, "scope", None)
+    if scope is not None:
+        meta = scope.get("state", {}).get(_SCOPE_KEY)
+        if meta is not None:
+            return meta
     return _request_meta.get()
 
 
@@ -102,6 +133,7 @@ class RequestMetaMiddleware:
                         external_id=principal.user.external_id,
                         token_id=principal.token_id, token_hint=principal.token_hint,
                         token_name=principal.token_name, token_scope=principal.token_scope)
+        scope.setdefault("state", {})[_SCOPE_KEY] = meta
         token = _request_meta.set(meta)
         try:
             await self.app(scope, receive, send)
