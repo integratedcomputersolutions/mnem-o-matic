@@ -119,9 +119,11 @@ EOF
 FROM builder-base AS model-builder
 
 ARG EMBED_MODEL
+# Licence texts shipped beside the weights of models whose terms require it.
+COPY deploy/licenses /licenses
 
 RUN python3 << 'PYTHON_EOF'
-import hashlib, json, os, urllib.request
+import hashlib, json, os, shutil, urllib.request
 
 MODELS = {
     # Snowflake's retrain of all-MiniLM-L6-v2, which this replaces: same
@@ -169,6 +171,9 @@ MODELS = {
         "config": {"model": "embeddinggemma-300m", "dim": 768, "max_tokens": 2048,
                    "query_prefix": "task: search result | query: ",
                    "doc_prefix": "title: none | text: "},
+        # Gemma Terms of Use: the terms and a notice travel with the weights.
+        "bundled": [("/licenses/gemma-terms-of-use.md", "LICENSE"),
+                    ("/licenses/embeddinggemma-NOTICE.md", "NOTICE")],
     },
     # Weight-only INT8 (MatMulNBits): activations stay FP32, so fidelity holds
     # at long inputs (cos vs torch >= 0.999 through 2048 tokens) and the weights
@@ -182,6 +187,11 @@ MODELS = {
              "8bf1cc9663913c7fc7c3d3787fc42869d5a120ebeef297c3e663f4bf5a5221ef"),
             ("tokenizer.json", "tokenizer.json",
              "557d686df474db4ed5612819752c7b1e9996e697170f9ae74577ee616cb4179c"),
+            # Gemma Terms of Use and the publisher's notice, from the same revision.
+            ("LICENSE", "LICENSE",
+             "3b65bc46747423037f7ca57af25b885a7be421948d7a81ca02b0cb038177ec3d"),
+            ("NOTICE", "NOTICE",
+             "09bdc6464c484cac8001f20061d1ec249d7f6fd0b24263d5af36d93069fa7420"),
         ],
         "config": {"model": "amaretto-embed-148m", "dim": 768, "max_tokens": 2048,
                    "query_prefix": "task: search result | query: ",
@@ -209,6 +219,10 @@ for remote, local, expected in model["files"]:
     if h.hexdigest() != expected:
         raise SystemExit(f"SHA256 mismatch for {remote}: got {h.hexdigest()}, expected {expected}")
     print(f"  OK {local}: {os.path.getsize(dest) / 1024 / 1024:.1f} MB, sha256 {expected}")
+
+for src, local in model.get("bundled", []):
+    shutil.copyfile(src, f"/app/model/{local}")
+    print(f"  bundled {local} from {src}")
 
 with open("/app/model/model_config.json", "w") as f:
     json.dump(model["config"], f, indent=2)
