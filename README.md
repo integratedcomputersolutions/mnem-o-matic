@@ -116,4 +116,6 @@ The database records which embedding model built its vector index, so swapping m
 
 ## License
 
-[Apache License 2.0](LICENSE)
+[Apache License 2.0](LICENSE) for the software and this repository.
+
+**Bundled models.** The `-full` and `-full-gte-multilingual-base` images bundle Apache-2.0 models. The `-full-embeddinggemma` and `-full-amaretto-embed-148m` images bundle Model Derivatives of Google's Gemma and are distributed under and subject to the [Gemma Terms of Use](https://ai.google.dev/gemma/terms) in addition: by pulling or using either image you accept those terms, including the use restrictions of their Section 3.2 and the [Gemma Prohibited Use Policy](https://ai.google.dev/gemma/prohibited_use_policy). Each of those images carries a copy of the terms at `/app/model/LICENSE` and a `NOTICE` describing the modifications. This repository itself contains no model weights.

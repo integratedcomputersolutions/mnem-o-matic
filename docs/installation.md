@@ -339,6 +339,8 @@ Every tag is a multi-platform manifest for `linux/amd64` and `linux/arm64`.
 | `3.0-<flavor>` | Minor floating tag |
 | `3-<flavor>` | Major floating tag |
 
+**Model licences.** Arctic Embed xs and GTE multilingual base are Apache-2.0. EmbeddingGemma-300m and Amaretto Embed 148m are Model Derivatives of Google's Gemma: the two images that bundle them are distributed under and subject to the [Gemma Terms of Use](https://ai.google.dev/gemma/terms) in addition to this project's Apache-2.0, and using them means accepting those terms, including the use restrictions of Section 3.2 and the [Gemma Prohibited Use Policy](https://ai.google.dev/gemma/prohibited_use_policy). Each carries the terms at `/app/model/LICENSE` and a `NOTICE` naming what was modified (ONNX export and quantization). Pick `-full`, `-full-gte-multilingual-base` or `-lite` if you cannot accept them.
+
 The model is part of the image, and the database records which model built its index: moving a data directory between flavours is a model switch, which the server refuses to start on until `MNEMOMATIC_REINDEX=auto` re-embeds everything once (see [Switching embedding models](#switching-embedding-models)).
 
 ---
