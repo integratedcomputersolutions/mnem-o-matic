@@ -9,7 +9,7 @@
   import Empty from '../components/Empty.svelte';
   import { api } from '../lib/api.js';
   import { remote } from '../lib/load.svelte.js';
-  import { session, isAdmin } from '../lib/session.svelte.js';
+  import { session, isAdmin, viaProxy } from '../lib/session.svelte.js';
   import { seg, itemHref } from '../lib/router.svelte.js';
   import { fmtNumber, fmtRelative, fmtVersion } from '../lib/format.js';
 
@@ -67,7 +67,11 @@
       </div>
       <div class="row between"><span class="dim">Version</span><span class="mono">{fmtVersion(settings?.version, settings?.build) || '…'}</span></div>
     </div>
-    <p class="help mt">Agents connect with a personal token — see <a href="/connect">Connect an agent</a>.</p>
+    {#if viaProxy()}
+      <p class="help mt">Agents connect through your portal, which signs them in as you.</p>
+    {:else}
+      <p class="help mt">Agents connect with a personal token — see <a href="/connect">Connect an agent</a>.</p>
+    {/if}
   </Card>
 
   <Card title="Recent activity" subtitle="The audit trail, newest first" flush>
