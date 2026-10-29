@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import mnemomatic.db
 import mnemomatic.server as server
-from mnemomatic import config
+from mnemomatic import config, reindex
 from mnemomatic.db import SCHEMA_VERSION, Database
 from mnemomatic.models import Document, Knowledge, Note
 from mnemomatic import runtime
@@ -155,6 +155,41 @@ class TestRunReindex(unittest.TestCase):
             emb = small_embedder.embed("s: f")
             results = self.db.search_vec(emb, table="knowledge", namespace="other")
             self.assertEqual([r.id for r in results], [self.k.id])
+
+    def test_status_reports_the_last_run(self):
+        server._run_reindex()
+        status = reindex.status()
+        self.assertFalse(status["running"])
+        self.assertEqual((status["trigger"], status["actor"], status["error"]), ("startup", None, None))
+        self.assertEqual(status["counts"], {"documents": 2, "knowledge": 1, "notes": 1, "failed": 0})
+        self.assertEqual((status["done"], status["total"]), (4, 4))
+        [event] = self.db.list_audit(op="reindex")
+        self.assertEqual((event["detail"]["documents"], event["detail"]["failed"], event["actor"]), (2, 0, None))
+
+    def test_an_embedder_that_does_not_answer_leaves_the_index_alone(self):
+        """An administrator's run against an embedder that isn't answering (a wrong address, a
+        refused token) is refused before the index is emptied: an empty index stamped with the
+        current identity would look up to date while semantic search returned nothing."""
+        self.db.set_embedding("document", self.doc.id, self.embedder.embed("small\nshort body"))
+        down = FakeEmbedder()
+        down.embed = lambda text: (_ for _ in ()).throw(RuntimeError("Embedding service returned HTTP 401"))
+        with patch.object(runtime, "_embedder", return_value=down):
+            with self.assertRaises(reindex.EmbedderUnavailable):
+                reindex.start(actor="root")
+        self.assertEqual(self._vec_count("vec_documents"), 1)  # kept
+        self.assertEqual(self.db.list_audit(op="reindex"), [])
+        self.assertFalse(reindex.status()["running"])
+        self.assertIsNone(reindex.status()["error"])  # nothing ran
+
+    def test_a_second_run_is_refused_while_one_is_on(self):
+        reindex._state["running"] = True
+        try:
+            with self.assertRaises(reindex.ReindexBusy):
+                reindex.run(trigger="admin", actor="root")
+            with self.assertRaises(reindex.ReindexBusy):
+                reindex.start(actor="root")
+        finally:
+            reindex._state["running"] = False
 
     def test_reindex_counts_failures_and_continues(self):
         flaky = FakeEmbedder()

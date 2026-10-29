@@ -131,6 +131,8 @@ docker compose logs -f mnemomatic
 
 `MNEMOMATIC_REINDEX=auto` is safe to leave set permanently: it does nothing unless the configured embedder differs from the one that built the index. If your model did change, startup rebuilds the vector index and re-embeds every item before serving — the port stays closed until that finishes, so a refused connection during the run means "still working", not "broken". Content, timestamps, revisions, and the audit log are untouched; only vectors are recomputed.
 
+**Re-embedding by hand.** An administrator can run the same re-index at any time from the web UI: **Admin → Settings → Semantic index → Re-embed everything**. It runs in the background while the server keeps serving (semantic and hybrid search answer from whatever is re-embedded so far; fulltext is unaffected), the card shows its progress, and the run is recorded in the audit log under the administrator's name. It is for the case the identity check cannot see: an external embedding endpoint whose model was swapped behind the same URL, with the same configured name and dimension. The API behind the button is `GET`/`POST /api/admin/reindex` (admins only; `409` while a run is on, `503` when the embedder doesn't answer, in which case the index is left untouched).
+
 ### 4. Verify
 
 ```bash

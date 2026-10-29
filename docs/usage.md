@@ -95,7 +95,7 @@ The web UI is served at the root of the same port as the MCP endpoint. Stored co
 | Account | everyone | Change password |
 | Users | admins | Add, disable, reset password, change role, delete |
 | HTTPS | admins | Name the host, trust the CA, confirm — see [HTTPS](installation.md#https) |
-| Settings | admins | The configuration the server runs with; export download |
+| Settings | admins | The configuration the server runs with; export download; the semantic index's state and **Re-embed everything** (a re-index in the background, progress shown, recorded in the activity trail — see [Switching embedding models](installation.md#switching-embedding-models)) |
 
 <div align="center">
 <table>

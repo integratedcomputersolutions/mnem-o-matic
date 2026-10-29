@@ -71,6 +71,69 @@ class ApiCase(unittest.TestCase):
         return asyncio.run(go())
 
 
+class TestReindex(ApiCase):
+    """An administrator re-embeds the store from Settings: POST starts it in the background, GET
+    shows progress and the last run; non-admins get 403, no embedder 503, a run already on 409."""
+
+    def setUp(self):
+        super().setUp()
+        from mnemomatic import reindex
+        self.reindex = reindex
+        reindex._state.update(running=False, trigger=None, actor=None, started_at=None, finished_at=None,
+                              done=0, total=0, counts=None, error=None)
+        self.fx.db.store_document(Document(namespace="ns", title="T", content="body"), None)
+        self.fx.db.store_note(Note(namespace="ns", title="N", content="c"), None)
+
+    def _wait(self):
+        import time
+        for _ in range(200):
+            status = self.client.get("/api/admin/reindex", cookies=self.admin()).json()
+            if not status["running"]:
+                return status
+            time.sleep(0.02)
+        self.fail("the re-index didn't finish")
+
+    def test_admins_only(self):
+        self.assertEqual(self.client.get("/api/admin/reindex", cookies=self.user()).status_code, 403)
+        self.assertEqual(self.post("/api/admin/reindex", cookies=self.user()).status_code, 403)
+        self.assertEqual(self.client.get("/api/admin/reindex").status_code, 401)
+
+    def test_status_before_any_run(self):
+        resp = self.client.get("/api/admin/reindex", cookies=self.admin())
+        self.assertEqual(resp.status_code, 200)
+        status = resp.json()
+        self.assertEqual((status["running"], status["counts"]), (False, None))
+
+    def test_no_embedder_means_no_run(self):
+        resp = self.post("/api/admin/reindex", cookies=self.admin())
+        self.assertEqual((resp.status_code, resp.json()["error"]), (503, "embedder_unavailable"))
+        self.assertEqual(self.events("reindex"), [])
+
+    def test_a_run_re_embeds_everything_and_names_who_asked(self):
+        from tests._support import FakeEmbedder
+        with patch.object(runtime, "_embedder", return_value=FakeEmbedder()):
+            resp = self.post("/api/admin/reindex", cookies=self.admin())
+            self.assertEqual(resp.status_code, 202, resp.text)
+            self.assertEqual(resp.json()["trigger"], "admin")
+            status = self._wait()
+        self.assertEqual(status["counts"], {"documents": 1, "knowledge": 0, "notes": 1, "failed": 0})
+        self.assertEqual((status["actor"], status["error"], status["done"], status["total"]),
+                         (self.fx.admin.username, None, 2, 2))
+        [event] = self.events("reindex")
+        self.assertEqual((event["actor"], event["detail"]["mode"], event["detail"]["notes"]),
+                         (self.fx.admin.username, "admin", 1))
+
+    def test_a_run_already_on_is_refused(self):
+        from tests._support import FakeEmbedder
+        self.reindex._state["running"] = True
+        try:
+            with patch.object(runtime, "_embedder", return_value=FakeEmbedder()):
+                resp = self.post("/api/admin/reindex", cookies=self.admin())
+        finally:
+            self.reindex._state["running"] = False
+        self.assertEqual((resp.status_code, resp.json()["error"]), (409, "reindex_running"))
+
+
 class TestConventions(ApiCase):
     def test_no_store_and_security_headers(self):
         resp = self.client.get("/api/session")

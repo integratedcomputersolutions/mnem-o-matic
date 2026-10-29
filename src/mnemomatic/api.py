@@ -572,6 +572,21 @@ def build_api_routes(*, identity, db_getter, settings_info, first_run: FirstRun,
             info["https_mcp_url"] = f"{status['https_url']}/mcp"
         return _json(info)
 
+    async def reindex_status(request: Request):
+        from mnemomatic import reindex
+        return _json(reindex.status())
+
+    async def reindex_start(request: Request):
+        """Re-embed the whole store now, in the background; the status endpoint shows progress."""
+        from mnemomatic import reindex
+        try:
+            await run_in_threadpool(reindex.start, actor=_principal(request).user.username)
+        except reindex.ReindexBusy as e:
+            raise ApiError("reindex_running", 409, str(e))
+        except reindex.EmbedderUnavailable as e:
+            raise ApiError("embedder_unavailable", 503, str(e))
+        return _json(reindex.status(), 202)
+
     async def settings(request: Request):
         info = dict(settings_info())
         info["tls"] = https_status()
@@ -674,6 +689,8 @@ def build_api_routes(*, identity, db_getter, settings_info, first_run: FirstRun,
         route("/admin/https/name", https_name, ["POST"], admin=True),
         route("/admin/https/confirm", https_confirm, ["POST"], admin=True),
         route("/admin/https/disable", https_disable, ["POST"], admin=True),
+        route("/admin/reindex", reindex_status, ["GET"], admin=True),
+        route("/admin/reindex", reindex_start, ["POST"], admin=True),
         route("/instance-id", instance_id, ["GET"]),
         route("/connect", connect, ["GET"]),
         route("/settings", settings, ["GET"]),
