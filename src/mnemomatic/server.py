@@ -17,21 +17,16 @@ from pathlib import Path
 
 import uvicorn
 
-from mnemomatic import config, runtime
+from mnemomatic import config, reindex, runtime
 from mnemomatic.api import SecurityHeadersMiddleware, build_api_routes
 from mnemomatic.audit import RequestMetaMiddleware
 from mnemomatic.auth import AuthMiddleware, ProxyAuth
 from mnemomatic.bodylimit import BodyLimitMiddleware
 from mnemomatic.compact import CompactToolsMiddleware
-from mnemomatic.db import _SPECS, EMBEDDING_DIM
 from mnemomatic.spa import APP_DIR, ListenerTag, PlainPortGate, build_spa_routes, build_tls_routes
 from mnemomatic.tlsca import TlsState, start_renewal_thread
 from mnemomatic.identity import IdentityError, ensure_bootstrap
-from mnemomatic.runtime import (
-    _audit,
-    _embed_item,
-    mcp,
-)
+from mnemomatic.runtime import mcp
 
 # Imported for their registration side effects. The order below is the order
 # tools appear to a client, so it must not be alphabetised — an import sorter
@@ -53,13 +48,13 @@ logger = logging.getLogger("mnemomatic")
 
 
 def _run_reindex() -> None:
-    """Rebuild the vector index and re-embed every stored item.
+    """Rebuild the vector index and re-embed every stored item at startup (reindex.run does the
+    work; the Settings page runs the same in a thread).
 
-    Runs at startup after a change of embedding model, dimension, or task
-    prefixes — triggered by the recorded identity under MNEMOMATIC_REINDEX=auto,
-    or unconditionally under =1. Content tables are never modified (timestamps
-    included); only vectors and document chunks are recomputed. Items whose
-    embedding fails are logged and left FTS-only.
+    Runs after a change of embedding model, dimension, or task prefixes — triggered by the
+    recorded identity under MNEMOMATIC_REINDEX=auto, or unconditionally under =1. Content
+    tables are never modified (timestamps included); only vectors and document chunks are
+    recomputed. Items whose embedding fails are logged and left FTS-only.
     """
     database = runtime._db()
     if runtime._embedder() is None:
@@ -74,50 +69,7 @@ def _run_reindex() -> None:
             )
         logger.error("MNEMOMATIC_REINDEX is set but no embedder is available — skipping reindex")
         return
-
-    if config.REINDEX_MODE == "force":
-        logger.warning(
-            "Reindex starting (MNEMOMATIC_REINDEX=1): rebuilding vector index at dim %d and "
-            "re-embedding all content. Remove the flag after this run — it re-embeds on every "
-            "startup while set. MNEMOMATIC_REINDEX=auto re-embeds only when the embedder "
-            "actually changes, and is safe to leave set.",
-            EMBEDDING_DIM,
-        )
-    else:
-        logger.warning(
-            "Embedder changed — reindexing automatically (MNEMOMATIC_REINDEX=auto): rebuilding "
-            "vector index at dim %d and re-embedding all content before serving.",
-            EMBEDDING_DIM,
-        )
-    database.rebuild_vec_tables()
-
-    counts = {**dict.fromkeys(_SPECS, 0), "failed": 0}
-    for namespace in database.list_namespaces():
-        for spec in _SPECS.values():
-            for item in database.list_items(spec.item_type, namespace):
-                embedding, chunks = _embed_item(spec.item_type, item)
-                if spec.item_type == "document":
-                    database.replace_document_chunks(item.id, chunks)
-                # A chunked document is embedded through its chunks alone.
-                if embedding is not None:
-                    ok = database.set_embedding(spec.item_type, item.id, embedding)
-                else:
-                    ok = chunks is not None
-                if ok:
-                    counts[spec.table] += 1
-                else:
-                    counts["failed"] += 1
-                    logger.error("Reindex: embedding failed for %s %s (%r)", spec.item_type, item.id,
-                                 getattr(item, spec.title_field))
-
-    logger.info(
-        "Reindex complete: %d documents, %d knowledge, %d notes re-embedded, %d failed",
-        counts["documents"], counts["knowledge"], counts["notes"], counts["failed"],
-    )
-    # A whole-store re-embed is worth a trail entry: it explains why every
-    # item's vector changed at once, and under =auto nobody typed a command.
-    _audit("reindex", mode=config.REINDEX_MODE, dim=EMBEDDING_DIM,
-           model=config.embed_identity()["embed_model"] or None, **counts)
+    reindex.run(trigger="startup")
 
 
 # ── Tools ──
