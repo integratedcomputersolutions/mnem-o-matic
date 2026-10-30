@@ -79,7 +79,7 @@
           {#if r.finished_at}
             <dt>Last run</dt>
             <dd>
-              {new Date(r.finished_at).toLocaleString()}{#if r.actor} by {r.actor}{:else if r.trigger === 'startup'} at startup{/if}
+              {new Date(r.finished_at).toLocaleString()}{#if r.actor}{' '}by {r.actor}{:else if r.trigger === 'startup'}{' '}at startup{/if}
               {#if r.error}
                 <div><StatusBadge tone="bad" label="Stopped" /> <span class="small dim">{r.error}</span></div>
               {:else if r.counts}
