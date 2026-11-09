@@ -26,7 +26,7 @@ ARG EMBED_MODEL=arctic-embed-xs
 # Produces the Vite bundle the Python package ships. Node never reaches a
 # runtime image. Package manifests are copied first so `npm ci` caches
 # across edits to the UI sources.
-FROM --platform=$BUILDPLATFORM node:22-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d AS web-builder
+FROM --platform=$BUILDPLATFORM node:22-bookworm-slim@sha256:5ec23b7c622b00547753bc6ffd78085dd868a68aeb41c8e0a1418f033e13d96d AS web-builder
 
 WORKDIR /app/web
 COPY web/package.json web/package-lock.json ./
